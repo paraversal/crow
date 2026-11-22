@@ -40,8 +40,36 @@ const ALLOWED_SLOTS: [&str; 14] = [
     "base15", "base16", "base17",
 ];
 
-/// `native`, a local pack id, or a plugin pack's `<plugin>.<local>` id.
+/// Most packs a source can layer.
+pub const MAX_LAYERED_SOURCES: usize = 8;
+
+/// The sources in a (possibly layered) source string: `"lucide, linework"` is two packs,
+/// tried in order. A single id is a list of one.
+pub fn split_sources(source: &str) -> impl Iterator<Item = &str> {
+    source.split(',').map(str::trim).filter(|part| !part.is_empty())
+}
+
+/// `native`, a local pack id, or a plugin pack's `<plugin>.<local>` id; or a comma-separated
+/// list of them, which Crow tries in order (the first pack with an icon for an item wins, and
+/// `native` ends the list early).
 pub fn validate_source(source: &str) -> Result<(), String> {
+    if source.trim().is_empty() {
+        return Err("icon source is empty".into());
+    }
+    let parts: Vec<&str> = source.split(',').map(str::trim).collect();
+    if parts.len() > MAX_LAYERED_SOURCES {
+        return Err(format!("icon sources are limited to {MAX_LAYERED_SOURCES} packs"));
+    }
+    for (i, part) in parts.iter().enumerate() {
+        validate_one_source(part)?;
+        if parts[..i].contains(part) {
+            return Err(format!("icon source \"{part}\" is listed twice"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_one_source(source: &str) -> Result<(), String> {
     if source == NATIVE_ICON_SOURCE {
         return Ok(());
     }
@@ -63,8 +91,26 @@ pub fn validate_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The source string after the user picks `id` in the pack list: picking a pack that is
+/// not on the list adds it after the others, picking one that is removes it, and picking
+/// Native clears the list. An empty list is Native.
+pub fn toggle_source(current: &str, id: &str) -> String {
+    if id == NATIVE_ICON_SOURCE {
+        return NATIVE_ICON_SOURCE.to_owned();
+    }
+    let mut parts: Vec<&str> = split_sources(current).filter(|part| *part != NATIVE_ICON_SOURCE).collect();
+    match parts.iter().position(|part| *part == id) {
+        Some(at) => {
+            parts.remove(at);
+        }
+        None if parts.len() < MAX_LAYERED_SOURCES => parts.push(id),
+        None => {}
+    }
+    if parts.is_empty() { NATIVE_ICON_SOURCE.to_owned() } else { parts.join(",") }
+}
+
 pub fn is_native(source: &str) -> bool {
-    source == NATIVE_ICON_SOURCE
+    split_sources(source).all(|part| part == NATIVE_ICON_SOURCE)
 }
 
 /// A theme role or one of the spec's palette hues.
@@ -346,7 +392,7 @@ fn convert(raw: RawEntry, where_: &str) -> Result<IconEntry, String> {
     Ok(IconEntry { icon: raw.icon, color })
 }
 
-/// A glyph must be one safe, bundle-relative `.svg` path.
+/// A glyph must be one safe, bundle-relative `.svg` or `.png` path.
 pub fn validate_asset_ref(reference: &str) -> Result<(), String> {
     if reference.is_empty() || reference.len() > MAX_ASSET_REF_BYTES {
         return Err(format!("glyph path must be 1–{MAX_ASSET_REF_BYTES} bytes"));
@@ -357,13 +403,50 @@ pub fn validate_asset_ref(reference: &str) -> Result<(), String> {
     if reference.contains(['\\', ':', '\0']) || reference.chars().any(char::is_control) {
         return Err(format!("glyph \"{reference}\" must be a plain relative path"));
     }
-    if !reference.to_ascii_lowercase().ends_with(".svg") {
-        return Err(format!("glyph \"{reference}\" must be an .svg file"));
+    let lower = reference.to_ascii_lowercase();
+    if !lower.ends_with(".svg") && !lower.ends_with(".png") {
+        return Err(format!("glyph \"{reference}\" must be an .svg or .png file"));
     }
     if reference.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
         return Err(format!("glyph \"{reference}\" must not escape the pack with . or .."));
     }
     Ok(())
+}
+
+/// Largest PNG glyph side, in pixels.
+pub const MAX_PNG_SIDE: u32 = 1024;
+
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+/// Whether `reference` names a PNG glyph (a full-color image, drawn without a tint).
+pub fn is_png_ref(reference: &str) -> bool {
+    reference.to_ascii_lowercase().ends_with(".png")
+}
+
+/// Validate a PNG glyph: the file signature, a leading IHDR chunk, and a side of 1 to
+/// [`MAX_PNG_SIDE`] pixels. Decoding happens later in GPUI; this only reads the header,
+/// so a hostile file is rejected before anything decodes it.
+pub fn validate_png(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_GLYPH_BYTES {
+        return Err(format!("glyph is larger than {} KiB", MAX_GLYPH_BYTES / 1024));
+    }
+    if bytes.len() < 33 || &bytes[..8] != PNG_SIGNATURE {
+        return Err("glyph is not a PNG file".into());
+    }
+    if &bytes[12..16] != b"IHDR" {
+        return Err("PNG glyph has no header chunk".into());
+    }
+    let side = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let (width, height) = (side(16), side(20));
+    if width == 0 || height == 0 || width > MAX_PNG_SIDE || height > MAX_PNG_SIDE {
+        return Err(format!("PNG glyph is {width}x{height}; each side must be 1 to {MAX_PNG_SIDE} pixels"));
+    }
+    Ok(())
+}
+
+/// Validate one glyph by its file type: `.svg` as a vector glyph, `.png` as an image.
+pub fn validate_glyph(reference: &str, bytes: &[u8]) -> Result<(), String> {
+    if is_png_ref(reference) { validate_png(bytes) } else { validate_svg(bytes) }
 }
 
 /// Validate a single-color vector glyph before it reaches GPUI: bounded,
@@ -639,6 +722,60 @@ fn check_css_references(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_glyphs_are_checked_by_header_and_size() {
+        let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(validate_png(&png).is_ok());
+        assert!(validate_glyph("icons/a.PNG", &png).is_ok());
+        assert!(validate_glyph("icons/a.svg", &png).is_err(), "a PNG is not an SVG");
+        assert!(validate_asset_ref("icons/a.png").is_ok() && validate_asset_ref("icons/a.gif").is_err());
+        let mut huge = png.clone();
+        huge[16..20].copy_from_slice(&5000u32.to_be_bytes());
+        assert!(validate_png(&huge).is_err(), "too large a side");
+        assert!(validate_png(b"not a png at all, just text that is long enough to pass the length").is_err());
+        let mut no_ihdr = png.clone();
+        no_ihdr[12..16].copy_from_slice(b"IDAT");
+        assert!(validate_png(&no_ihdr).is_err());
+    }
+
+    #[test]
+    fn layered_sources_validate_split_and_toggle() {
+        assert!(validate_source("lucide, linework").is_ok());
+        assert!(validate_source("lucide,native").is_ok());
+        assert!(validate_source("lucide,lucide").is_err(), "a pack twice");
+        assert!(validate_source("lucide,").is_err());
+        assert!(validate_source("a,b,c,d,e,f,g,h,i").is_err(), "more than eight");
+        assert_eq!(split_sources("a, b ,c").collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert!(is_native("native") && !is_native("native,lucide"));
+        assert_eq!(toggle_source("native", "lucide"), "lucide", "the first pick replaces Native");
+        assert_eq!(toggle_source("lucide", "linework"), "lucide,linework", "later picks are added after");
+        assert_eq!(toggle_source("lucide,linework", "lucide"), "linework", "picking a member removes it");
+        assert_eq!(toggle_source("lucide", "lucide"), "native", "an empty list is Native");
+        assert_eq!(toggle_source("lucide,linework", "native"), "native");
+    }
+
+    /// The pack shipped in docs/examples/icon-pack must keep loading: the parser accepts
+    /// pack.toml and every glyph it names is a valid SVG inside the pack's icons/ folder.
+    #[test]
+    fn the_example_icon_pack_in_the_docs_is_valid() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/icon-pack");
+        let text = std::fs::read_to_string(dir.join("pack.toml")).expect("pack.toml");
+        let pack = IconPack::parse(&text, std::path::Path::new("/home/example")).expect("the example parses");
+        assert_eq!(pack.id(), Some("lucide"));
+        let assets: Vec<&str> = pack.assets().collect();
+        assert!(assets.len() >= 60, "the example maps many icons");
+        for asset in assets {
+            assert!(asset.starts_with("icons/"), "{asset} lives in the icons subfolder");
+            let bytes = std::fs::read(dir.join(asset)).unwrap_or_else(|e| panic!("{asset}: {e}"));
+            validate_svg(&bytes).unwrap_or_else(|e| panic!("{asset}: {e}"));
+        }
+    }
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
@@ -804,7 +941,7 @@ api = 1
             "api = 1\n[generic]\nfile = { icon = \"x.svg\", color = \"nope\" }",
             "api = 1\n[generic]\nfile = { icon = \"../x.svg\" }",
             "api = 1\n[generic]\nfile = { icon = \"/tmp/x.svg\" }",
-            "api = 1\n[generic]\nfile = { icon = \"x.png\" }",
+            "api = 1\n[generic]\nfile = { icon = \"x.gif\" }",
             "api = 1\n[generic]\nfile = { icon = \"a//b.svg\" }",
             "api = 2\n",
         ] {

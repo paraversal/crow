@@ -19,6 +19,7 @@ mod recent_commands;
 mod saved_queries;
 mod selection;
 mod settings;
+pub mod shelf;
 mod sidebar;
 mod table;
 mod tabs;
@@ -42,7 +43,8 @@ pub use grid::{GridGeometry, GridMetrics, GridRect, IconSize};
 pub use history::History;
 pub use icon_pack::{
     ICON_PACK_API, IconColor, IconEntry, IconPack, MAX_ASSET_REF_BYTES, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_BYTES,
-    NATIVE_ICON_SOURCE, is_native, validate_asset_ref, validate_source, validate_svg,
+    NATIVE_ICON_SOURCE, is_native, is_png_ref, split_sources, toggle_source, validate_asset_ref, validate_glyph,
+    validate_png, validate_source, validate_svg,
 };
 pub use location::Location;
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};
@@ -55,10 +57,11 @@ pub use saved_queries::{
 };
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    AppIcon, DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch,
-    Settings, SettingsError, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings, save_bool_setting,
+    DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, Settings,
+    SettingsError, SidebarStyle, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings, save_bool_setting,
     save_number_setting, save_setting, save_table_number,
 };
+pub use shelf::{Shelf, ShelfItem};
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, Section, SectionDestination, SectionRow, SidebarConfig,
     SidebarEdit, Slot, TwinInput, edit_sidebar, load_sidebar, sidebar_path, twin_hints,

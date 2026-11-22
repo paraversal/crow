@@ -27,6 +27,8 @@ pub enum DropLocation {
     SidebarInsertion(Slot),
     /// The toolbar's Back button: it springs back but never takes a drop.
     Back,
+    /// The sidebar's shelf: the files are set aside there, not moved.
+    Shelf,
 }
 
 /// Which surface resolved a destination; it draws the hover outline.
@@ -36,6 +38,7 @@ pub enum DropSurface {
     Sidebar,
     PathBar,
     Search,
+    Shelf,
     #[default]
     Pane,
 }
@@ -55,6 +58,10 @@ pub struct DropHit {
 impl DropHit {
     pub fn folder(path: PathBuf, generation: u64, spring: bool) -> Self {
         Self { location: DropLocation::Folder(path), generation, spring, surface: DropSurface::Pane }
+    }
+
+    pub fn shelf() -> Self {
+        Self { location: DropLocation::Shelf, generation: 0, spring: false, surface: DropSurface::Shelf }
     }
 
     pub fn insertion(slot: Slot, generation: u64) -> Self {
@@ -87,6 +94,7 @@ impl DropHit {
                 allow_ancestor: matches!(self.surface, DropSurface::Sidebar | DropSurface::PathBar),
             }),
             DropLocation::Back => Some(crow_core::drag::SpringTarget::Back),
+            DropLocation::Shelf => None,
             DropLocation::SidebarInsertion(_) => None,
         }
     }
@@ -94,7 +102,7 @@ impl DropHit {
     pub fn path(&self) -> Option<&PathBuf> {
         match &self.location {
             DropLocation::Folder(path) => Some(path),
-            DropLocation::SidebarInsertion(_) | DropLocation::Back => None,
+            DropLocation::SidebarInsertion(_) | DropLocation::Back | DropLocation::Shelf => None,
         }
     }
 }

@@ -18,13 +18,14 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EditSavedSearch, EmptyTrash, GoBack,
-    GoForward, GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard,
-    KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover,
-    PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch,
-    SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons,
-    ViewAsList, WhyThisView, Zoom,
+    AddToShelf, AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, ClearShelf, CloseTab, CopyShelfHere,
+    CycleRightSidebar, EditPath, EditSavedSearch, EmptyTrash, GoBack, GoForward, GoToFolder, IconCaptionLines,
+    IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, KeyboardShortcuts, Minimize, MoveDown,
+    MoveShelfHere, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
+    PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch, SearchEverything,
+    SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
+    WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -258,6 +259,8 @@ pub struct CrowWindow {
     title_hover: Option<(f32, f32, std::time::Instant)>,
     /// A ⇧⌘P / ⌘I show or hide of the right column that is still moving.
     pane_slide: Option<PaneSlide>,
+    /// The left sidebar sliding in or out after ⌃⌘S.
+    left_slide: Option<PaneSlide>,
     /// Set while a leaving overlay renders: its opacity (1 → 0).
     exit_fade: std::cell::Cell<Option<f32>>,
     show_activity: bool,
@@ -311,6 +314,8 @@ pub struct CrowWindow {
     path_hits: bottom_bar::PathHits,
     /// The Back button's bounds from the last frame, for springing back.
     back_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    /// Where the shelf strip was last drawn, for drops onto it.
+    shelf_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
     /// The destination under the pointer during a drag, for surfaces whose
     /// hover outline the window draws (Back, path bar, search results).
     drop_hover: Option<DropHit>,
@@ -450,6 +455,7 @@ impl CrowWindow {
             last_tabs: Vec::new(),
             tab_motions: Vec::new(),
             pane_slide: None,
+            left_slide: None,
             exit_fade: std::cell::Cell::new(None),
             show_activity: false,
             activity_last: None,
@@ -478,6 +484,7 @@ impl CrowWindow {
             drop_pending: false,
             path_hits: Default::default(),
             back_bounds: Default::default(),
+            shelf_bounds: Default::default(),
             drop_hover: None,
             drag_devices: DragDevices::default(),
             _subscriptions: subscriptions,
@@ -744,8 +751,37 @@ impl CrowWindow {
         if hide && self.sidebar.read(cx).focus_handle(cx).contains_focused(window, cx) {
             self.focus_center(window, cx);
         }
+        self.left_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: !hide });
         crate::menus::refresh(cx);
         cx.refresh_windows();
+    }
+
+    /// How the left sidebar looks now: `None` when it is not moving, else its slide.
+    fn left_look(&self, cx: &App) -> Option<SlideLook> {
+        let slide = self.left_slide?;
+        let mode = cx.global::<Ui>().feedback.mode;
+        crow_core::motion::progress(
+            mode,
+            slide.started,
+            std::time::Instant::now(),
+            crow_core::motion::ms::PANE_SLIDE,
+            crow_core::motion::ms::LOW_IN,
+        )
+        .map(|t| slide_look(mode, slide.opening, t))
+    }
+
+    /// The share of the sidebar's width that takes room: 1 shown, 0 hidden, between while it slides.
+    fn left_share(&self, cx: &App) -> f32 {
+        match self.left_look(cx) {
+            Some(look) => {
+                if look.overlay {
+                    0.0
+                } else {
+                    look.width
+                }
+            }
+            None => f32::from(!cx.global::<Ui>().sidebar_hidden),
+        }
     }
 
     /// Start the right column's slide if its visibility changed since `was_visible`.
@@ -787,7 +823,7 @@ impl CrowWindow {
         crate::git::refresh_projects(cx);
     }
 
-    /// ⌘I: open the column on Info, or close it when Info is already showing.
+    /// ⌘I: open the right sidebar on Info (idempotent).
     /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
     /// in a window whose default is off.
     fn show_git_diff(&mut self, _: &crate::actions::ShowGitDiff, _: &mut Window, cx: &mut Context<Self>) {
@@ -804,18 +840,37 @@ impl CrowWindow {
 
     fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
         let info = self.info.clone();
+        let visible = info.read(cx).visible();
+        info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(InfoTab::Info, cx);
+        });
+        self.begin_pane_slide(visible, cx);
+        cx.notify();
+    }
+
+    /// ⌥⌘P: open the right sidebar, or step to its next tab (Preview, Info, then Git Diff when the
+    /// Git package is on) and around again.
+    fn cycle_right_sidebar(&mut self, _: &CycleRightSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        let info = self.info.clone();
         let (visible, tab) = {
             let info = info.read(cx);
             (info.visible(), info.tab())
         };
-        if visible && tab == InfoTab::Info {
-            info.update(cx, |info, cx| info.set_visible(false, cx));
-        } else {
-            info.update(cx, |info, cx| {
-                info.set_visible(true, cx);
-                info.set_tab(InfoTab::Info, cx);
-            });
-        }
+        let git = crate::git::provider_enabled(cx);
+        info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            if visible {
+                info.set_tab(
+                    match tab {
+                        InfoTab::Preview => InfoTab::Info,
+                        InfoTab::Info if git => InfoTab::GitDiff,
+                        InfoTab::Info | InfoTab::GitDiff => InfoTab::Preview,
+                    },
+                    cx,
+                );
+            }
+        });
         self.begin_pane_slide(visible, cx);
         cx.notify();
     }
@@ -1036,8 +1091,8 @@ impl CrowWindow {
     fn render_title_bar(&self, title: &str, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let viewport = window.viewport_size().width;
-        let sidebar_hidden = cx.global::<Ui>().sidebar_hidden;
-        let width = viewport - if sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        let left_share = self.left_share(cx);
+        let width = viewport - self.side_panes.left_width() * left_share;
         let narrow = viewport < px(760.) || width < px(530.);
         let search_icon_only = width < px(450.);
         let tight = width < px(330.);
@@ -1406,12 +1461,9 @@ impl CrowWindow {
             .h(px(BAND_HEIGHT))
             .flex_none()
             // With the sidebar hidden the traffic lights sit at the toolbar's left.
-            .pl(px(if sidebar_hidden {
-                86.
-            } else if tight {
-                8.
-            } else {
-                12.
+            .pl(px({
+                let base = if tight { 8. } else { 12. };
+                base + (86. - base) * (1.0 - left_share)
             }))
             .pr(px(if tight { 8. } else { 12. }))
             .flex()
@@ -1842,7 +1894,7 @@ impl CrowWindow {
             }
         }
         // Narrow windows lose hints from the right and fold the path's middle (I7).
-        let left = if cx.global::<Ui>().sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        let left = self.side_panes.left_width() * self.left_share(cx);
         bottom_bar::fit_to_window(&mut state, window, left);
         state
     }
@@ -1902,6 +1954,9 @@ impl CrowWindow {
         }
         if self.back_bounds.get().is_some_and(|bounds| bounds.contains(&pointer)) {
             return Some(DropHit::back(self.drag.can_spring_back()));
+        }
+        if let Some(hit) = self.shelf_hit_at(pointer, cx) {
+            return Some(hit);
         }
         let hit = self
             .sidebar
@@ -2277,6 +2332,12 @@ impl CrowWindow {
         };
         match hit.location {
             DropLocation::Back => {}
+            DropLocation::Shelf => {
+                if let (true, Some(pane)) = (sprung, owner) {
+                    self.restore_spring(&pane, window, cx);
+                }
+                self.drop_onto_shelf(paths, window, cx);
+            }
             DropLocation::SidebarInsertion(slot) => {
                 if let (true, Some(pane)) = (sprung, owner) {
                     self.restore_spring(&pane, window, cx);
@@ -3454,6 +3515,7 @@ impl CrowWindow {
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
             CommandId::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
+            CommandId::CycleRightSidebar => self.cycle_right_sidebar(&CycleRightSidebar, window, cx),
             CommandId::ShowGitDiff => self.show_git_diff(&crate::actions::ShowGitDiff, window, cx),
             CommandId::ChooseListColumns => self.choose_list_columns(&crate::actions::ChooseListColumns, window, cx),
             CommandId::CalculateFolderSizes => self.calculate_folder_sizes(&CalculateFolderSizes, window, cx),
@@ -3474,6 +3536,10 @@ impl CrowWindow {
             CommandId::Undo => self.undo(None, cx),
             CommandId::Redo => self.redo(cx),
             CommandId::AddToSidebar => self.add_to_sidebar(&AddToSidebar, window, cx),
+            CommandId::AddToShelf => self.add_to_shelf(&AddToShelf, window, cx),
+            CommandId::MoveShelfHere => self.move_shelf_here(&MoveShelfHere, window, cx),
+            CommandId::CopyShelfHere => self.copy_shelf_here(&CopyShelfHere, window, cx),
+            CommandId::ClearShelf => self.clear_shelf(&ClearShelf, window, cx),
             CommandId::WhyThisView => self.why_this_view(&WhyThisView, window, cx),
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
@@ -3762,7 +3828,17 @@ impl Render for CrowWindow {
         );
         let title_bar = self.render_title_bar(&title, window, cx);
         let translucent = cx.global::<Ui>().translucent;
-        let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
+        let floating = cx.global::<Ui>().settings.sidebar_style == crow_core::SidebarStyle::FloatingPanel;
+        let left_look = self.left_look(cx);
+        if left_look.is_none() {
+            self.left_slide = None;
+        } else {
+            window.request_animation_frame();
+        }
+        let sidebar_drawn =
+            !cx.global::<Ui>().sidebar_hidden || left_look.is_some_and(|look| look.width > 0.0 || look.overlay);
+        let shelf = sidebar_drawn.then(|| self.render_shelf(&theme, cx)).flatten();
+        let sidebar = sidebar_drawn.then(|| {
             let tone = if translucent {
                 // See-through enough for the blurred desktop to read, solid enough for the labels.
                 color_alpha(theme.role("bg-inset"), crate::style::TRANSLUCENT_SIDEBAR_ALPHA)
@@ -3791,11 +3867,52 @@ impl Render for CrowWindow {
                         }),
                     ),
                 )
-                .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                .child(if floating {
+                    // One rounded, bordered panel lifted off the column, holding the rows and the shelf.
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .mx(px(8.))
+                        .mb(px(8.))
+                        .rounded(px(14.))
+                        .border_1()
+                        .border_color(crate::style::hairline(&theme))
+                        .bg(color(theme.role("bg")))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                        .children(shelf)
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                        .children(shelf)
+                        .into_any_element()
+                })
                 .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
                 // One unbroken divider from the top of the window to the bottom, drawn over the
                 // column's edge so the sidebar keeps its width.
                 .child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::style::hairline(&theme)))
+        });
+        // While it slides, the column keeps its width inside a clip that grows or shrinks (Low
+        // fades it without moving anything), like the right column.
+        let sidebar = sidebar.map(|column| match left_look {
+            Some(look) => {
+                let width = self.side_panes.left_width();
+                let column = div().w(width).h_full().flex_none().opacity(look.opacity.max(0.35)).child(column);
+                if look.overlay {
+                    div().absolute().top_0().left_0().bottom_0().w(width).child(column).into_any_element()
+                } else {
+                    div().h_full().flex_none().overflow_hidden().w(width * look.width).child(column).into_any_element()
+                }
+            }
+            None => column.into_any_element(),
         });
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
@@ -3919,7 +4036,7 @@ impl Render for CrowWindow {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
             None => {
                 let pane = self.pane().clone();
-                let mut width = window.viewport_size().width - self.side_panes.left_width();
+                let mut width = window.viewport_size().width - self.side_panes.left_width() * self.left_share(cx);
                 if preview.is_some() {
                     width -= self.side_panes.right_width() * preview_share;
                 }
@@ -3961,6 +4078,10 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(Self::zoom))
             .on_action(cx.listener(Self::empty_trash))
+            .on_action(cx.listener(Self::add_to_shelf))
+            .on_action(cx.listener(Self::move_shelf_here))
+            .on_action(cx.listener(Self::copy_shelf_here))
+            .on_action(cx.listener(Self::clear_shelf))
             .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -3968,6 +4089,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::switch_focus))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::cycle_right_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::show_info))
             .when(crate::git::provider_enabled(cx), |root| {
@@ -4350,6 +4472,12 @@ impl CrowWindow {
                     let sidebar = self.sidebar.read(cx);
                     allowed.push(("pane", pane.focus_handle().clone()));
                     allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    // A saved search or tag destination fills the center with its own session.
+                    if let Some(session) = pane.saved_session() {
+                        let session = session.read(cx);
+                        allowed.push(("saved search field", session.input_focus_handle(cx)));
+                        allowed.push(("saved search results", session.results_focus_handle()));
+                    }
                     for text in pane.text_focus_handles(cx) {
                         allowed.push(("pane text field", text));
                     }
@@ -4400,8 +4528,9 @@ pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;
 pub(crate) mod saved_query_form;
+pub(crate) mod shelf;
 pub(crate) mod side_panes;
-pub(crate) mod tag_picker;
+mod tag_picker;
 
 #[cfg(test)]
 mod tests;

@@ -4,6 +4,10 @@ Ideas and unscheduled work go here. Move accepted milestone work to the [roadmap
 
 ## Untriaged
 
+- **Sidebar "Here" card (user idea, 2026-11-22).** A card at the top of the left sidebar about the folder you are in: its Git branch and changes when it is a repository, and a place to drop files into it. Dropped from the group-cards work on purpose; opt-in like the Shelf (`sidebar.toml`), and the drop target must go through `accept_drop` in `window.rs`.
+- **Sidebar activity card (user idea, 2026-11-22).** A temporary card in the left sidebar while a copy, move or trash job runs: progress bar, item count and Cancel; gone when the job ends. Opt-in like the Shelf. The bottom bar's progress line and the Activity sheet (⌥⌘L) stay.
+- **More top-of-sidebar cards (liked in the 2026-11-21 sketches, not built).** Workspaces (named sets of tabs and folders) and Disk (free space of the current volume). Decide with Here and the activity card how the top is ordered when several are on.
+- **A Sidebar page in Settings with previews of each style and card (user, 2026-11-22: "makes sense").** Ledger, Cards, Accordion, Floating panel and Pills as small live previews next to the `sidebar_style` control.
 - **Sidebar text filter.** Filter native and contributed sidebar sections. Plan matching, focus, cursor fallback, and Escape together. The existing `/` binding filters the file pane.
 - **Design-board follow-ups.** Clock icons in Recent (favorites now use Finder icons), syntax highlighting and line numbers in previews, 196 px columns, a stronger focused-column tint, and a scope token in the search field. See the [UI design overview](ui-overhaul/README.md).
 
@@ -11,7 +15,7 @@ Ideas and unscheduled work go here. Move accepted milestone work to the [roadmap
 
 ### Git decorations flash during refresh
 
-**Medium priority · Fixed in [P5B PR #79](https://github.com/paraversal/file-crow/pull/79) · Pending bundled hand check.** Already decorated rows intermittently reverted to their default appearance for about 100 ms. For example, an ignored file flashed white before returning to blue.
+**Medium priority · Fixed in [P5B PR #79](https://github.com/paraversal/crow/pull/79) · Pending bundled hand check.** Already decorated rows intermittently reverted to their default appearance for about 100 ms. For example, an ignored file flashed white before returning to blue.
 
 - A repository rescan used to clear every cached Git decoration, even when the status matched. Folder watcher batches also evicted results for untouched siblings. Crow now retains ready decorations for unchanged entries, refreshes the affected worktree, and replaces old styling when the current worker reply arrives.
 - In the bundle, open a subfolder with a visible ignored file and wait for its Git styling. Touch an already ignored file in a sibling folder in the same worktree, then touch a different file in the open folder. The first ignored row and Git status bar should stay steady. Remove its ignore rule and check that it loses the ignored styling. Disable Git and check that its remaining decorations clear immediately.

@@ -1,0 +1,46 @@
+[[group]]
+name = "Favorites"
+items = [
+  { path = "@HOME@/Manuscripts", icon = "📖", color = "orange" },
+  { path = "@HOME@/Journal", icon = "🪶", color = "yellow" },
+  { path = "@HOME@/Research", icon = "🔍", color = "cyan" },
+  { path = "@HOME@/Submissions", icon = "✉️", color = "purple" },
+]
+
+[[group]]
+name = "Now writing"
+icon = "✍️"
+items = [
+  { path = "@HOME@/Manuscripts/The Lantern Year/Chapters", name = "Chapters", icon = "🏮", color = "orange" },
+  { path = "@HOME@/Manuscripts/The Lantern Year/00 Notes", name = "Notes", icon = "📝", color = "yellow" },
+  { path = "@HOME@/Manuscripts/The Lantern Year/Drafts", name = "Drafts", icon = "🗒️", color = "blue" },
+]
+
+[[group]]
+name = "Reading"
+icon = "📚"
+items = [
+  { path = "@HOME@/Reading/Fiction", icon = "🌙", color = "purple" },
+  { path = "@HOME@/Reading/Craft", icon = "🛠️", color = "green" },
+  { path = "@HOME@/Reading/Poetry", icon = "🌿", color = "pink" },
+]
+
+[[group]]
+name = "Locations"
+icon = "💾"
+items = [
+  { path = "@HOME@/Volumes/Backup stick", icon = "🔌", color = "blue" },
+  { path = "@HOME@/Volumes/Typewriter archive", icon = "⌨️", color = "yellow" },
+]
+
+[recent]
+show = false
+
+[locations]
+show = false
+
+[section."tags"]
+show = false
+
+[sections]
+order = []

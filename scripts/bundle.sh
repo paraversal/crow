@@ -27,9 +27,8 @@
 # Create a Certificate, name "Crow Dev", type "Code Signing" (it needn't be trusted).
 # Set CROW_SIGN_IDENTITY to use another identity (e.g. a Developer ID for distribution).
 #
-# Icon: the bundle carries the icon named by `app_icon` in your settings.toml (refined,
-# sun, graphite or bone; refined when unset), so Finder and Launchpad match the Dock.
-# CROW_APP_ICON overrides it. The PNGs come from crates/crow-app/assets/app-icon.
+# Icon: assets/app-icon.png (square, any size; full-bleed art gets the Dock's margin added). Replace that file and bundle again; the
+# app embeds the same PNG for the Dock, and scripts/site.sh makes the website's sizes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -75,21 +74,13 @@ cat > "$app/Contents/Resources/Credits.html" <<CREDITS
 </body></html>
 CREDITS
 
-# The icon: CROW_APP_ICON, else app_icon from settings.toml, else refined.
-config_dir="${CROW_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/crow}"
-icon="${CROW_APP_ICON:-}"
-if [ -z "$icon" ] && [ -f "$config_dir/settings.toml" ]; then
-  icon=$(sed -n 's/^[[:space:]]*app_icon[[:space:]]*=[[:space:]]*"\([a-z]*\)".*/\1/p' "$config_dir/settings.toml" | head -1)
-fi
-icon="${icon:-refined}"
-icon_png="crates/crow-app/assets/app-icon/$icon.png"
-if [ ! -f "$icon_png" ]; then
-  echo "unknown app icon \"$icon\" (refined, sun, graphite, bone); using refined" >&2
-  icon=refined
-  icon_png="crates/crow-app/assets/app-icon/refined.png"
-fi
+icon_src=assets/app-icon.png
 iconset=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$iconset"
+# The Dock draws icons inside a template (artwork ~80% of the canvas); pad-icon.swift adds
+# that margin to full-bleed art and leaves art that already has one alone.
+icon_png=$(dirname "$iconset")/padded.png
+swift scripts/pad-icon.swift "$icon_src" "$icon_png"
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$icon_png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
   sips -z $((size * 2)) $((size * 2)) "$icon_png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
@@ -132,7 +123,7 @@ elif [ -z "$identity" ] && security find-identity -p codesigning 2>/dev/null | g
 fi
 codesign --force --sign "${identity:--}" --timestamp=none "$app"
 [ "${identity:--}" = "-" ] && signer="ad hoc" || signer="$identity"
-echo "built $app ($version, build $build, $commit, $icon icon), signed $signer"
+echo "built $app ($version, build $build, $commit), signed $signer"
 
 if $install; then
   dest_dir="${CROW_INSTALL_DIR:-/Applications}"

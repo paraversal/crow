@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, Recent, RecentCommands,
-    SavedQueries, SavedQueryId, SearchMatch, Settings, SidebarConfig, TipsMode, Views, load_saved_queries,
-    load_settings, load_sidebar, load_views,
+    EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, Recent, RecentCommands, SavedQueries,
+    SavedQueryId, SearchMatch, Settings, SidebarConfig, TipsMode, Views, load_saved_queries, load_settings,
+    load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use futures::{FutureExt, future::Shared};
@@ -72,8 +72,6 @@ impl SavedQueryCounts {
 
 pub struct Ui {
     pub settings: Settings,
-    /// The Dock icon last applied, so a reload only touches AppKit when it changes.
-    pub applied_icon: Option<crow_core::AppIcon>,
     /// The motion mode and sound set in effect, and macOS's UI-sounds switch.
     pub feedback: Feedback,
     /// The colors on screen: the current theme, or a step of a fade towards it.
@@ -111,6 +109,8 @@ pub struct Ui {
     zoxide: Vec<(f64, PathBuf)>,
     /// The folders Recent shows, best first (computed off the main thread).
     pub recent_list: Vec<PathBuf>,
+    /// Files set aside on the shelf (state folder, `shelf.json`).
+    pub shelf: crow_core::Shelf,
     /// More of the same ranking for the command palette (favorites included).
     pub palette_recents: Vec<PathBuf>,
     pub volumes: Vec<crow_macos::Volume>,
@@ -205,6 +205,7 @@ const KEYS: usize = 5;
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
         let recent = Recent::load(&state_dir.join("recent.json"));
+        let shelf = crow_core::Shelf::load(&state_dir.join("shelf.json"));
         let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
         // io-ok: startup: the last Settings category is one small read before the first window
         let settings_category = std::fs::read_to_string(state_dir.join("settings-category"))
@@ -213,7 +214,6 @@ impl Ui {
             .filter(|text| !text.is_empty());
         let mut ui = Ui {
             settings: Settings::default(),
-            applied_icon: None,
             feedback: Feedback::default(),
             target: theme.clone(),
             theme,
@@ -230,6 +230,7 @@ impl Ui {
             recent_commands,
             zoxide: Vec::new(),
             recent_list: Vec::new(),
+            shelf,
             palette_recents: Vec::new(),
             volumes: Vec::new(),
             aliases: HashSet::new(),
@@ -499,7 +500,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     cx.set_reduce_motion(feedback.mode == Effective::Off);
     feedback::preload(feedback.sound, cx);
     // After the first frame: decoding the icon is not worth delaying first paint for.
-    cx.defer(refresh_app_icon);
+    cx.defer(|cx| crate::effects::effects(cx).set_app_icon(APP_ICON_PNG));
     // A saved theme that no longer exists is said once, which needs the message list.
     cx.defer(reload_theme);
     crate::usage::init(cx);
@@ -596,6 +597,20 @@ struct TestRoots(Vec<tempfile::TempDir>);
 
 #[cfg(test)]
 impl gpui::Global for TestRoots {}
+
+/// Change the shelf and save it to the state folder in the background.
+pub fn edit_shelf(cx: &mut App, edit: impl FnOnce(&mut crow_core::Shelf)) {
+    let ui = cx.global_mut::<Ui>();
+    edit(&mut ui.shelf);
+    let (shelf, file) = (ui.shelf.clone(), ui.state_dir.join("shelf.json"));
+    cx.background_spawn(async move {
+        if let Err(e) = shelf.save(&file) {
+            tracing::warn!("{}: {e}", file.display());
+        }
+    })
+    .detach();
+    cx.refresh_windows();
+}
 
 /// Default settings and the embedded theme, with config files in a fresh temp folder
 /// and nothing watched.
@@ -768,7 +783,6 @@ pub fn reload_config(cx: &mut App) {
     reload_saved_queries(cx);
     refresh_feedback(cx);
     refresh_translucency(cx);
-    refresh_app_icon(cx);
     crate::plugins::reload(cx);
     cx.refresh_windows();
 }
@@ -788,27 +802,10 @@ pub fn reload_keys(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// The embedded 1024 px PNG for `icon` (sources and render script: `assets/app-icon`).
-pub fn app_icon_png(icon: crow_core::AppIcon) -> &'static [u8] {
-    use crow_core::AppIcon;
-    match icon {
-        AppIcon::Refined => include_bytes!("../assets/app-icon/refined.png"),
-        AppIcon::Sun => include_bytes!("../assets/app-icon/sun.png"),
-        AppIcon::Graphite => include_bytes!("../assets/app-icon/graphite.png"),
-        AppIcon::Bone => include_bytes!("../assets/app-icon/bone.png"),
-    }
-}
-
-/// Show the `app_icon` setting in the Dock, if it changed since the last call.
-pub fn refresh_app_icon(cx: &mut App) {
-    let ui = cx.global_mut::<Ui>();
-    let icon = ui.settings.app_icon;
-    if ui.applied_icon == Some(icon) {
-        return;
-    }
-    ui.applied_icon = Some(icon);
-    crate::effects::effects(cx).set_app_icon(app_icon_png(icon));
-}
+/// The app icon, `assets/app-icon.png` at the repository root: the Dock shows it
+/// while Crow runs, and `scripts/bundle.sh` and `scripts/site.sh` make every other
+/// size from the same file.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon.png");
 
 /// One change from the settings window or a menu toggle. `set_setting` applies it
 /// to `Ui.settings` at once, then writes only that key to `settings.toml`.
@@ -822,9 +819,9 @@ pub enum SettingChange {
     FolderSizes(FolderSizesMode),
     Motion(MotionMode),
     Sound(SoundSet),
-    AppIcon(AppIcon),
     IconPack(String),
     PathBar(PathBarMode),
+    SidebarStyle(crow_core::SidebarStyle),
     FontFamily(String),
     FontSize(f32),
     Terminal(String),
@@ -854,9 +851,9 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::FolderSizes(value) => replace(&mut settings.folder_sizes, *value),
             SettingChange::Motion(value) => replace(&mut settings.motion, *value),
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
-            SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
             SettingChange::IconPack(value) => replace(&mut settings.icon_pack, value.clone()),
             SettingChange::PathBar(value) => replace(&mut settings.path_bar, *value),
+            SettingChange::SidebarStyle(value) => replace(&mut settings.sidebar_style, *value),
             SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
             SettingChange::Terminal(value) => replace(&mut settings.terminal, value.clone()),
@@ -880,7 +877,6 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             cx.global_mut::<Ui>().preview_theme = None;
             reload_theme(cx);
         }
-        SettingChange::AppIcon(_) => refresh_app_icon(cx),
         SettingChange::Motion(_) | SettingChange::Sound(_) => refresh_feedback(cx),
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
         SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
@@ -926,14 +922,14 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         SettingChange::Sound(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "sound", value.key()), cx);
         }
-        SettingChange::AppIcon(value) => {
-            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "app_icon", value.key()), cx);
-        }
         SettingChange::IconPack(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "icon_pack", &value), cx);
         }
         SettingChange::PathBar(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "path_bar", value.key()), cx);
+        }
+        SettingChange::SidebarStyle(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "sidebar_style", value.key()), cx);
         }
         SettingChange::FontFamily(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "font_family", &value), cx);
@@ -1234,7 +1230,7 @@ pub fn open_config_path(path: &Path, cx: &mut App) {
     }
 }
 
-/// Show `<config>/plugins` in Finder, creating it if this is the first visit.
+/// Open `<config>/plugins` in a Crow window, creating it if this is the first visit.
 pub fn open_plugins_folder(cx: &mut App) {
     let dir = cx.global::<Ui>().config_dir.join("plugins");
     let create = cx.background_spawn(async move {
@@ -1251,23 +1247,15 @@ pub fn open_plugins_folder(cx: &mut App) {
                 return;
             }
         };
-        cx.update(|cx| {
-            if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
-                crate::operations::message(format!("Couldn't open {}", dir.display()), true, cx);
-                cx.refresh_windows();
-            }
-        });
+        cx.update(|cx| crate::window::open_path(dir, true, cx));
     })
     .detach();
 }
 
-/// Show the config folder in Finder.
+/// Open the config folder in a Crow window.
 pub fn open_config_folder(cx: &mut App) {
     let dir = cx.global::<Ui>().config_dir.clone();
-    if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
-        crate::operations::message(format!("Couldn't open {} in Finder", dir.display()), true, cx);
-        cx.refresh_windows();
-    }
+    crate::window::open_path(dir, true, cx);
 }
 
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
@@ -1651,11 +1639,21 @@ mod tests {
         theme
     }
 
+    #[test]
+    fn app_icon_is_a_square_png() {
+        let png = APP_ICON_PNG;
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "assets/app-icon.png is a PNG");
+        // IHDR comes first: width and height are big-endian u32s at bytes 16 and 20.
+        let side = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().expect("four bytes"));
+        assert_eq!(side(16), side(20), "assets/app-icon.png is square");
+        assert!(side(16) >= 512, "assets/app-icon.png is at least 512 px (1024 recommended)");
+    }
+
     #[gpui::test]
     fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
         let config = cx.update(crate::ui::init_for_tests);
         cx.update(crate::menus::init_for_tests);
-        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nicon_pack = \"native\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nsearch_includes_hidden = true\nsearch_match = \"all\"\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\nicon_pack = \"native\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nsearch_includes_hidden = true\nsearch_match = \"all\"\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
         let changes = [
             SettingChange::Theme("gruvbox-dark-hard".into()),
             SettingChange::Keymap(KeymapLayer::Vim),
@@ -1663,7 +1661,6 @@ mod tests {
             SettingChange::Tips(TipsMode::Off),
             SettingChange::Motion(MotionMode::Off),
             SettingChange::Sound(SoundSet::Finder),
-            SettingChange::AppIcon(AppIcon::Sun),
             SettingChange::IconPack("example.pack".into()),
             SettingChange::FontFamily("Menlo".into()),
             SettingChange::FontSize(14.0),

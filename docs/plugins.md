@@ -168,9 +168,9 @@ folder. Names match the raw path bytes exactly; a non-UTF-8 name falls through t
 later tiers. `color` is optional and defaults to `fg`; it names one of the theme's roles
 or a palette hue (`base08`–`base0F`, `base12`–`base17`).
 
-`icon` is a relative path to an `.svg` in the pack. Each glyph must be a regular file
+`icon` is a relative path to an `.svg` or `.png` in the pack. An SVG is a single-color glyph tinted with `color`; a PNG is a full-color image drawn as it is (its `color` is ignored), at most 1024 px on a side. Each glyph must be a regular file
 (no symlinks), stay inside the pack folder, be at most 256 KiB, and the pack may total
-at most 8 MiB across 512 glyphs. Glyphs must be UTF-8 SVG without scripts, embedded
+at most 8 MiB across 512 glyphs. SVG glyphs must be UTF-8 SVG without scripts, embedded
 images, `<style>` elements, external `href`s, event attributes or external CSS
 references. An unknown role, missing asset, bad path or malformed glyph rejects the
 whole pack; Crow keeps the last good pack snapshot and reports the error. Removing a

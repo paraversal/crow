@@ -6,21 +6,19 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Event, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode,
-    ViewMode,
+    DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode, ViewMode,
 };
 use crow_fs::SortKey;
 use crow_plugin::{PluginEntry, PluginHandle, PluginState};
 use crow_theme::Theme;
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
-    KeyDownEvent, Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, KeyDownEvent, Render,
+    Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size,
 };
 
 use crate::actions::OpenSettings;
@@ -163,9 +161,9 @@ fn open_window(cx: &mut App) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ControlId {
     Theme,
-    AppIcon,
     IconPack,
     PathBar,
+    SidebarStyle,
     TranslucentSidebar,
     FontFamily,
     FontSize,
@@ -224,9 +222,9 @@ impl ControlId {
     const ALL: [ControlId; 54] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
-        ControlId::AppIcon,
         ControlId::IconPack,
         ControlId::PathBar,
+        ControlId::SidebarStyle,
         ControlId::FontFamily,
         ControlId::FontSize,
         ControlId::Keymap,
@@ -281,9 +279,9 @@ impl ControlId {
     fn key(self) -> &'static str {
         match self {
             ControlId::Theme => "settings-theme",
-            ControlId::AppIcon => "settings-app-icon",
             ControlId::IconPack => "settings-icon-pack",
             ControlId::PathBar => "settings-path-bar",
+            ControlId::SidebarStyle => "settings-sidebar-style",
             ControlId::FontFamily => "settings-font-family",
             ControlId::FontSize => "settings-font-size",
             ControlId::Terminal => "settings-terminal",
@@ -343,7 +341,6 @@ impl ControlId {
     fn selector(self) -> String {
         match self {
             ControlId::Theme
-            | ControlId::AppIcon
             | ControlId::IconPack
             | ControlId::FontFamily
             | ControlId::FontSize
@@ -354,6 +351,7 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::ShowHidden
             | ControlId::SearchHidden
             | ControlId::SearchMatch
@@ -380,9 +378,9 @@ impl ControlId {
     fn label(self) -> &'static str {
         match self {
             ControlId::Theme => "Theme",
-            ControlId::AppIcon => "App icon",
             ControlId::IconPack => "Icon pack",
             ControlId::PathBar => "Path bar",
+            ControlId::SidebarStyle => "Sidebar style",
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
             ControlId::Terminal => "Terminal app",
@@ -426,7 +424,7 @@ impl ControlId {
             ControlId::PreviewClear => "Clear preview override",
             ControlId::Plugins => "Plugins",
             ControlId::EditSettings => "Edit settings.toml…",
-            ControlId::ShowConfig => "Show config folder in Finder",
+            ControlId::ShowConfig => "Open config folder",
             ControlId::OpenSidebarToml => "sidebar.toml",
             ControlId::OpenViewsToml => "views.toml",
             ControlId::OpenExcludeToml => "exclude.toml",
@@ -445,13 +443,13 @@ impl ControlId {
             | ControlId::DefaultSort
             | ControlId::PreviewRuleSelect
             | ControlId::PreviewAdd => Role::ComboBox,
-            ControlId::AppIcon
-            | ControlId::Keymap
+            ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -495,11 +493,11 @@ impl ControlId {
     fn description(self, cx: &App) -> Option<SharedString> {
         let text = match self {
             ControlId::Theme => "Themes from ~/.config/themes.",
-            ControlId::AppIcon => "The Dock switches now; Finder after the next scripts/bundle.sh.",
             ControlId::IconPack => {
                 "Native, local icon-packs and approved plugin packs; a folder's views.toml source wins."
             }
             ControlId::PathBar => "Crow fades in an editor over the breadcrumb; Explorer keeps a visible path field.",
+            ControlId::SidebarStyle => "How the sidebar draws its groups. Any group can carry an icon in sidebar.toml.",
             ControlId::FontFamily => "Installed families; System follows macOS.",
             ControlId::FontSize => "10 to 24 points.",
             ControlId::Terminal => {
@@ -1620,13 +1618,13 @@ impl SettingsWindow {
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
-            ControlId::AppIcon
-            | ControlId::Keymap
+            ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -1638,13 +1636,13 @@ impl SettingsWindow {
         let Some(id) = self.focused_control(window) else { return };
         match id {
             ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
-            ControlId::AppIcon => self.move_app_icon(delta, window, cx),
             ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::SearchMatch
             | ControlId::Sound => {
@@ -1920,6 +1918,7 @@ impl SettingsWindow {
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
             ControlId::PathBar => (path_bar_index(cx.global::<Ui>().settings.path_bar), 2),
+            ControlId::SidebarStyle => (sidebar_style_index(cx.global::<Ui>().settings.sidebar_style), 5),
             ControlId::SearchMatch => (search_match_index(cx.global::<Ui>().settings.search_match), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
@@ -1947,6 +1946,7 @@ impl SettingsWindow {
             ControlId::PathBar => {
                 SettingChange::PathBar(if index == 0 { PathBarMode::Crow } else { PathBarMode::Explorer })
             }
+            ControlId::SidebarStyle => SettingChange::SidebarStyle(crow_core::SidebarStyle::ALL[index.min(4)]),
             ControlId::SearchMatch => SettingChange::SearchMatch(match index {
                 0 => SearchMatch::All,
                 1 => SearchMatch::Names,
@@ -1984,25 +1984,6 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn move_app_icon(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let current = app_icon_index(cx.global::<Ui>().settings.app_icon);
-        let next = (current as isize + delta).clamp(0, 3) as usize;
-        if next != current {
-            self.select_app_icon(next, window, cx);
-        }
-    }
-
-    fn select_app_icon(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        let icon = match index {
-            0 => AppIcon::Refined,
-            1 => AppIcon::Sun,
-            2 => AppIcon::Graphite,
-            _ => AppIcon::Bone,
-        };
-        ui::set_setting(SettingChange::AppIcon(icon), cx);
-        cx.notify();
-    }
-
     /// Rebuild the icon-pack choices from the current snapshot. The saved id
     /// stays in the list when it is missing, so the menu never drops the value
     /// the file holds. Returns the saved choice's index.
@@ -2023,7 +2004,27 @@ impl SettingsWindow {
             ids.push(choice.id.clone());
             labels.push(label);
         }
-        if !ids.iter().any(|id| id == &saved) {
+        let layered: Vec<&str> = crow_core::split_sources(&saved).collect();
+        if layered.len() > 1 {
+            // Several packs are layered: members are ticked, picking one adds or removes it, and
+            // the saved list is its own row so the closed menu names every pack.
+            for (id, label) in ids.iter().zip(labels.iter_mut()) {
+                if layered.contains(&id.as_str()) {
+                    *label = format!("✓ {label}");
+                }
+            }
+            for part in &layered {
+                if !ids.iter().any(|id| id == part) {
+                    ids.push((*part).to_owned());
+                    labels.push(format!("✓ {part} (not installed)"));
+                }
+            }
+            let names = cx
+                .try_global::<crate::icon_packs::IconPacks>()
+                .map_or_else(|| saved.clone(), |packs| packs.display_name(&saved));
+            ids.push(saved.clone());
+            labels.push(names);
+        } else if !ids.iter().any(|id| id == &saved) {
             let label = if saved == crow_core::NATIVE_ICON_SOURCE {
                 "Native".to_owned()
             } else {
@@ -2196,8 +2197,11 @@ impl SettingsWindow {
         if !self.icon_pack_ids.iter().any(|candidate| candidate == &id) {
             return;
         }
-        if cx.global::<Ui>().settings.icon_pack != id {
-            ui::set_setting(SettingChange::IconPack(id), cx);
+        // Picking a pack adds it to (or removes it from) the layered list; Native clears it.
+        let next = crow_core::toggle_source(&cx.global::<Ui>().settings.icon_pack, &id);
+        let layered_row = crow_core::split_sources(&id).count() > 1;
+        if !layered_row && cx.global::<Ui>().settings.icon_pack != next {
+            ui::set_setting(SettingChange::IconPack(next), cx);
         }
     }
 
@@ -2415,7 +2419,6 @@ impl SettingsWindow {
             enabled: id.enabled(cx),
             selected: match id {
                 ControlId::Theme => Some(self.theme.cursor),
-                ControlId::AppIcon => Some(app_icon_index(settings.app_icon)),
                 ControlId::FontFamily => Some(self.font_cursor),
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
@@ -2423,6 +2426,7 @@ impl SettingsWindow {
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
                 ControlId::PathBar => Some(path_bar_index(settings.path_bar)),
+                ControlId::SidebarStyle => Some(sidebar_style_index(settings.sidebar_style)),
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
@@ -2525,17 +2529,6 @@ impl Render for SettingsWindow {
             .dropdown(ControlId::Theme, &theme_labels, self.theme.cursor, &self.theme_scroll, window, &theme, cx)
             .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::Theme, event, cx)));
 
-        let tiles = [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone]
-            .map(|icon| controls::Tile { label: app_icon_label(icon), image: app_icon_image(icon) });
-        let app_icon_select = select_callback(cx, |this, index, window, cx| this.select_app_icon(index, window, cx));
-        let app_icon_row = controls::tile_choice(
-            self.meta(ControlId::AppIcon, cx),
-            &tiles,
-            app_icon_index(settings.app_icon),
-            self.style(ControlId::AppIcon, window, &theme),
-            app_icon_select,
-        );
-
         let font_row = self
             .dropdown(ControlId::FontFamily, &self.fonts, self.font_cursor, &self.font_scroll, window, &theme, cx)
             .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::FontFamily, event, cx)));
@@ -2583,6 +2576,19 @@ impl Render for SettingsWindow {
             path_bar_index(settings.path_bar),
             self.style(ControlId::PathBar, window, &theme),
             path_bar_select,
+            None,
+        );
+
+        let sidebar_style_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::SidebarStyle, index, window, cx)
+        });
+        let sidebar_style_labels = crow_core::SidebarStyle::ALL.map(crow_core::SidebarStyle::label);
+        let sidebar_style_row = controls::segmented(
+            self.meta(ControlId::SidebarStyle, cx),
+            &sidebar_style_labels,
+            sidebar_style_index(settings.sidebar_style),
+            self.style(ControlId::SidebarStyle, window, &theme),
+            sidebar_style_select,
             None,
         );
 
@@ -2754,7 +2760,7 @@ impl Render for SettingsWindow {
         );
         let show_config = controls::button(
             ControlId::ShowConfig.key(),
-            "Show config folder in Finder",
+            "Open config folder",
             false,
             true,
             self.style(ControlId::ShowConfig, window, &theme),
@@ -2855,9 +2861,9 @@ impl Render for SettingsWindow {
         let plugin_row = self.plugin_section(&theme, window, cx);
         let mut rows: HashMap<ControlId, gpui::AnyElement> = HashMap::new();
         rows.insert(ControlId::Theme, theme_row.into_any_element());
-        rows.insert(ControlId::AppIcon, app_icon_row.into_any_element());
         rows.insert(ControlId::IconPack, icon_row.into_any_element());
         rows.insert(ControlId::PathBar, path_bar_row.into_any_element());
+        rows.insert(ControlId::SidebarStyle, sidebar_style_row.into_any_element());
         rows.insert(ControlId::FontFamily, font_row.into_any_element());
         rows.insert(ControlId::FontSize, font_size_row.into_any_element());
         rows.insert(ControlId::Keymap, keymap_row.into_any_element());
@@ -3372,6 +3378,10 @@ fn path_bar_index(value: PathBarMode) -> usize {
     }
 }
 
+fn sidebar_style_index(value: crow_core::SidebarStyle) -> usize {
+    crow_core::SidebarStyle::ALL.iter().position(|style| *style == value).unwrap_or(0)
+}
+
 fn search_match_index(value: SearchMatch) -> usize {
     match value {
         SearchMatch::All => 0,
@@ -3395,32 +3405,6 @@ fn sound_index(value: SoundSet) -> usize {
         SoundSet::Finder => 1,
         SoundSet::Off => 2,
     }
-}
-
-fn app_icon_index(value: AppIcon) -> usize {
-    match value {
-        AppIcon::Refined => 0,
-        AppIcon::Sun => 1,
-        AppIcon::Graphite => 2,
-        AppIcon::Bone => 3,
-    }
-}
-
-fn app_icon_label(value: AppIcon) -> &'static str {
-    match value {
-        AppIcon::Refined => "Refined",
-        AppIcon::Sun => "Sun",
-        AppIcon::Graphite => "Graphite",
-        AppIcon::Bone => "Bone",
-    }
-}
-
-fn app_icon_image(icon: AppIcon) -> Arc<Image> {
-    static ICONS: LazyLock<[Arc<Image>; 4]> = LazyLock::new(|| {
-        [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone]
-            .map(|icon| Arc::new(Image::from_bytes(ImageFormat::Png, ui::app_icon_png(icon).to_vec())))
-    });
-    ICONS[app_icon_index(icon)].clone()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4300,9 +4284,12 @@ mod tests {
     fn category_changes_fade_the_content_and_motion_off_skips_it(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Full), cx));
+        // Asked at a moment before the change: a slow runner can spend longer than PANEL_TAB inside
+        // `show_category`, and the check must not depend on that.
+        let before = Instant::now();
         show_category(&view, &mut vcx, Category::Behaviour);
         assert!(
-            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, Instant::now())).is_some(),
+            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, before)).is_some(),
             "a category change starts a content transition"
         );
         let later = Instant::now() + Duration::from_millis(300);
@@ -4851,16 +4838,6 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
-    fn tile_choice_moves_with_arrows(cx: &mut TestAppContext) {
-        let (view, mut vcx) = open_settings(cx);
-        focus_control(&view, &mut vcx, ControlId::AppIcon);
-        vcx.simulate_keystrokes("right");
-        assert_eq!(state(&view, &vcx, ControlId::AppIcon).selected, Some(1));
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.app_icon), AppIcon::Sun);
-        wait_for(&vcx, "app_icon = \"sun\"");
-    }
-
-    #[gpui::test]
     fn stepper_arrows_and_typed_digits(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         focus_control(&view, &mut vcx, ControlId::FontSize);
@@ -5018,6 +4995,20 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
+    fn sidebar_style_is_a_five_way_choice_that_starts_on_ledger_lines(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::SidebarStyle);
+        assert_eq!(state(&view, &vcx, ControlId::SidebarStyle).selected, Some(0), "Ledger lines is the default");
+        vcx.simulate_keystrokes("right right");
+        assert_eq!(
+            vcx.read_global::<Ui, _>(|ui, _| ui.settings.sidebar_style),
+            crow_core::SidebarStyle::Accordion,
+            "two steps right is the third style"
+        );
+        wait_for(&vcx, "sidebar_style = \"accordion\"");
+    }
+
+    #[gpui::test]
     fn theme_dropdown_by_mouse(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         set_two_themes(&view, &mut vcx);
@@ -5033,7 +5024,9 @@ preview_providers = ["example.one.preview"]
         assert_eq!(menu(&view, &vcx), None, "a second click on the button closes it");
 
         click(&mut vcx, button);
-        let elsewhere = vcx.debug_bounds("settings-app-icon-control").expect("app icon").center();
+        // The theme row's label, left of the button: outside the menu, and not a control.
+        let label = vcx.debug_bounds("settings-theme-row").expect("theme row");
+        let elsewhere = gpui::point(label.left() + px(8.), label.center().y);
         click(&mut vcx, elsewhere);
         assert_eq!(menu(&view, &vcx), None, "a click outside closes it");
         assert_eq!(saved_theme(&vcx), "system");
@@ -5070,14 +5063,14 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings(cx);
         set_two_themes(&view, &mut vcx);
         draw(&mut vcx);
-        let below = vcx.debug_bounds("settings-app-icon-row").expect("app icon row");
+        let below = vcx.debug_bounds("settings-icon-pack-row").expect("icon pack row");
         focus_control(&view, &mut vcx, ControlId::Theme);
         vcx.simulate_keystrokes("space");
         draw(&mut vcx);
         let menu = vcx.debug_bounds("settings-theme-menu").expect("the open menu draws");
         let button = vcx.debug_bounds("settings-theme-control").expect("theme button");
         assert!(menu.top() >= button.bottom(), "the menu opens under its button");
-        assert_eq!(vcx.debug_bounds("settings-app-icon-row"), Some(below), "opening it moves nothing on the page");
+        assert_eq!(vcx.debug_bounds("settings-icon-pack-row"), Some(below), "opening it moves nothing on the page");
     }
 
     #[gpui::test]
@@ -5085,7 +5078,7 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings(cx);
         draw(&mut vcx);
         let before = vcx.debug_bounds("settings-theme-control").expect("theme control bounds");
-        focus_control(&view, &mut vcx, ControlId::AppIcon);
+        focus_control(&view, &mut vcx, ControlId::IconPack);
         draw(&mut vcx);
         let after = vcx.debug_bounds("settings-theme-control").expect("theme control bounds");
         assert_eq!(before, after, "the focus ring is inset and never resizes the control");
@@ -5123,7 +5116,11 @@ preview_providers = ["example.one.preview"]
         click(&view, &mut vcx, ControlId::ShowConfig, "settings-show-config");
         let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
         assert!(calls.contains(&Call::OpenInDefaultApp(config.join("settings.toml"))), "{calls:?}");
-        assert!(calls.contains(&Call::OpenFolderInFinder(config)), "{calls:?}");
+        assert!(!calls.iter().any(|call| matches!(call, Call::OpenFolderInFinder(_))), "it opens in Crow: {calls:?}");
+        let opened = vcx.update(|_, cx| {
+            cx.windows().iter().filter_map(|handle| handle.downcast::<crate::window::CrowWindow>()).count()
+        });
+        assert!(opened >= 1, "a Crow window opened on the config folder");
     }
 
     #[gpui::test]

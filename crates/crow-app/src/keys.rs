@@ -335,6 +335,63 @@ mod tests {
         });
     }
 
+    /// `docs/keys.md`, written from the live keymap. Run with `CROW_UPDATE_DOCS=1` to rewrite it
+    /// after a keymap change; otherwise the test fails when the file drifts.
+    #[gpui::test]
+    fn keys_doc_matches_the_live_keymap(cx: &mut TestAppContext) {
+        use crate::palette::MenuName;
+        setup(cx);
+        let mut out = String::from(
+            "# Keys\n\n\
+             Generated from Crow's keymap by `cargo test -p crow-app keys_doc` (`CROW_UPDATE_DOCS=1` rewrites it); do not edit by hand.\n\n\
+             Every command is in the menu bar and in the palette (`>`). The Finder layer is the default; `keymap = \"vim\"` adds the Vim layer, which keeps the Finder keys for menu commands. \
+             Rebind any row in Settings ▸ Keyboard or in `keys.toml` with the id in the last column.\n\n\
+             Movement keys (arrows, Return, Space and Esc in lists, the sidebar, search results and sheets) are not rebindable.\n",
+        );
+        let layer_text = |cx: &mut TestAppContext, layer: KeymapLayer, command: &crate::palette::Command| {
+            cx.update(|cx| {
+                cx.global_mut::<Ui>().settings.keymap = layer;
+                text(command.action, command.scope, cx).map(|t| t.to_string())
+            })
+        };
+        let mut menus: Vec<(String, Option<MenuName>)> =
+            MenuName::ALL.iter().map(|m| (format!("{m:?}"), Some(*m))).collect();
+        menus.push(("Palette only".to_owned(), None));
+        for (title, menu) in menus {
+            let mut rows = String::new();
+            for command in COMMANDS.iter().filter(|c| c.menu.map(|slot| slot.menu) == menu) {
+                let finder = layer_text(cx, KeymapLayer::Finder, command);
+                let vim = layer_text(cx, KeymapLayer::Vim, command);
+                if finder.is_none() && vim.is_none() {
+                    continue;
+                }
+                let vim_cell = match (&finder, &vim) {
+                    (a, b) if a == b => String::new(),
+                    (_, Some(v)) => format!("`{v}`"),
+                    (_, None) => String::new(),
+                };
+                rows.push_str(&format!(
+                    "| {} | {} | {} | `{}` |\n",
+                    command.label,
+                    finder.map(|f| format!("`{f}`")).unwrap_or_default(),
+                    vim_cell,
+                    command.id.key()
+                ));
+            }
+            if !rows.is_empty() {
+                out.push_str(&format!(
+                    "\n## {title}\n\n| Command | Finder | Vim layer | Id |\n| --- | --- | --- | --- |\n{rows}"
+                ));
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keys.md");
+        if std::env::var_os("CROW_UPDATE_DOCS").is_some() {
+            std::fs::write(&path, &out).unwrap();
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(on_disk, out, "docs/keys.md is out of date: run CROW_UPDATE_DOCS=1 cargo test -p crow-app keys_doc");
+    }
+
     fn action(id: CommandId) -> &'static dyn Action {
         COMMANDS.iter().find(|c| c.id == id).expect("command is registered").action
     }
@@ -354,6 +411,7 @@ mod tests {
                 (CommandId::TogglePreview, "⇧⌘P"),
                 (CommandId::ToggleSidebar, "⌃⌘S"),
                 (CommandId::ShowInfo, "⌘I"),
+                (CommandId::CycleRightSidebar, "⌥⌘P"),
                 (CommandId::OpenParent, "⌘↑"),
                 (CommandId::GoBack, "⌘["),
                 (CommandId::GoForward, "⌘]"),
@@ -429,11 +487,15 @@ mod tests {
                 CommandId::EditSavedSearch,
                 CommandId::RemoveSavedSearch,
                 CommandId::ChooseTags,
+                CommandId::AddToShelf,
+                CommandId::MoveShelfHere,
+                CommandId::CopyShelfHere,
+                CommandId::ClearShelf,
             ] {
                 let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
                 assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
             }
-            assert_eq!(COMMANDS.len(), expected.len() + 22, "every command is in the table");
+            assert_eq!(COMMANDS.len(), expected.len() + 26, "every command is in the table");
         });
     }
 }

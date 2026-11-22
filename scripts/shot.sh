@@ -12,8 +12,30 @@
 # [keys] drives the state from the command line, `|`-separated, each step one of:
 #   text:vi          type the text
 #   cmd:f            press the letter with Command (cmdshift:a, cmdfn:… likewise)
-#   key:escape       return, escape, tab, space, up, down, left, right, delete
+#   key:escape       return, escape, tab, space, up, down, left, right, delete, f2, home, end
+#   shift:down       the same keys with Shift (extend a selection)
+#   hold:down:40     press the key 40 times, 50 a second (a held key, for scrolling)
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
+# CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
+# one), so the path bar reads ~/... and the sidebar lists that home's folders.
+# Tags come from this Mac's Spotlight, so a demo-home shot hides them; Locations (this
+# Mac's volumes) stay unless CROW_SHOT_LOCATIONS=false. Its Projects folder is the Git
+# projects root.
+# CROW_SHOT_CUSTOM=1 (with CROW_SHOT_HOME) dresses the window up: emoji and colours in
+# the sidebar, a second group, and the demo icon pack (scripts/demo/icon-pack).
+# CROW_SHOT_PERSONA=<id> (with CROW_SHOT_HOME, a make-personas.sh home) uses that persona's
+# sidebar groups, settings and the Lucide icon pack instead of the generic demo setup.
+# CROW_SHOT_SIDEBAR_STYLE overrides the persona's sidebar_style.
+# CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
+# CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
+# CROW_SHOT_OTHER_WINDOW=1 captures the window the keys opened (Settings) instead of
+# the browser window.
+# CROW_SHOT_RECORD=1 records the window while the keys run instead of a screenshot:
+# target/shots/<state>-<theme>.mov, at 60 fps, without the pointer
+# (scripts/record-window.swift). Motion stays as configured (Full by default).
+# Without [keys] it records CROW_SHOT_RECORD_SECONDS (default 3) instead of waiting.
+# CROW_SHOT_ARGS adds arguments before the folder, e.g. --bench (Crow's own 100k
+# scroll, which quits after 600 frames: keep the recording shorter than that).
 # Without [keys] the script waits for Return: set up the state by hand, then
 # press Return and it captures. Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
@@ -50,36 +72,97 @@ theme = "$theme"
 keymap = "$keymap"
 hints = "always"
 motion = "off"
+${CROW_SHOT_SETTINGS:-}
+$( [ -n "${CROW_SHOT_CUSTOM:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "linework"' )
+$( [ -n "${CROW_SHOT_PERSONA:-}" ] && sed "s|^sidebar_style = .*|sidebar_style = \"${CROW_SHOT_SIDEBAR_STYLE:-}\"|;" "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml" | { if [ -n "${CROW_SHOT_SIDEBAR_STYLE:-}" ]; then cat; else cat "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml"; fi; } )
 [window]
 width = 1280
 height = 800
+sidebar_width = ${CROW_SHOT_SIDEBAR:-300}
 EOF
-# Column view for every state: the boards are column-view windows.
-cat >"$work/config/views.toml" <<'EOF'
+# Column view for every state unless CROW_SHOT_VIEW says otherwise: the boards are
+# column-view windows.
+cat >"$work/config/views.toml" <<EOF
 [defaults]
-view = "columns"
+view = "${CROW_SHOT_VIEW:-columns}"
 EOF
 # Favorites inside the repo, so no private folder names reach a shot.
 # CROW_SHOT_ROOT points them at a copy of the repo (a neutral path, used when the
 # shots are committed: the window's path bar then shows no home folder).
 favs=$(cd "${CROW_SHOT_ROOT:-$root}" && pwd -P)
+if [ -n "${CROW_SHOT_HOME:-}" ]; then
+  shot_home=$(cd "$CROW_SHOT_HOME" && pwd -P)
+  fav_items=""
+  for d in Desktop Documents Downloads Pictures Projects; do
+    [ -d "$shot_home/$d" ] && fav_items="$fav_items  { path = \"$shot_home/$d\" },
+"
+  done
+  if [ -n "${CROW_SHOT_CUSTOM:-}" ]; then
+    # "What your Crow could look like": emoji and colours on favorites, a second
+    # group, and the demo icon pack.
+    fav_items="  { path = \"$shot_home/Desktop\", icon = \"🖥️\" },
+  { path = \"$shot_home/Documents\", icon = \"📚\", color = \"yellow\" },
+  { path = \"$shot_home/Downloads\", icon = \"📥\", color = \"green\" },
+  { path = \"$shot_home/Pictures\", icon = \"🌄\", color = \"purple\" },
+  { path = \"$shot_home/Projects\", icon = \"🛠️\", color = \"orange\" },
+]
+
+[[group]]
+name = \"Trips\"
+items = [
+  { path = \"$shot_home/Pictures/Trips\", name = \"Photos\", icon = \"📷\", color = \"pink\" },
+  { path = \"$shot_home/Documents/Travel\", name = \"Plans\", icon = \"🧭\", color = \"cyan\" },
+"
+    mkdir -p "$work/config/icon-packs"
+    cp -R "$root/scripts/demo/icon-pack" "$work/config/icon-packs/linework"
+  fi
+  shot_locations=${CROW_SHOT_LOCATIONS:-true}
+  shot_sections="[section.\"tags\"]
+show = false
+
+[sections]
+order = [\"recent\", \"crow.projects\", \"locations\"]
+
+[projects]
+roots = [\"$shot_home/Projects\"]"
+else
+  shot_home=$HOME
+  fav_items="  { path = \"$favs\" },
+  { path = \"$favs/crates\" },
+  { path = \"$favs/docs\" },
+  { path = \"$favs/scripts\" },
+"
+fi
 cat >"$work/config/sidebar.toml" <<EOF
 [[group]]
 name = "Favorites"
 items = [
-  { path = "$favs" },
-  { path = "$favs/crates" },
-  { path = "$favs/docs" },
-  { path = "$favs/scripts" },
-]
+$fav_items]
 
 [recent]
 show = true
 count = 6
 
 [locations]
-show = true
+show = ${shot_locations:-true}
+${shot_sections:-}
 EOF
+
+# A persona (scripts/demo/personas/<id>/) brings its own sidebar groups and the Lucide
+# icon pack; its home comes from scripts/demo/make-personas.sh.
+if [ -n "${CROW_SHOT_PERSONA:-}" ]; then
+  pdir="$root/scripts/demo/personas/$CROW_SHOT_PERSONA"
+  sed "s|@HOME@|$shot_home|g" "$pdir/sidebar.toml" >"$work/config/sidebar.toml"
+  [ -f "$pdir/views.toml" ] && cp "$pdir/views.toml" "$work/config/views.toml"
+  mkdir -p "$work/config/icon-packs"
+  "$root/scripts/demo/make-lucide-pack.sh" "$work/config/icon-packs/lucide" >/dev/null
+fi
+
+# The bundled Git package runs only with a grant for its exact digest; a demo-home
+# shot copies just that record from your config, so badges and Projects show.
+if [ -n "${CROW_SHOT_HOME:-}" ] && [ -f "$HOME/.config/crow/plugins.toml" ]; then
+  awk '/^\[/{keep = ($0 == "[plugin.git]")} keep && !/^#/' "$HOME/.config/crow/plugins.toml" >"$work/config/plugins.toml"
+fi
 
 # No zoxide on PATH: Recent must not pick up folders this run never visited.
 # PATH alone is not enough (recent.rs also probes /opt/homebrew/bin and friends),
@@ -87,8 +170,13 @@ EOF
 mkdir -p "$work/bin"
 printf '#!/bin/sh\nexit 1\n' >"$work/bin/zoxide"
 chmod +x "$work/bin/zoxide"
-CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
-  "$app" "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
+# Crow logs into the shot home's ~/Library/Logs; a search shot would list that log (it
+# names the demo folders), so a demo home starts from none, and every shot logs only warnings.
+if [ -n "${CROW_SHOT_HOME:-}" ]; then
+  rm -f "$shot_home/Library/Logs/Crow/crow.log"
+fi
+RUST_LOG=${RUST_LOG:-warn} HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
+  "$app" ${CROW_SHOT_ARGS:-} "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 
@@ -118,8 +206,10 @@ echo "Crow pid $pid, window $id ($size), theme $theme, keymap $keymap"
 press() {
   case $1 in
     text:*) osascript -e "tell application \"System Events\" to keystroke \"${1#text:}\"" ;;
-    key:*)
-      case ${1#key:} in
+    key:* | shift:* | hold:*)
+      local name=${1#*:}
+      name=${name%%:*}
+      case $name in
         return) code=36 ;;
         escape) code=53 ;;
         tab) code=48 ;;
@@ -129,6 +219,9 @@ press() {
         down) code=125 ;;
         left) code=123 ;;
         right) code=124 ;;
+        f2) code=120 ;;
+        home) code=115 ;;
+        end) code=119 ;;
         pageup) code=116 ;;
         pagedown) code=121 ;;
         *)
@@ -136,7 +229,14 @@ press() {
           return 1
           ;;
       esac
-      osascript -e "tell application \"System Events\" to key code $code"
+      if [ "${1%%:*}" = hold ]; then
+        osascript -e "tell application \"System Events\" to repeat ${1##*:} times" \
+          -e "key code $code" -e "delay 0.02" -e "end repeat"
+      elif [ "${1%%:*}" = shift ]; then
+        osascript -e "tell application \"System Events\" to key code $code using shift down"
+      else
+        osascript -e "tell application \"System Events\" to key code $code"
+      fi
       ;;
     cmd:*) osascript -e "tell application \"System Events\" to keystroke \"${1#cmd:}\" using command down" ;;
     cmdshift:*)
@@ -150,6 +250,25 @@ press() {
   esac
 }
 
+recorder=""
+if [ -n "${CROW_SHOT_RECORD:-}" ]; then
+  rec_bin="$root/target/shots/record-window"
+  if [ ! -x "$rec_bin" ] || [ "$root/scripts/record-window.swift" -nt "$rec_bin" ]; then
+    swiftc -O -o "$rec_bin" "$root/scripts/record-window.swift"
+  fi
+  movie="$root/target/shots/$state-$theme.mov"
+  rm -f "$movie"
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+  sleep 0.8
+  "$rec_bin" "$id" "$movie" >"$work/rec" 2>&1 &
+  recorder=$!
+  for _ in $(seq 1 40); do
+    grep -q recording "$work/rec" 2>/dev/null && break
+    kill -0 "$recorder" 2>/dev/null || { cat "$work/rec" >&2; exit 1; }
+    sleep 0.1
+  done
+fi
+
 if [ -n "$keys" ]; then
   sleep 0.8
   IFS='|' read -ra steps <<<"$keys"
@@ -158,15 +277,46 @@ if [ -n "$keys" ]; then
     sleep 0.35
   done
   sleep 0.8
+elif [ -n "$recorder" ]; then
+  sleep "${CROW_SHOT_RECORD_SECONDS:-3}"
 else
   echo "Set up the '$state' state in the window, then press Return to capture."
   # A piped or closed stdin is an immediate Return (scripted runs).
   read -r _ || true
 fi
 
+if [ -n "${CROW_SHOT_OTHER_WINDOW:-}" ]; then
+  other=$(swift "$root/scripts/window-id.swift" "$pid" "$id" 2>/dev/null || true)
+  if [ -z "$other" ]; then
+    echo "shot.sh: the keys opened no other window" >&2
+    exit 1
+  fi
+  id=${other%% *}
+fi
+
+if [ -n "$recorder" ]; then
+  kill -INT "$recorder"
+  wait "$recorder" || true
+  [ -s "$movie" ] || { echo "shot.sh: no recording" >&2; cat "$work/rec" >&2; exit 1; }
+  echo "wrote $movie"
+  exit 0
+fi
+
 out="$root/target/shots/$state-$theme.png"
-if ! screencapture -x -o -l "$id" "$out"; then
-  echo "shot.sh: screencapture failed; grant the terminal Screen Recording permission" >&2
+# Grey traffic lights mean another app took focus; bring Crow forward and retake (a few times).
+captured=""
+for attempt in 1 2 3 4; do
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+  sleep 0.8
+  if ! screencapture -x -o -l "$id" "$out" 2>/dev/null; then
+    echo "shot.sh: screencapture failed (attempt $attempt); retrying" >&2
+    continue
+  fi
+  if swift "$root/scripts/lights-active.swift" "$out" 2>/dev/null; then captured=yes; break; fi
+  echo "shot.sh: the window was not active (attempt $attempt); retrying" >&2
+done
+if [ -z "$captured" ]; then
+  echo "shot.sh: no good capture of $state after 4 attempts (is the Mac asleep, locked, or another app in front? Screen Recording permission?)" >&2
   exit 1
 fi
 echo "wrote $out"

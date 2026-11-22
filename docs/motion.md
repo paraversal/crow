@@ -85,7 +85,7 @@ Milliseconds, Full unless a surface says otherwise.
 | Sheets, palette, pickers: open | Fade in, scrim fades in (`SCRIM`) | Same |
 | Sheets, palette, pickers: close | Fade out and sink 4 px (`SHEET_OUT`), scrim fades out; input is already released | Fade out |
 | Palette highlight | Spring glide between rows; typing snaps it | Snaps |
-| Right column (⇧⌘P, ⌘I) | Width eases (`PANE_SLIDE`), content fades after half | Width snaps, content fades |
+| Right sidebar (⇧⌘P, ⌥⌘P, ⌘I) and left sidebar (⌃⌘S) | Width eases (`PANE_SLIDE`), content fades after half | Width snaps, content fades |
 | Sidebar sections | Rows grow and fade in, closing rows fade while the gap shrinks, chevrons crossfade | Rows fade in; collapse is instant |
 | Window tabs | New tab grows, closed tab shrinks away, active fill glides | New tab fades; close is instant |
 | Toolbar view switcher | Selected segment glides | Snaps |

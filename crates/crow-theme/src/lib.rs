@@ -35,7 +35,7 @@ pub const ROLES: [&str; 16] = [
 ];
 
 /// The themes compiled into the binary: `(id, scheme JSON)`.
-const BUILTIN: [(&str, &str); 8] = [
+const BUILTIN: [(&str, &str); 10] = [
     ("finder-light", include_str!("../themes/finder-light.json")),
     ("finder-dark", include_str!("../themes/finder-dark.json")),
     ("catppuccin-latte", include_str!("../themes/catppuccin-latte.json")),
@@ -44,6 +44,8 @@ const BUILTIN: [(&str, &str); 8] = [
     ("gruvbox-dark", include_str!("../themes/gruvbox-dark.json")),
     ("solarized-light", include_str!("../themes/solarized-light.json")),
     ("solarized-dark", include_str!("../themes/solarized-dark.json")),
+    ("rose-pine-dawn", include_str!("../themes/rose-pine-dawn.json")),
+    ("rose-pine", include_str!("../themes/rose-pine.json")),
 ];
 /// The base role mapping, used when the index has no (valid) `roles.json`.
 const BASE_ROLES: &str = r##"{
@@ -566,7 +568,7 @@ mod tests {
     fn no_index_lists_exactly_the_builtins() {
         let (_root, dir, state) = no_index();
         let ids: Vec<_> = list_theme_infos(&dir).into_iter().map(|i| i.id).collect();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 10);
         for id in BUILTIN.map(|(id, _)| id) {
             assert!(ids.iter().any(|i| i == id), "{id}");
         }
@@ -593,7 +595,7 @@ mod tests {
             let (_root, dir, state) = no_index();
             setup(&dir);
             assert!(!index_exists(&dir));
-            assert_eq!(list_theme_infos(&dir).len(), 8);
+            assert_eq!(list_theme_infos(&dir).len(), 10);
             assert_eq!(resolve_theme_id(None, Variant::Dark, &dir, &state), "finder-dark");
         }
     }
@@ -636,7 +638,7 @@ mod tests {
         assert_eq!(shared.len(), 1);
         assert_eq!((shared[0].name.as_str(), shared[0].source), ("My Solarized", Source::Index));
         assert_eq!(load_theme(&dir, "solarized-dark").unwrap().name, "My Solarized");
-        assert_eq!(infos.len(), 10);
+        assert_eq!(infos.len(), 12);
     }
 
     #[test]
@@ -704,7 +706,7 @@ mod tests {
             assert!(infos.iter().any(|i| i.id == id));
         }
         let variants: Vec<_> = infos.iter().map(|i| i.variant).collect();
-        assert_eq!(variants.iter().filter(|v| **v == Variant::Light).count(), 4);
+        assert_eq!(variants.iter().filter(|v| **v == Variant::Light).count(), 5);
     }
 
     /// WCAG relative luminance contrast ratio.

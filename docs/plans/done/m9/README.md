@@ -6,30 +6,30 @@ M9 is done. Status and PRs also live in the [roadmap](../../../ROADMAP.md#m9--pl
 
 | Piece | Delivered | PR |
 | --- | --- | --- |
-| P1A | Versioned Rhai packages, permissions, registration, and budgeted workers | [#61](https://github.com/paraversal/file-crow/pull/61) |
-| P9A | Test and fuzz fixture ownership and cleanup | [#62](https://github.com/paraversal/file-crow/pull/62) |
-| P9B | Cross-run test and fuzz reporting with a baseline | [#63](https://github.com/paraversal/file-crow/pull/63) |
-| P9C | Palette and window module extraction | [#64](https://github.com/paraversal/file-crow/pull/64) |
-| P8 | Read-only iCloud download status and metadata-only browsing for placeholders | [#65](https://github.com/paraversal/file-crow/pull/65) |
-| P1B | App extension surfaces and [plugin author documentation](../../../plugins.md) | [#66](https://github.com/paraversal/file-crow/pull/66) |
-| P2 | Read-only Git status, lines changed, and Projects with user-selected roots | [#67](https://github.com/paraversal/file-crow/pull/67) |
-| P2 follow-up | Git review and diff, pinned repository status, and resizable side panes | [#68](https://github.com/paraversal/file-crow/pull/68) |
-| Navigation follow-up | List and Columns transitions, reveal feedback, persistent sidebar width, and bulk selection scaling tests | [#69](https://github.com/paraversal/file-crow/pull/69) |
-| Settings overhaul | Category sidebar, settings search, shared configuration errors, view and preview defaults | [#73](https://github.com/paraversal/file-crow/pull/73) |
-| List fit | List fits beside Preview | [#72](https://github.com/paraversal/file-crow/pull/72) |
-| P3A | Data-only icon packs | [#71](https://github.com/paraversal/file-crow/pull/71) |
-| P3B | Sorted icon grid, marquee and Cmd-drag selection | [#74](https://github.com/paraversal/file-crow/pull/74) |
-| P3C | Gallery view | [#75](https://github.com/paraversal/file-crow/pull/75) |
-| P4A | Saved queries as live destinations | [#76](https://github.com/paraversal/file-crow/pull/76) |
-| P4B | Finder tags in the sidebar, filter and saved queries | [#77](https://github.com/paraversal/file-crow/pull/77) |
-| P5A | Resumable copy jobs and a conflict protocol | [#78](https://github.com/paraversal/file-crow/pull/78) |
-| P5B | App-wide copy queue in Activity | [#79](https://github.com/paraversal/file-crow/pull/79) |
-| P6 | Batch rename with preview and one undo | [#80](https://github.com/paraversal/file-crow/pull/80) |
-| P9D | Explorer-style path bar setting | [#81](https://github.com/paraversal/file-crow/pull/81) |
-| P7 | Native drop routing and spring-loaded folders | [#82](https://github.com/paraversal/file-crow/pull/82) |
-| Audit | Through-M9 code audit report, size index and backlog | [#83](https://github.com/paraversal/file-crow/pull/83) |
-| Audit fixes 1–7 | Drag routing, Git gating and Empty Trash, config safety, selection parity, live freezes, polish, fuzz coverage | [#84](https://github.com/paraversal/file-crow/pull/84)–[#87](https://github.com/paraversal/file-crow/pull/87), [#89](https://github.com/paraversal/file-crow/pull/89)–[#91](https://github.com/paraversal/file-crow/pull/91) |
-| Finish fix | Saved query and tag results survive a batch rename and its Undo | [#92](https://github.com/paraversal/file-crow/pull/92) |
+| P1A | Versioned Rhai packages, permissions, registration, and budgeted workers | [#61](https://github.com/paraversal/crow/pull/61) |
+| P9A | Test and fuzz fixture ownership and cleanup | [#62](https://github.com/paraversal/crow/pull/62) |
+| P9B | Cross-run test and fuzz reporting with a baseline | [#63](https://github.com/paraversal/crow/pull/63) |
+| P9C | Palette and window module extraction | [#64](https://github.com/paraversal/crow/pull/64) |
+| P8 | Read-only iCloud download status and metadata-only browsing for placeholders | [#65](https://github.com/paraversal/crow/pull/65) |
+| P1B | App extension surfaces and [plugin author documentation](../../../plugins.md) | [#66](https://github.com/paraversal/crow/pull/66) |
+| P2 | Read-only Git status, lines changed, and Projects with user-selected roots | [#67](https://github.com/paraversal/crow/pull/67) |
+| P2 follow-up | Git review and diff, pinned repository status, and resizable side panes | [#68](https://github.com/paraversal/crow/pull/68) |
+| Navigation follow-up | List and Columns transitions, reveal feedback, persistent sidebar width, and bulk selection scaling tests | [#69](https://github.com/paraversal/crow/pull/69) |
+| Settings overhaul | Category sidebar, settings search, shared configuration errors, view and preview defaults | [#73](https://github.com/paraversal/crow/pull/73) |
+| List fit | List fits beside Preview | [#72](https://github.com/paraversal/crow/pull/72) |
+| P3A | Data-only icon packs | [#71](https://github.com/paraversal/crow/pull/71) |
+| P3B | Sorted icon grid, marquee and Cmd-drag selection | [#74](https://github.com/paraversal/crow/pull/74) |
+| P3C | Gallery view | [#75](https://github.com/paraversal/crow/pull/75) |
+| P4A | Saved queries as live destinations | [#76](https://github.com/paraversal/crow/pull/76) |
+| P4B | Finder tags in the sidebar, filter and saved queries | [#77](https://github.com/paraversal/crow/pull/77) |
+| P5A | Resumable copy jobs and a conflict protocol | [#78](https://github.com/paraversal/crow/pull/78) |
+| P5B | App-wide copy queue in Activity | [#79](https://github.com/paraversal/crow/pull/79) |
+| P6 | Batch rename with preview and one undo | [#80](https://github.com/paraversal/crow/pull/80) |
+| P9D | Explorer-style path bar setting | [#81](https://github.com/paraversal/crow/pull/81) |
+| P7 | Native drop routing and spring-loaded folders | [#82](https://github.com/paraversal/crow/pull/82) |
+| Audit | Through-M9 code audit report, size index and backlog | [#83](https://github.com/paraversal/crow/pull/83) |
+| Audit fixes 1–7 | Drag routing, Git gating and Empty Trash, config safety, selection parity, live freezes, polish, fuzz coverage | [#84](https://github.com/paraversal/crow/pull/84)–[#87](https://github.com/paraversal/crow/pull/87), [#89](https://github.com/paraversal/crow/pull/89)–[#91](https://github.com/paraversal/crow/pull/91) |
+| Finish fix | Saved query and tag results survive a batch rename and its Undo | [#92](https://github.com/paraversal/crow/pull/92) |
 
 Not planned: P9E, Solarized Light contrast in the shared theme index (decided 2026-11-21).
 

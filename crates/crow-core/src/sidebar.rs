@@ -57,6 +57,12 @@ show = true
 # collapsed = false
 # icon = "📁"   # a short text or emoji before the section title; none by default
 
+# The shelf: a strip at the bottom of the sidebar that holds files while you move between
+# folders (drag files onto it, or use Add to Shelf). It holds references, not copies, and
+# is remembered between launches. Off by default.
+[shelf]
+show = false
+
 # Project roots. Crow scans these folders for Git repositories; empty by default.
 # The native section is "crow.projects" in [sections]/[section] like any other.
 [projects]
@@ -136,6 +142,14 @@ pub struct ProjectsConfig {
     pub roots: Vec<String>,
 }
 
+/// The shelf at the bottom of the sidebar: files set aside to carry to another folder.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct ShelfConfig {
+    /// Off by default.
+    pub show: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct SidebarConfig {
@@ -147,6 +161,7 @@ pub struct SidebarConfig {
     pub sections: SectionsConfig,
     pub section: std::collections::BTreeMap<String, SectionConfig>,
     pub projects: ProjectsConfig,
+    pub shelf: ShelfConfig,
 }
 
 /// A sidebar section independent of the native favorites/Recent/Locations
@@ -636,6 +651,14 @@ pub fn load_sidebar(config_dir: &Path) -> Result<SidebarConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shelf_is_opt_in() {
+        let config = SidebarConfig::parse(DEFAULT_SIDEBAR).expect("the default parses");
+        assert!(!config.shelf.show, "the shelf is off by default");
+        let on = SidebarConfig::parse("[shelf]\nshow = true\n").expect("parses");
+        assert!(on.shelf.show);
+    }
 
     const HOME: &str = "/Users/me";
 

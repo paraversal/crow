@@ -51,12 +51,6 @@ motion = "auto"
 # interface sound effects" off silences all but the alert.
 sound = "crow"
 
-# The Dock icon: "refined" (default; black crow on bone), "sun" (crow before an
-# amber disc), "graphite" (folded grey planes) or "bone" (folded black planes on
-# bone). It changes the Dock while Crow runs; scripts/bundle.sh bakes this choice
-# into Crow.app, so Finder and Launchpad show it after the next bundle.
-app_icon = "refined"
-
 # Icons in the file list, sidebar, palette and previews: "native" (default) uses
 # macOS icons. Set a pack id to use a data-only pack from icon-packs/<id>/ or a
 # plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
@@ -66,6 +60,13 @@ icon_pack = "native"
 # turns into a field on Cmd-L or a click. "explorer" keeps it a visible path
 # field with a Go button; Return, Escape and Tab work the same in both.
 path_bar = "crow"
+
+# How the sidebar draws its groups: "ledger" (default) is plain headings with a hairline,
+# "cards" puts each group on a surface under a tinted heading strip, "accordion" uses
+# full-width heading bars, "floating-panel" lifts the whole sidebar into one rounded panel,
+# and "pills" shows each heading as a small colored pill. Any group takes an `icon` in
+# sidebar.toml.
+sidebar_style = "ledger"
 
 # Let the sidebar show the blurred desktop behind it, like Finder's. Off by default.
 # It stays opaque while macOS Reduce Transparency is on. Themes can't turn it on.
@@ -93,9 +94,10 @@ search_includes_hidden = true
 # this is the mode each new search starts in.
 search_match = "all"
 
-# The right column in list view and the last column in column view: a Preview tab
-# and an Info tab (Cmd-I). View ▸ Hide Preview (Shift-Cmd-P) toggles the column;
-# off is the default only, Cmd-I still opens it. Quick Look still works.
+# The right sidebar in list view and the last column in column view: a Preview tab
+# and an Info tab (Cmd-I). View ▸ Hide Right Sidebar (Shift-Cmd-P) toggles it and
+# Option-Cmd-P cycles its tabs; off is the default only, Cmd-I still opens it.
+# Quick Look still works.
 show_preview = true
 
 # Cmd-K: list the commands you ran from the palette under "Recently used"
@@ -249,30 +251,55 @@ impl FolderSizesMode {
     }
 }
 
-/// Which of Crow's icons the Dock shows.
+/// How the bottom bar shows its path.
+/// How the sidebar draws its groups.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AppIcon {
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarStyle {
+    /// Plain headings with a hairline running out to the right.
     #[default]
-    Refined,
-    Sun,
-    Graphite,
-    Bone,
+    Ledger,
+    /// Each group on a surface under a tinted heading strip.
+    Cards,
+    /// Full-width heading bars with a count, rows edge to edge.
+    Accordion,
+    /// The whole sidebar lifted into one rounded, bordered panel.
+    FloatingPanel,
+    /// Each heading a small colored pill.
+    Pills,
 }
 
-impl AppIcon {
-    /// The name in `settings.toml`, which is also the asset's file stem.
+impl SidebarStyle {
+    pub const ALL: [SidebarStyle; 5] = [
+        SidebarStyle::Ledger,
+        SidebarStyle::Cards,
+        SidebarStyle::Accordion,
+        SidebarStyle::FloatingPanel,
+        SidebarStyle::Pills,
+    ];
+
+    /// The value in `settings.toml`.
     pub fn key(self) -> &'static str {
         match self {
-            AppIcon::Refined => "refined",
-            AppIcon::Sun => "sun",
-            AppIcon::Graphite => "graphite",
-            AppIcon::Bone => "bone",
+            SidebarStyle::Ledger => "ledger",
+            SidebarStyle::Cards => "cards",
+            SidebarStyle::Accordion => "accordion",
+            SidebarStyle::FloatingPanel => "floating-panel",
+            SidebarStyle::Pills => "pills",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarStyle::Ledger => "Ledger lines",
+            SidebarStyle::Cards => "Cards",
+            SidebarStyle::Accordion => "Accordion",
+            SidebarStyle::FloatingPanel => "Floating panel",
+            SidebarStyle::Pills => "Pills",
         }
     }
 }
 
-/// How the bottom bar shows its path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PathBarMode {
@@ -311,8 +338,18 @@ fn native_icon_pack() -> String {
     crate::icon_pack::NATIVE_ICON_SOURCE.to_owned()
 }
 
+/// `icon_pack` is one source, a comma-separated string, or a list: `["lucide", "linework"]`.
 fn icon_pack_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let value = String::deserialize(deserializer)?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let value = match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => value,
+        OneOrMany::Many(values) => values.join(","),
+    };
     crate::icon_pack::validate_source(&value).map_err(serde::de::Error::custom)?;
     Ok(value)
 }
@@ -328,10 +365,10 @@ pub struct Settings {
     pub folder_sizes: FolderSizesMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
-    pub app_icon: AppIcon,
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
     pub path_bar: PathBarMode,
+    pub sidebar_style: SidebarStyle,
     pub translucent_sidebar: bool,
     pub font_family: String,
     pub font_size: f32,
@@ -356,9 +393,9 @@ impl Default for Settings {
             folder_sizes: FolderSizesMode::Off,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
-            app_icon: AppIcon::Refined,
             icon_pack: native_icon_pack(),
             path_bar: PathBarMode::Crow,
+            sidebar_style: SidebarStyle::Ledger,
             translucent_sidebar: false,
             font_family: String::new(),
             font_size: 13.0,
@@ -515,6 +552,26 @@ mod tests {
         assert_eq!(parsed.icon_pack, "example.pack.theme");
         assert!(toml::from_str::<Settings>("icon_pack = \"My Pack\"").is_err());
         assert!(toml::from_str::<Settings>("icon_pack = \"\"").is_err());
+    }
+
+    #[test]
+    fn icon_pack_takes_a_list_and_layers_packs_in_order() {
+        let one: Settings = toml::from_str("icon_pack = \"lucide, linework\"").unwrap();
+        assert_eq!(one.icon_pack, "lucide, linework");
+        let list: Settings = toml::from_str("icon_pack = [\"lucide\", \"linework\"]").unwrap();
+        assert_eq!(list.icon_pack, "lucide,linework");
+        assert!(toml::from_str::<Settings>("icon_pack = [\"lucide\", \"lucide\"]").is_err());
+        assert!(toml::from_str::<Settings>("icon_pack = []").is_err(), "an empty list is an error");
+    }
+
+    #[test]
+    fn sidebar_styles_parse_and_default_to_ledger() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        for style in SidebarStyle::ALL {
+            assert_eq!(parse(&format!("sidebar_style = \"{}\"", style.key())).sidebar_style, style);
+        }
+        assert_eq!(parse("theme = \"system\"").sidebar_style, SidebarStyle::Ledger, "an old config is Ledger");
+        assert!(toml::from_str::<Settings>("sidebar_style = \"tabs\"").is_err(), "an unknown style is an error");
     }
 
     #[test]
@@ -680,16 +737,6 @@ mod tests {
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
-    }
-
-    #[test]
-    fn app_icon_values_parse() {
-        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
-        for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
-            assert_eq!(parse(&format!("app_icon = \"{}\"", icon.key())).app_icon, icon);
-        }
-        assert_eq!(parse("theme = \"system\"").app_icon, AppIcon::Refined, "a missing line is Refined");
-        assert!(toml::from_str::<Settings>("app_icon = \"moon\"").is_err());
     }
 
     #[test]

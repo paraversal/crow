@@ -11,15 +11,15 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    Acknowledgements, AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles,
-    DeletePermanently, Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, ExtendToFirst,
-    ExtendToLast, GoBack, GoForward, GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge,
-    IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent,
-    OpenSelection, OpenSettings, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar,
-    RemoveSavedSearch, Rename, ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll,
-    ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
-    ToggleHiddenFiles, TogglePreview, ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery,
-    ViewAsIcons, ViewAsList, WhyThisView,
+    Acknowledgements, AddToShelf, AddToSidebar, CalculateFolderSizes, ChooseTags, ClearShelf, CloseTab, CopyFiles,
+    CopyPath, CopyShelfHere, CutFiles, CycleRightSidebar, DeletePermanently, Duplicate, EditPath, EditSavedSearch,
+    EditSettings, Eject, EmptyTrash, ExtendToFirst, ExtendToLast, GoBack, GoForward, GoToFolder, IconCaptionLines,
+    IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveShelfHere,
+    MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal,
+    PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView,
+    SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo,
+    ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview,
+    ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -79,6 +79,7 @@ pub enum CommandId {
     TogglePreview,
     ToggleSidebar,
     ShowInfo,
+    CycleRightSidebar,
     CalculateFolderSizes,
     ReviewGitChanges,
     ShowGitDiff,
@@ -121,6 +122,10 @@ pub enum CommandId {
     Undo,
     Redo,
     AddToSidebar,
+    AddToShelf,
+    MoveShelfHere,
+    CopyShelfHere,
+    ClearShelf,
     ShowSearch,
     SearchEverything,
     SearchHome,
@@ -191,6 +196,7 @@ impl CommandId {
             CommandId::TogglePreview => "toggle-preview",
             CommandId::ToggleSidebar => "toggle-sidebar",
             CommandId::ShowInfo => "show-info",
+            CommandId::CycleRightSidebar => "cycle-right-sidebar",
             CommandId::CalculateFolderSizes => "calculate-folder-sizes",
             CommandId::ReviewGitChanges => "review-git-changes",
             CommandId::ShowGitDiff => "show-git-diff",
@@ -233,6 +239,10 @@ impl CommandId {
             CommandId::Undo => "undo",
             CommandId::Redo => "redo",
             CommandId::AddToSidebar => "add-to-sidebar",
+            CommandId::AddToShelf => "add-to-shelf",
+            CommandId::MoveShelfHere => "move-shelf-here",
+            CommandId::CopyShelfHere => "copy-shelf-here",
+            CommandId::ClearShelf => "clear-shelf",
             CommandId::ShowSearch => "show-search",
             CommandId::SearchEverything => "search-everything",
             CommandId::SearchHome => "search-home",
@@ -668,20 +678,20 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         id: CommandId::TogglePreview,
-        label: "Show or Hide Preview",
+        label: "Show or Hide Right Sidebar",
         action: &TogglePreview,
         scope: KeyScope::Window,
-        // menus::app_menus turns this into "Hide Preview" while the preview shows.
-        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
+        // menus::app_menus turns this into "Hide Right Sidebar" while it shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Right Sidebar" }),
         palette: true,
     },
     Command {
         id: CommandId::ToggleSidebar,
-        label: "Show or Hide Sidebar",
+        label: "Show or Hide Left Sidebar",
         action: &ToggleSidebar,
         scope: KeyScope::Window,
-        // menus::app_menus turns this into "Hide Sidebar" while the sidebar shows.
-        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Sidebar" }),
+        // menus::app_menus turns this into "Hide Left Sidebar" while the sidebar shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Left Sidebar" }),
         palette: true,
     },
     Command {
@@ -690,6 +700,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowInfo,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Info" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::CycleRightSidebar,
+        label: "Cycle Right Sidebar",
+        action: &CycleRightSidebar,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Cycle Right Sidebar" }),
         palette: true,
     },
     Command {
@@ -885,6 +903,38 @@ pub const COMMANDS: &[Command] = &[
         action: &MoveFavoriteDown,
         scope: KeyScope::Sidebar,
         menu: None,
+        palette: true,
+    },
+    Command {
+        id: CommandId::AddToShelf,
+        label: "Add to Shelf",
+        action: &AddToShelf,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 6, title: "Add to Shelf" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::MoveShelfHere,
+        label: "Move Shelf Here",
+        action: &MoveShelfHere,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 6, title: "Move Shelf Here" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::CopyShelfHere,
+        label: "Copy Shelf Here",
+        action: &CopyShelfHere,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 6, title: "Copy Shelf Here" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ClearShelf,
+        label: "Clear Shelf",
+        action: &ClearShelf,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 6, title: "Clear Shelf" }),
         palette: true,
     },
 ];

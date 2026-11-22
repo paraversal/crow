@@ -218,6 +218,32 @@ fn first_row_sits_below_the_header_line(cx: &mut TestAppContext) {
     assert_eq!(row.top() - header.bottom(), px(crate::pane::LIST_TOP_INSET));
 }
 
+#[gpui::test]
+fn list_dividers_trade_width_with_the_next_column(cx: &mut TestAppContext) {
+    let root = fixture("list-dividers");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    let width = |cx: &mut VisualTestContext, i: usize| {
+        let id = ["column-header-0", "column-header-1", "column-header-2"][i];
+        cx.debug_bounds(id).expect("header cell").size.width
+    };
+    let (name, first, second) = (width(&mut cx, 0), width(&mut cx, 1), width(&mut cx, 2));
+    let start = cx.debug_bounds("column-resize-1").expect("divider").center();
+    // Far past the pane's edge, over the sidebar: the drag keeps following the pointer.
+    let end = start - gpui::point(px(2000.), px(0.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(start + gpui::point(px(25.), px(0.)), Some(gpui::MouseButton::Left), modifiers);
+    assert_eq!(cx.debug_bounds("column-resize-1").unwrap().center().x - start.x, px(25.), "the divider follows");
+    assert_eq!((width(&mut cx, 1), width(&mut cx, 2)), (first + px(25.), second - px(25.)), "the next column gives");
+    assert_eq!(width(&mut cx, 0), name, "Name stays");
+    cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert!(width(&mut cx, 1) < first, "the column shrank to its minimum: {:?}", width(&mut cx, 1));
+    assert_eq!(width(&mut cx, 1) + width(&mut cx, 2), first + second, "and the next column took the rest");
+}
+
 struct FixedSizer;
 
 impl crate::folder_sizes::Sizer for FixedSizer {
@@ -1034,25 +1060,6 @@ fn write_config(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, name: &st
     std::fs::write(dir.join(name), text).expect("write config");
     cx.update(|_, cx| crate::ui::reload_config(cx));
     settle(view, cx);
-}
-
-#[gpui::test]
-fn app_icon_setting_switches_the_dock_icon_live(cx: &mut TestAppContext) {
-    use crow_core::AppIcon;
-    let root = fixture("app-icon");
-    let (view, mut cx) = open(cx, &root);
-    let applied = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().applied_icon);
-    write_config(&view, &mut cx, "settings.toml", "app_icon = \"sun\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Sun));
-    let calls = effect_calls(&mut cx);
-    assert!(calls.contains(&crate::effects::Call::AppIcon(crate::ui::app_icon_png(AppIcon::Sun).len())), "{calls:?}");
-    write_config(&view, &mut cx, "settings.toml", "app_icon = \"moon\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Sun), "a bad value keeps the last good icon");
-    write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Refined), "deleting the line goes back to the default");
-    for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
-        assert!(crate::ui::app_icon_png(icon).starts_with(b"\x89PNG"), "{icon:?} is an embedded PNG");
-    }
 }
 
 #[gpui::test]
@@ -1950,6 +1957,25 @@ fn section_headers_collapse_and_expand_from_the_keyboard(cx: &mut TestAppContext
     let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).expect("sidebar.toml");
     assert!(text.contains("collapsed = false"), "→ expands it: {text}");
     assert_eq!(sidebar_looks(&view, &mut cx).len(), before);
+}
+
+#[gpui::test]
+fn enter_on_a_sidebar_heading_collapses_an_open_group_and_opens_a_closed_one(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-heading-enter");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+    cx.simulate_keystrokes("tab");
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let recent =
+        sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_section_for_test("recent", cx)).expect("Recent heading");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(recent, cx));
+    let before = sidebar_looks(&view, &mut cx).len();
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(sidebar_looks(&view, &mut cx).len() < before, "Enter collapses the open group");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(sidebar_looks(&view, &mut cx).len(), before, "and opens it again");
 }
 
 #[gpui::test]
@@ -4859,6 +4885,72 @@ fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_columns_resize_by_their_dividers(app: &mut TestAppContext) {
+    let root = fixture("search-columns");
+    std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+    let (view, mut cx) = open_sized(app, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    // Press a divider, move by dx, release; returns how far the divider itself moved.
+    let drag = |cx: &mut VisualTestContext, divider: &'static str, dx: f32| {
+        let start = cx.debug_bounds(divider).expect("divider").center();
+        let end = start + gpui::point(px(dx), px(0.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+        settle(&view, cx);
+        cx.debug_bounds(divider).expect("divider").center().x - start.x
+    };
+    let width = |cx: &mut VisualTestContext, id: &'static str| cx.debug_bounds(id).expect("header cell").size.width;
+    let aligned = |cx: &mut VisualTestContext| {
+        let header = cx.debug_bounds("search-column-1").expect("Folder header");
+        let cell = cx.debug_bounds("search-folder-0").expect("Folder cell");
+        assert_eq!((header.origin.x, header.size.width), (cell.origin.x, cell.size.width), "header and rows agree");
+        header.size.width
+    };
+    assert_eq!(aligned(&mut cx), px(180.));
+    let name = width(&mut cx, "search-column-0");
+
+    assert_eq!(drag(&mut cx, "search-resize-1", 40.), px(40.), "the divider follows the pointer");
+    assert_eq!(aligned(&mut cx), px(220.), "Folder widens");
+    assert_eq!(width(&mut cx, "search-column-2"), px(70.), "and the rightmost column, Modified, gives the same");
+    assert_eq!(width(&mut cx, "search-column-0"), name, "Name stays");
+    assert_eq!(drag(&mut cx, "search-resize-1", 500.), px(0.), "Modified is at its minimum");
+    assert_eq!(drag(&mut cx, "search-resize-1", -60.), px(-60.), "and the divider comes back at once");
+    assert_eq!(width(&mut cx, "search-column-2"), px(130.));
+    assert_eq!(drag(&mut cx, "search-resize-0", 30.), px(30.), "Name's divider trades with Folder");
+    assert_eq!(aligned(&mut cx), px(130.));
+
+    // A drag that leaves the results (over the preview) keeps following the pointer.
+    assert_eq!(drag(&mut cx, "search-resize-0", -2000.), px(140.) - (name + px(30.)), "to Name's minimum");
+    assert_eq!(width(&mut cx, "search-column-0"), px(140.));
+    assert_eq!(width(&mut cx, "search-column-2"), px(130.), "Modified does not move");
+    let folder = aligned(&mut cx);
+
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Escape closes the search");
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens again");
+    assert_eq!(
+        search.read_with(&cx, |search, _| search.column_width_for_test("folder")),
+        Some(f32::from(folder)),
+        "the next search keeps the widths"
+    );
+
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_resize(size(px(640.), px(500.)));
+    settle(&view, &mut cx);
+    aligned(&mut cx);
+}
+
+#[gpui::test]
 fn search_corpus_matrix(cx: &mut TestAppContext) {
     let root = corpus_fixture("search-corpus-matrix");
     let (view, mut cx) = open(cx, &root);
@@ -6355,6 +6447,10 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
             cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref(),
             Some("notes.txt")
         );
+        if view.read_with(cx, |view, _| view.palette.is_some()) {
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     };
 
     let commands = cx.read(crate::plugins::command_items);
@@ -6374,6 +6470,12 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
     use_vim(&view, &mut cx);
     click_selector(&mut cx, "row-notes.txt");
     settle(&view, &mut cx);
+    // Switching the layer reloads the settings; let the fixture's hook settle again.
+    for _ in 0..30 {
+        cx.cx.update(crate::plugins::poll);
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     run(&mut cx, &saved_context);
 }
 
@@ -7653,7 +7755,7 @@ fn without_a_theme_index_the_picker_lists_the_builtins_and_cannot_apply_to_all_a
         ((0..choice.entries.len()).map(|i| choice.id(i)).collect::<Vec<_>>(), choice.index)
     });
     assert_eq!(ids[0], "system");
-    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert_eq!(ids.len(), 11, "{ids:?}");
     assert!(ids.contains(&"finder-light".to_owned()) && ids.contains(&"solarized-dark".to_owned()));
     assert!(!index);
     assert!(cx.debug_bounds("theme-everywhere").is_none(), "no Apply to All Apps without an index");
@@ -7713,12 +7815,33 @@ fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
     let sidebar = cx.debug_bounds("sidebar").expect("the sidebar shows at first");
     assert_eq!(toolbar(&mut cx).left(), sidebar.right(), "the toolbar sits right of the full-height sidebar");
     cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar").is_none(), "the sidebar is gone");
     assert_eq!(toolbar(&mut cx).left(), px(0.), "the toolbar takes the whole width");
     cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar").is_some(), "the same key brings it back");
+}
+
+#[gpui::test]
+fn the_left_sidebar_slides_with_motion_on_and_snaps_with_it_off(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-slide");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let full = cx.debug_bounds("sidebar").expect("the sidebar shows").right();
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    let mid = cx.debug_bounds("toolbar").expect("toolbar").left();
+    assert!(mid > px(0.) && mid <= full, "the toolbar is still moving left while the sidebar slides: {mid:?}");
+    assert!(cx.debug_bounds("sidebar").is_some(), "the sidebar is drawn while it slides");
+    finish_motion(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("toolbar").expect("toolbar").left(), px(0.), "the slide ends hidden");
+    assert!(cx.debug_bounds("sidebar").is_none());
+
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::Motion(crow_core::motion::MotionMode::Off), cx));
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    assert_eq!(cx.debug_bounds("toolbar").expect("toolbar").left(), full, "motion off shows it in one frame");
 }
 
 #[gpui::test]
@@ -10367,8 +10490,31 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-i");
     finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("preview").is_none(), "a second ⌘I closes the column");
+    assert!(cx.debug_bounds("preview").is_some(), "a second ⌘I leaves the column on Info");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is still the default");
+}
+
+#[gpui::test]
+fn option_command_p_opens_the_right_sidebar_then_cycles_its_tabs(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("right-sidebar-cycle");
+    let (view, mut cx) = open(cx, &root);
+    let tab = |view: &Entity<CrowWindow>, cx: &VisualTestContext| view.read_with(cx, |w, cx| w.info.read(cx).tab());
+    // Hidden: the key opens it on the tab it had.
+    cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
+    assert!(!view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⇧⌘P hides it");
+    cx.simulate_keystrokes("cmd-alt-p");
+    finish_motion(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⌥⌘P opens it");
+    assert_eq!(tab(&view, &cx), InfoTab::Preview, "on the tab it had");
+    // Open: each press steps to the next tab and wraps (Git is off, so two tabs).
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Info);
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Preview);
+    assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "cycling never closes it");
 }
 
 #[gpui::test]
@@ -14838,6 +14984,29 @@ fn deleting_the_shown_folder_keeps_the_invariants(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_replaced_root_lists_the_disk_after_a_new_window(cx: &mut TestAppContext) {
+    // fuzz_long seed 1795350625255522000, shrunk: the listing kept the replaced files
+    // while the disk held only `alpha`.
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-replace-root", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::DeleteShownFolder,
+            Step::Keys("cmd-n".into()),
+            Step::ReplaceShownFolder,
+            Step::Keys("cmd-shift-.".into()),
+            Step::Keys("cmd-k".into()),
+            Step::Keys("enter".into()),
+            Step::ReplaceShownFolder
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
 fn replace_shown_folder_reloads(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
     let tree = fuzz_tree("fuzz-replace", 40);
@@ -18698,4 +18867,191 @@ fn the_title_reveals_a_draggable_folder_icon_on_hover(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(point(px(900.), px(500.)), None, gpui::Modifiers::none());
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("title-proxy-icon").is_none(), "gone again when the pointer leaves");
+}
+
+#[gpui::test]
+fn group_cards_are_one_of_the_sidebar_styles_and_draw_a_body_per_expanded_group(cx: &mut TestAppContext) {
+    let root = fixture("group-cards");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-card-0").is_none(), "the default style, Ledger, has no cards");
+    write_config(&view, &mut cx, "sidebar.toml", "[[group]]\nname = \"One\"\nitems = [{ path = \"/tmp\" }]\n");
+    write_config(&view, &mut cx, "settings.toml", "sidebar_style = \"cards\"\n");
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    let card = cx.debug_bounds("sidebar-card-0").expect("the group's body is drawn");
+    let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("heading");
+    assert!(card.top() >= header.bottom() - px(1.), "the body starts under the heading strip: {card:?} {header:?}");
+    let row = cx.debug_bounds("sidebar-1").expect("first row");
+    assert!(card.contains(&row.center()), "the rows sit inside the card");
+}
+
+#[gpui::test]
+fn the_shelf_is_opt_in_and_shows_only_with_files_or_a_drag(cx: &mut TestAppContext) {
+    let root = fixture("shelf-visible");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    cx.update(|_, cx| {
+        crate::ui::edit_shelf(cx, |shelf| {
+            shelf.add([(root.join("notes.txt"), false)]);
+        })
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_none(), "off by default, even holding files");
+    write_config(&view, &mut cx, "sidebar.toml", "[shelf]\nshow = true\n");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_some(), "on and holding a file");
+    assert!(cx.debug_bounds("shelf-item-0").is_some());
+    cx.update(|_, cx| crate::ui::edit_shelf(cx, |shelf| shelf.clear()));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_none(), "empty and nothing being dragged");
+}
+
+#[gpui::test]
+fn add_to_shelf_takes_the_selection_and_the_shelf_is_saved_in_the_state_folder(cx: &mut TestAppContext) {
+    let root = fixture("shelf-add");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", "[shelf]\nshow = true\n");
+    cx.simulate_keystrokes("down down down");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">add to shelf");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let (items, file) = cx.read(|cx| {
+        let ui = cx.global::<Ui>();
+        (ui.shelf.paths(), ui.state_dir.join("shelf.json"))
+    });
+    assert_eq!(items, vec![root.join("notes.txt")], "the selected file is on the shelf");
+    assert_eq!(crow_core::Shelf::load(&file).paths(), items, "and saved, so it survives a restart");
+}
+
+#[gpui::test]
+fn moving_the_shelf_here_moves_files_off_it_and_copying_keeps_them(cx: &mut TestAppContext) {
+    let root = fixture("shelf-move");
+    std::fs::write(root.join("beta/b.txt"), "b").expect("fixture");
+    std::fs::write(root.join("beta/c.txt"), "c").expect("fixture");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    cx.update(|_, cx| {
+        crate::ui::edit_shelf(cx, |shelf| {
+            shelf.add([(root.join("beta/b.txt"), false), (root.join("beta/c.txt"), false)]);
+        })
+    });
+    view.update(&mut cx, |view, cx| {
+        let pane = view.pane().clone();
+        pane.update(cx, |pane, cx| pane.navigate(root.join("alpha"), cx));
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">copy shelf here");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/b.txt").exists() && root.join("beta/b.txt").exists(), "copied: both places have it");
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().shelf.len()), 2, "copied files stay on the shelf");
+    std::fs::remove_file(root.join("alpha/b.txt")).expect("reset");
+    std::fs::remove_file(root.join("alpha/c.txt")).expect("reset");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">move shelf here");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/b.txt").exists() && !root.join("beta/b.txt").exists(), "moved");
+    assert!(cx.read(|cx| cx.global::<Ui>().shelf.is_empty()), "moved files leave the shelf");
+}
+
+#[gpui::test]
+fn dropping_files_on_the_shelf_adds_them_and_clear_shelf_empties_it(cx: &mut TestAppContext) {
+    let root = fixture("shelf-drop");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let paths = vec![root.join("notes.txt"), root.join("alpha")];
+    view.update_in(&mut cx, |view, window, cx| view.drop_onto_shelf(paths, window, cx));
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let items = cx.read(|cx| cx.global::<Ui>().shelf.items().to_vec());
+    assert_eq!(items.len(), 2);
+    assert!(!items[0].is_dir && items[1].is_dir, "folders are remembered as folders");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">clear shelf");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Ui>().shelf.is_empty()));
+}
+
+#[gpui::test]
+fn layered_icon_packs_try_each_pack_in_order_and_fall_back_to_native(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("icon-packs-layered");
+    std::fs::create_dir(root.join("src")).expect("fixture");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("fixture");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        for (id, map) in [
+            ("first", "[folder_name]\n\"src\" = { icon = \"g.svg\" }\n"),
+            ("second", "[file_name]\n\"Cargo.toml\" = { icon = \"g.svg\" }\n"),
+        ] {
+            let pack = config.join(format!("icon-packs/{id}"));
+            std::fs::create_dir_all(&pack).expect("pack dir");
+            std::fs::write(pack.join("pack.toml"), format!("api = 1\nname = \"{id}\"\n{map}")).expect("pack");
+            std::fs::write(pack.join("g.svg"), GLYPH).expect("glyph");
+        }
+        std::fs::write(config.join("settings.toml"), "icon_pack = [\"first\", \"second\"]\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    settle(&view, &mut cx);
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.icon_pack.clone()), "first,second");
+    let snapshot = cx.read(|cx| cx.global::<crate::icon_packs::IconPacks>().snapshot());
+    let resolves = |source: &str, path: &Path, is_dir: bool| snapshot.resolve(source, path, is_dir, false).is_some();
+    assert!(resolves("first,second", &root.join("src"), true), "src comes from the first pack");
+    assert!(resolves("first,second", &root.join("Cargo.toml"), false), "Cargo.toml falls through to the second");
+    assert!(!resolves("first", &root.join("Cargo.toml"), false), "the first pack alone has no icon for it");
+    assert!(resolves("missing,second", &root.join("Cargo.toml"), false), "a pack that is not installed is skipped");
+    assert!(!resolves("native,first", &root.join("src"), true), "native ends the list");
+    let names = cx.read(|cx| cx.global::<crate::icon_packs::IconPacks>().display_name("first,second"));
+    assert_eq!(names, "first + second");
+}
+
+#[gpui::test]
+fn a_png_glyph_loads_as_a_full_color_image_and_a_bad_one_rejects_the_pack(cx: &mut TestAppContext) {
+    let root = fixture("icon-pack-png");
+    let (_view, cx) = open(cx, &root);
+    let (config, home) = cx.read(|cx| (cx.global::<Ui>().config_dir.clone(), cx.global::<Ui>().home.clone()));
+    let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+    png.extend_from_slice(&[0, 0, 0, 13]);
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&32u32.to_be_bytes());
+    png.extend_from_slice(&32u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let pack = config.join("icon-packs/pics");
+    std::fs::create_dir_all(&pack).expect("pack dir");
+    std::fs::write(pack.join("pack.toml"), "api = 1\nname = \"Pics\"\n[extension]\ntxt = { icon = \"a.png\" }\n")
+        .expect("pack");
+    std::fs::write(pack.join("a.png"), &png).expect("glyph");
+    let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("a PNG glyph is accepted");
+    let icon = snapshot.resolve("pics", &root.join("notes.txt"), false, false).expect("txt resolves");
+    assert!(icon.image.is_some(), "a PNG glyph is drawn as an image, not tinted");
+    std::fs::write(pack.join("a.png"), "not a png").expect("glyph");
+    let error = crate::icon_packs::load_catalog(&config, &home).err().expect("a fake PNG rejects the pack");
+    assert!(error.to_string().contains("a.png"), "{error}");
+}
+
+#[gpui::test]
+fn a_tag_destination_may_own_focus(cx: &mut TestAppContext) {
+    // Found by `fuzz_smoke` once a key binding shifted its seeds: Tab into the sidebar, Option-Down to
+    // the Tags group, Right opens the pinned tag, whose results own focus in the center.
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-tag-focus", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![Step::Keys("tab".into()), Step::Keys("alt-down".into()), Step::Keys("right".into())],
+    );
+    assert!(found.is_empty(), "{found:?}");
 }

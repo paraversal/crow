@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{
-    Exclude, KeymapLayer, SavedExclusions, SavedKind, SavedMatch, SavedQuery, SavedQueryId, SavedScope, SearchMatch,
-    Selection, SetName, TagId,
+    ColumnWidth, Exclude, KeymapLayer, ResizeDrag, SavedExclusions, SavedKind, SavedMatch, SavedQuery, SavedQueryId,
+    SavedScope, SearchMatch, Selection, SetName, TableLayout, TagId,
 };
 use crow_fs::ops::Request;
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate};
@@ -58,6 +58,26 @@ const RENAME_PIN: Duration = Duration::from_secs(10);
 /// Rows for everything else: content-only and weak (scattered) fuzzy name hits.
 /// When these fill, contents stop being read; names keep streaming.
 pub(crate) const MAX_OTHER_ROWS: usize = 20_000;
+/// The results' side padding and the gap between their cells, in points.
+const RESULT_INSET: f32 = 8.0;
+const RESULT_GAP: f32 = 8.0;
+
+/// The last widths a search's columns were dragged to, so the next search in this
+/// session opens with them, as a list keeps its widths from folder to folder.
+#[derive(Clone)]
+struct SearchColumns(TableLayout);
+
+impl gpui::Global for SearchColumns {}
+
+/// Name, Folder and Modified at their default widths (Name's is the target it keeps
+/// before the others give way).
+fn default_search_table() -> TableLayout {
+    TableLayout::new(vec![
+        ColumnWidth { id: "name".into(), width: 220.0, min_width: 140.0 },
+        ColumnWidth { id: "folder".into(), width: 180.0, min_width: 80.0 },
+        ColumnWidth { id: "modified".into(), width: 110.0, min_width: 70.0 },
+    ])
+}
 const ROW_HEIGHT: f32 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +286,10 @@ pub struct SearchView {
     list_bounds: std::rc::Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The folder result under a drag, outlined like a folder row in a listing.
     drop_hover: Option<PathBuf>,
+    /// Name, Folder and Modified widths, shared by the header and every row.
+    table: TableLayout,
+    /// A header divider being dragged.
+    resize: Option<ResizeDrag>,
     show_skipped: bool,
     /// The row whose context menu is open, while it is.
     menu: Option<usize>,
@@ -669,6 +693,8 @@ impl SearchView {
             scroll: UniformListScrollHandle::new(),
             list_bounds: std::rc::Rc::new(Cell::new(None)),
             drop_hover: None,
+            table: cx.try_global::<SearchColumns>().map_or_else(default_search_table, |columns| columns.0.clone()),
+            resize: None,
             show_skipped: false,
             menu: None,
             menu_plugins: Vec::new(),
@@ -3459,19 +3485,66 @@ impl SearchView {
         let scroll = self.scroll.clone();
         let vim = ui.settings.keymap == KeymapLayer::Vim;
         let has_decorations = !crate::plugins::decoration_ids(cx).is_empty();
-        let header = div()
+        let widths = self.column_widths();
+        // Columns hidden for a narrow panel have width 0; the last shown one has no divider.
+        let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
+        let mut header = div()
+            .id("search-header")
+            .debug_selector(|| "search-header".into())
+            .role(Role::Group)
+            .aria_label("Search result columns")
             .h(px(26.))
-            .px_2()
+            .flex_none()
+            .px(px(RESULT_INSET))
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(RESULT_GAP))
             .text_size(px(11.))
             .text_color(muted)
             .border_b_1()
-            .border_color(border)
-            .child(div().flex_1().child("Name"))
-            .child(div().w(px(180.)).flex_none().child("Folder"))
-            .child(div().w(px(110.)).flex_none().child("Modified"));
+            .border_color(border);
+        for (i, title) in ["Name", "Folder", "Modified"].into_iter().enumerate().filter(|(i, _)| widths[*i] > 0.0) {
+            let cell = div()
+                .id(("search-column", i))
+                .debug_selector(move || format!("search-column-{i}"))
+                .role(Role::ColumnHeader)
+                .aria_label(title)
+                .relative()
+                .h_full()
+                .flex()
+                .items_center()
+                .when(i == 0, |cell| cell.flex_1().min_w_0())
+                .when(i > 0, |cell| cell.w(px(widths[i])).flex_none())
+                .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                // The divider sits in the gap after the cell; its grab area is the whole gap.
+                .when(i != last, |cell| {
+                    cell.child(
+                        div()
+                            .id(("search-resize", i))
+                            .debug_selector(move || format!("search-resize-{i}"))
+                            .role(Role::Splitter)
+                            .aria_label(format!("Resize {title} column"))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-RESULT_GAP))
+                            .w(px(RESULT_GAP))
+                            .flex()
+                            .justify_center()
+                            .cursor(gpui::CursorStyle::ResizeLeftRight)
+                            .child(div().w(px(1.)).h_full().bg(border))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    let available = this.available_width();
+                                    this.resize = this.table.begin_resize(i, f32::from(event.position.x), available);
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                });
+            header = header.child(cell);
+        }
         div()
             .id("search-results-list")
             .flex_1()
@@ -3503,6 +3576,13 @@ impl SearchView {
             .on_action(cx.listener(Self::move_to_trash))
             .on_action(cx.listener(Self::delete_permanently))
             .on_action(cx.listener(Self::close_action))
+            .when(self.resize.is_some(), |list| {
+                list.child(crate::pane::column_resize_tracker(
+                    cx.weak_entity(),
+                    Self::drag_column,
+                    Self::end_column_drag,
+                ))
+            })
             .child(header)
             .child({
                 let list = uniform_list("search-results", count, cx.processor(Self::render_rows))
@@ -3524,6 +3604,37 @@ impl SearchView {
                     .child(list)
             })
             .into_any_element()
+    }
+
+    /// The Name, Folder and Modified widths for the results' last drawn width: Name
+    /// takes the rest, and Modified then Folder give way when the panel is narrow.
+    fn drag_column(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize else { return };
+        self.table.drag_to(&drag, x);
+        cx.set_global(SearchColumns(self.table.clone()));
+        cx.notify();
+    }
+
+    fn end_column_drag(&mut self, cx: &mut Context<Self>) {
+        if self.resize.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn column_widths(&self) -> Vec<f32> {
+        self.table.fitted(self.available_width())
+    }
+
+    /// The width the three columns share: the results' last drawn width less the
+    /// side padding and the two gaps.
+    fn available_width(&self) -> f32 {
+        let chrome = 2.0 * RESULT_INSET + 2.0 * RESULT_GAP;
+        self.list_bounds.get().map_or(self.table.total_width(), |bounds| f32::from(bounds.size.width) - chrome)
+    }
+
+    #[cfg(test)]
+    pub fn column_width_for_test(&self, id: &str) -> Option<f32> {
+        self.table.width_of(id)
     }
 
     /// The real folder under `pointer`, from the same fixed-row geometry the list
@@ -3591,6 +3702,9 @@ impl SearchView {
             .map(|i| cut && self.results.get(i).is_some_and(|row| clipboard.is_some_and(|c| c.contains(&row.path))))
             .collect();
         let cut_edges = island_edges(&cut_flags);
+        let widths = self.column_widths();
+        // Name's text room: its cell less the icon and the gap after it.
+        let name_room = px((widths[0] - 16.0 - RESULT_GAP).max(0.0));
         range
             .filter_map(|i| {
                 let row = self.results.get(i)?;
@@ -3611,7 +3725,7 @@ impl SearchView {
                     .then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let selected = self.selection.contains(&row.path);
                 let on_selection = selected && focused;
-                let truncated = truncate_middle_parts(&row.name, px(300.), px(13.), window);
+                let truncated = truncate_middle_parts(&row.name, name_room, px(13.), window);
                 let name_ranges: Vec<Range<usize>> = row
                     .name_ranges
                     .iter()
@@ -3679,12 +3793,12 @@ impl SearchView {
                     .when(cursor == i, |row| row.aria_active_descendant())
                     .h(px(ROW_HEIGHT))
                     .w_full()
-                    .px_2()
+                    .px(px(RESULT_INSET))
                     .rounded_md()
                     .relative()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(px(RESULT_GAP))
                     .when(selected, |row| row.bg(selection_bg))
                     .when_some(flash_tint, |row, tint| {
                         row.child(
@@ -3829,28 +3943,34 @@ impl SearchView {
                                     .children(content),
                             ),
                     )
-                    .child(
-                        div()
-                            .w(px(180.))
-                            .flex_none()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child(row.folder.clone()),
-                    )
-                    .child(
-                        div()
-                            .w(px(110.))
-                            .flex_none()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child(format_time_short(row.modified)),
-                    )
+                    .when(widths[1] > 0.0, |cells| {
+                        cells.child(
+                            div()
+                                .w(px(widths[1]))
+                                .flex_none()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .debug_selector(move || format!("search-folder-{i}"))
+                                .child(row.folder.clone()),
+                        )
+                    })
+                    .when(widths[2] > 0.0, |cells| {
+                        cells.child(
+                            div()
+                                .w(px(widths[2]))
+                                .flex_none()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .debug_selector(move || format!("search-modified-{i}"))
+                                .child(format_time_short(row.modified)),
+                        )
+                    })
                     .into_any_element()
                     .into()
             })

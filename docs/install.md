@@ -1,13 +1,14 @@
 # Install Crow
 
 Crow runs on macOS 14 or later, on Apple Silicon and Intel. It is free software under the
-GPL-3.0-or-later and its source is public. It is **not signed or notarized**: that needs a
-paid Apple Developer ID, which the project does not have. macOS therefore blocks the first
-open, once per installed version.
+GPL-3.0-or-later and its source is public. It is **not signed or notarized** yet: that needs a
+paid Apple Developer ID, which the project currently does not have. Signing and notarization
+are planned if there is enough interest in the app. Until then, macOS blocks the first open,
+once per installed version.
 
 ## From the DMG
 
-1. Download `Crow-<version>.dmg` from the [Releases page](https://github.com/paraversal/file-crow/releases)
+1. Download `Crow-<version>.dmg` from the [Releases page](https://github.com/paraversal/crow/releases)
    and check it against the `.sha256` file next to it: `shasum -a 256 -c Crow-<version>.dmg.sha256`.
 2. Open the DMG and drag **Crow** onto **Applications**.
 3. Open Crow. macOS says it can't verify the app. Click **Done**.

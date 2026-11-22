@@ -44,10 +44,10 @@ fn plugin_menu_commands(cx: &App) -> Vec<MenuPluginCommand> {
 /// The toggle names the action it will take, so the menu says what a click does.
 fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool, sidebar_visible: bool) -> &'static str {
     match command.id {
-        CommandId::TogglePreview if show_preview => "Hide Preview",
-        CommandId::TogglePreview => "Show Preview",
-        CommandId::ToggleSidebar if sidebar_visible => "Hide Sidebar",
-        CommandId::ToggleSidebar => "Show Sidebar",
+        CommandId::TogglePreview if show_preview => "Hide Right Sidebar",
+        CommandId::TogglePreview => "Show Right Sidebar",
+        CommandId::ToggleSidebar if sidebar_visible => "Hide Left Sidebar",
+        CommandId::ToggleSidebar => "Show Left Sidebar",
         _ => slot.title,
     }
 }
@@ -280,8 +280,8 @@ mod tests {
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             titles(&view.items).into_iter().map(str::to_owned).collect::<Vec<_>>()
         };
-        assert!(view_items(true).iter().any(|title| title == "Hide Preview"), "shown: the menu hides it");
-        assert!(view_items(false).iter().any(|title| title == "Show Preview"), "hidden: the menu shows it");
+        assert!(view_items(true).iter().any(|title| title == "Hide Right Sidebar"), "shown: the menu hides it");
+        assert!(view_items(false).iter().any(|title| title == "Show Right Sidebar"), "hidden: the menu shows it");
     }
 
     #[test]
@@ -331,6 +331,11 @@ mod tests {
                 "Open Terminal Here",
                 "—",
                 "Save Search…",
+                "—",
+                "Add to Shelf",
+                "Move Shelf Here",
+                "Copy Shelf Here",
+                "Clear Shelf",
             ]
         );
         assert_eq!(
@@ -374,9 +379,10 @@ mod tests {
                 "Reset View for This Folder",
                 "—",
                 "Show Hidden Files",
-                "Hide Preview",
-                "Hide Sidebar",
+                "Hide Right Sidebar",
+                "Hide Left Sidebar",
                 "Show Info",
+                "Cycle Right Sidebar",
                 "Show Git Diff",
                 "Calculate Folder Sizes",
                 "Show Activity",

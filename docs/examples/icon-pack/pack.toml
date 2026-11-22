@@ -1,0 +1,159 @@
+# Lucide icons (https://lucide.dev, ISC licence), tinted with the theme palette.
+api = 1
+id = "lucide"
+name = "Lucide"
+
+[folder_name]
+"src" = { icon = "icons/folder-code.svg", color = "base0D" }
+"lib" = { icon = "icons/folder-code.svg", color = "base0D" }
+"crates" = { icon = "icons/folder-code.svg", color = "base0D" }
+"app" = { icon = "icons/folder-code.svg", color = "base0D" }
+"tests" = { icon = "icons/folder-check.svg", color = "base0B" }
+"test" = { icon = "icons/folder-check.svg", color = "base0B" }
+"docs" = { icon = "icons/folder-open.svg", color = "base0C" }
+".git" = { icon = "icons/folder-git-2.svg", color = "base09" }
+".github" = { icon = "icons/folder-git-2.svg", color = "base09" }
+"node_modules" = { icon = "icons/folder-archive.svg", color = "fg-muted" }
+"target" = { icon = "icons/folder-archive.svg", color = "fg-muted" }
+"dist" = { icon = "icons/folder-archive.svg", color = "fg-muted" }
+"build" = { icon = "icons/folder-archive.svg", color = "fg-muted" }
+".config" = { icon = "icons/folder-cog.svg", color = "base0E" }
+"config" = { icon = "icons/folder-cog.svg", color = "base0E" }
+"terraform" = { icon = "icons/folder-cog.svg", color = "base0E" }
+"Desktop" = { icon = "icons/monitor.svg", color = "base0D" }
+"Documents" = { icon = "icons/file-text.svg", color = "base0A" }
+"Downloads" = { icon = "icons/folder-down.svg", color = "base0B" }
+"Pictures" = { icon = "icons/image.svg", color = "base0E" }
+"Music" = { icon = "icons/music.svg", color = "base08" }
+"Movies" = { icon = "icons/film.svg", color = "base0C" }
+"Projects" = { icon = "icons/folder-kanban.svg", color = "base09" }
+"Servers" = { icon = "icons/server.svg", color = "base0D" }
+"Volumes" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Clients" = { icon = "icons/users.svg", color = "base0D" }
+"Contracts" = { icon = "icons/file-signature.svg", color = "base0A" }
+"Invoices" = { icon = "icons/receipt.svg", color = "base0B" }
+"Delivered" = { icon = "icons/package-check.svg", color = "base0B" }
+"Moodboards" = { icon = "icons/layout-grid.svg", color = "base0E" }
+"Catalogs" = { icon = "icons/library.svg", color = "base0A" }
+"Presets" = { icon = "icons/sliders-horizontal.svg", color = "base0E" }
+"Gear" = { icon = "icons/camera.svg", color = "base09" }
+"RAW" = { icon = "icons/aperture.svg", color = "base08" }
+"Selects" = { icon = "icons/star.svg", color = "base0A" }
+"Edits" = { icon = "icons/wand-sparkles.svg", color = "base0E" }
+"Exports" = { icon = "icons/share.svg", color = "base0B" }
+"Portfolio" = { icon = "icons/gallery-horizontal.svg", color = "base0E" }
+"Prints" = { icon = "icons/printer.svg", color = "base09" }
+"Manuscripts" = { icon = "icons/book-open.svg", color = "base0A" }
+"Chapters" = { icon = "icons/bookmark.svg", color = "base09" }
+"Research" = { icon = "icons/microscope.svg", color = "base0C" }
+"Journal" = { icon = "icons/notebook-pen.svg", color = "base0B" }
+"Submissions" = { icon = "icons/send.svg", color = "base0D" }
+"Essays" = { icon = "icons/feather.svg", color = "base0E" }
+"Reading" = { icon = "icons/library-big.svg", color = "base0C" }
+"Newsletter" = { icon = "icons/mail.svg", color = "base0D" }
+"Samples" = { icon = "icons/audio-waveform.svg", color = "base0E" }
+"Stems" = { icon = "icons/layers.svg", color = "base0D" }
+"Bounces" = { icon = "icons/disc-3.svg", color = "base0C" }
+"Mixdowns" = { icon = "icons/sliders-vertical.svg", color = "base08" }
+"Releases" = { icon = "icons/disc-album.svg", color = "base0A" }
+"Gigs" = { icon = "icons/mic-vocal.svg", color = "base08" }
+"MIDI" = { icon = "icons/piano.svg", color = "base0B" }
+"Plugins" = { icon = "icons/plug.svg", color = "base0F" }
+"Drums" = { icon = "icons/drum.svg", color = "base08" }
+"Synths" = { icon = "icons/keyboard-music.svg", color = "base0E" }
+"Vocals" = { icon = "icons/mic.svg", color = "base09" }
+"Notes" = { icon = "icons/notebook-pen.svg", color = "base0B" }
+"dotfiles" = { icon = "icons/terminal.svg", color = "base0B" }
+"Build SSD" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Archive SSD" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Backup RAID" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Backups" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Session Drive" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Sample Library SSD" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Studio Backup" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Backup stick" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Typewriter archive" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"EOS R5 Card" = { icon = "icons/hard-drive.svg", color = "base0C" }
+"Games" = { icon = "icons/hard-drive.svg", color = "base0C" }
+
+[extension]
+"rs" = { icon = "icons/file-code.svg", color = "base09" }
+"go" = { icon = "icons/file-code.svg", color = "base09" }
+"c" = { icon = "icons/file-code.svg", color = "base09" }
+"cpp" = { icon = "icons/file-code.svg", color = "base09" }
+"h" = { icon = "icons/file-code.svg", color = "base09" }
+"swift" = { icon = "icons/file-code.svg", color = "base09" }
+"ts" = { icon = "icons/file-code.svg", color = "base0D" }
+"tsx" = { icon = "icons/file-code.svg", color = "base0D" }
+"js" = { icon = "icons/file-code.svg", color = "base0D" }
+"jsx" = { icon = "icons/file-code.svg", color = "base0D" }
+"mjs" = { icon = "icons/file-code.svg", color = "base0D" }
+"py" = { icon = "icons/file-code.svg", color = "base0A" }
+"rb" = { icon = "icons/file-code.svg", color = "base0A" }
+"lua" = { icon = "icons/file-code.svg", color = "base0A" }
+"html" = { icon = "icons/file-code.svg", color = "base08" }
+"css" = { icon = "icons/file-code.svg", color = "base0C" }
+"json" = { icon = "icons/file-json.svg", color = "base0A" }
+"toml" = { icon = "icons/file-cog.svg", color = "base0C" }
+"yaml" = { icon = "icons/file-cog.svg", color = "base0C" }
+"yml" = { icon = "icons/file-cog.svg", color = "base0C" }
+"tf" = { icon = "icons/file-cog.svg", color = "base0E" }
+"sh" = { icon = "icons/file-terminal.svg", color = "base0B" }
+"zsh" = { icon = "icons/file-terminal.svg", color = "base0B" }
+"lock" = { icon = "icons/lock.svg", color = "fg-muted" }
+"env" = { icon = "icons/key-round.svg", color = "base0A" }
+"log" = { icon = "icons/scroll-text.svg", color = "fg-muted" }
+"sql" = { icon = "icons/database.svg", color = "base0D" }
+"db" = { icon = "icons/database.svg", color = "base0D" }
+"sqlite" = { icon = "icons/database.svg", color = "base0D" }
+"md" = { icon = "icons/file-text.svg", color = "base0D" }
+"txt" = { icon = "icons/file-text.svg", color = "fg" }
+"rtf" = { icon = "icons/file-text.svg", color = "fg" }
+"docx" = { icon = "icons/file-text.svg", color = "base0D" }
+"pages" = { icon = "icons/file-text.svg", color = "base09" }
+"pdf" = { icon = "icons/file-text.svg", color = "base08" }
+"epub" = { icon = "icons/book-open.svg", color = "base0C" }
+"csv" = { icon = "icons/table.svg", color = "base0B" }
+"xlsx" = { icon = "icons/table.svg", color = "base0B" }
+"jpg" = { icon = "icons/image.svg", color = "base0E" }
+"jpeg" = { icon = "icons/image.svg", color = "base0E" }
+"png" = { icon = "icons/image.svg", color = "base0E" }
+"tif" = { icon = "icons/image.svg", color = "base0E" }
+"tiff" = { icon = "icons/image.svg", color = "base0E" }
+"webp" = { icon = "icons/image.svg", color = "base0E" }
+"heic" = { icon = "icons/image.svg", color = "base0E" }
+"psd" = { icon = "icons/image.svg", color = "base0E" }
+"cr3" = { icon = "icons/aperture.svg", color = "base08" }
+"cr2" = { icon = "icons/aperture.svg", color = "base08" }
+"arw" = { icon = "icons/aperture.svg", color = "base08" }
+"nef" = { icon = "icons/aperture.svg", color = "base08" }
+"dng" = { icon = "icons/aperture.svg", color = "base08" }
+"raf" = { icon = "icons/aperture.svg", color = "base08" }
+"xmp" = { icon = "icons/sliders-horizontal.svg", color = "base0E" }
+"lrcat" = { icon = "icons/library.svg", color = "base0A" }
+"mp4" = { icon = "icons/film.svg", color = "base0C" }
+"mov" = { icon = "icons/film.svg", color = "base0C" }
+"mkv" = { icon = "icons/film.svg", color = "base0C" }
+"wav" = { icon = "icons/audio-lines.svg", color = "base0E" }
+"aif" = { icon = "icons/audio-lines.svg", color = "base0E" }
+"aiff" = { icon = "icons/audio-lines.svg", color = "base0E" }
+"flac" = { icon = "icons/audio-lines.svg", color = "base0E" }
+"mp3" = { icon = "icons/music.svg", color = "base08" }
+"m4a" = { icon = "icons/music.svg", color = "base08" }
+"als" = { icon = "icons/audio-waveform.svg", color = "base0A" }
+"logicx" = { icon = "icons/audio-waveform.svg", color = "base0A" }
+"flp" = { icon = "icons/audio-waveform.svg", color = "base0A" }
+"mid" = { icon = "icons/piano.svg", color = "base0B" }
+"midi" = { icon = "icons/piano.svg", color = "base0B" }
+"fxp" = { icon = "icons/sliders-vertical.svg", color = "base0F" }
+"zip" = { icon = "icons/archive.svg", color = "base09" }
+"tar" = { icon = "icons/archive.svg", color = "base09" }
+"gz" = { icon = "icons/archive.svg", color = "base09" }
+"dmg" = { icon = "icons/disc.svg", color = "fg-muted" }
+"ttf" = { icon = "icons/type.svg", color = "base0D" }
+"otf" = { icon = "icons/type.svg", color = "base0D" }
+"stl" = { icon = "icons/box.svg", color = "base0B" }
+
+[generic]
+folder = { icon = "icons/folder.svg", color = "base0D" }
+file = { icon = "icons/file.svg", color = "fg-muted" }

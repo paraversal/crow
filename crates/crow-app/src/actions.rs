@@ -122,6 +122,10 @@ actions!(
         SheetCancel,
         // Sidebar
         AddToSidebar,
+        AddToShelf,
+        MoveShelfHere,
+        CopyShelfHere,
+        ClearShelf,
         RemoveFromSidebar,
         MoveFavoriteUp,
         MoveFavoriteDown,
@@ -201,10 +205,12 @@ actions!(
         SwitchFocus,
         ToggleHiddenFiles,
         TogglePreview,
-        /// View ▸ Hide/Show Sidebar (⌃⌘S): collapse the left column to give the folder the width.
+        /// View ▸ Hide/Show Left Sidebar (⌃⌘S): collapse the left column to give the folder the width.
         ToggleSidebar,
-        /// ⌘I: open the right column on its Info tab, or close it when Info shows.
+        /// ⌘I: open the right sidebar on its Info tab (and leave it there when Info already shows).
         ShowInfo,
+        /// ⌥⌘P: open the right sidebar, or move to its next tab (Preview, Info, Git Diff) when open.
+        CycleRightSidebar,
         /// View ▸ Calculate Folder Sizes: measure the current folder's folders once.
         CalculateFolderSizes,
         ReviewGitChanges,
@@ -327,6 +333,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-p", TogglePreview, Some("Crow")),
         KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Crow")),
         KeyBinding::new("cmd-i", ShowInfo, Some("Crow")),
+        KeyBinding::new("cmd-alt-p", CycleRightSidebar, Some("Crow")),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-cmd-t", AddToSidebar, Some("Crow")),
         KeyBinding::new("cmd-backspace", RemoveFromSidebar, Some("Sidebar")),
@@ -398,6 +405,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-]", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-[", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-i", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-alt-p", NoAction {}, Some("Sheet")),
         KeyBinding::new("ctrl-tab", NoAction {}, Some("Sheet")),
         KeyBinding::new("ctrl-shift-tab", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-n", NoAction {}, Some("Sheet")),

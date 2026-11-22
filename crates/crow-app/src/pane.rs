@@ -75,7 +75,7 @@ pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const CAPTION_LINE_HEIGHT: f32 = 16.0;
 const ICON_TILE_TOP: f32 = 3.0;
 const ICON_TILE_GAP: f32 = 2.0;
-const ICON_BOX_PADDING: f32 = 4.0;
+const ICON_BOX_PADDING: f32 = 2.0;
 /// A tile's status badge keeps this far from the tile's left edge.
 const ICON_BADGE_INSET: f32 = 2.0;
 
@@ -524,6 +524,9 @@ struct Bench {
     /// `CROW_BENCH_TRASH=N`: swallow N rows in the middle of the folder (the effect
     /// only, nothing is deleted) and time the frames while it runs.
     trash: Option<TrashBench>,
+    /// Rows scrolled per frame: 3 (a fast trackpad flick) unless `CROW_BENCH_ROWS`
+    /// says otherwise. The speed clip uses an even step so the row stripes hold still.
+    rows: usize,
 }
 
 /// The motion bench: frame intervals before, during and after a trash effect.
@@ -608,6 +611,11 @@ impl Pane {
                 last: None,
                 scrolled: None,
                 filter: bench_filter,
+                rows: std::env::var("CROW_BENCH_ROWS")
+                    .ok()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(3),
                 trash: std::env::var("CROW_BENCH_TRASH").ok().and_then(|n| n.parse().ok()).map(|rows| TrashBench {
                     rows,
                     started: None,
@@ -3863,17 +3871,17 @@ impl Pane {
             bench.intervals.push((now - prev).as_secs_f64() * 1000.0);
         }
         bench.frame += 1;
-        // About 3 rows per frame: a fast, continuous trackpad scroll.
+        let step = bench.frame * bench.rows;
         if mode == ViewMode::Icons {
             if icon_rows > 0 {
-                icon_scroll.scroll_to_item_strict((bench.frame * 3) % icon_rows, ScrollStrategy::Top);
+                icon_scroll.scroll_to_item_strict(step % icon_rows, ScrollStrategy::Top);
             }
         } else if mode == ViewMode::Gallery {
             if shown > 0 {
-                self.gallery.scroll.scroll_to_item_strict((bench.frame * 3) % shown, ScrollStrategy::Top);
+                self.gallery.scroll.scroll_to_item_strict(step % shown, ScrollStrategy::Top);
             }
         } else {
-            folder.scroll_strict((bench.frame * 3) % shown);
+            folder.scroll_strict(step % shown);
         }
         if bench.frame == 600 {
             let mut v = std::mem::take(&mut bench.intervals);
@@ -5033,6 +5041,7 @@ impl Pane {
                 (true, false) => "⌄",
             };
             let width = px(widths[i]);
+            let resize_label = format!("Resize {title} column");
             let cell = div()
                 .id(("column", i))
                 .debug_selector(move || format!("column-header-{i}"))
@@ -5067,6 +5076,9 @@ impl Pane {
                     cell.child(
                         div()
                             .id(("resize", i))
+                            .debug_selector(move || format!("column-resize-{i}"))
+                            .role(Role::Splitter)
+                            .aria_label(resize_label)
                             .absolute()
                             .top_0()
                             .bottom_0()
@@ -5076,7 +5088,8 @@ impl Pane {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.resize = this.table.begin_resize(i, f32::from(event.position.x));
+                                    let available = f32::from(this.content_width) - 2.0 * LIST_SIDE_INSET;
+                                    this.resize = this.table.begin_resize(i, f32::from(event.position.x), available);
                                     cx.stop_propagation();
                                 }),
                             ),
@@ -5947,6 +5960,38 @@ impl Ghosts<'_> {
     }
 }
 
+/// While a header divider is dragged, follows the pointer anywhere in the window
+/// (an element's own mouse-move listener stops at its edge, so a fast drag past the
+/// panel left the column short) and ends the drag on release. Drawn only during a drag.
+pub(crate) fn column_resize_tracker<V: 'static>(
+    view: gpui::WeakEntity<V>,
+    drag: fn(&mut V, f32, &mut Context<V>),
+    end: fn(&mut V, &mut Context<V>),
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, (), window, _| {
+            let moved = view.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Capture {
+                    return;
+                }
+                let x = f32::from(event.position.x);
+                let pressed = event.pressed_button == Some(MouseButton::Left);
+                moved.update(cx, |this, cx| if pressed { drag(this, x, cx) } else { end(this, cx) }).ok();
+            });
+            let released = view.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    released.update(cx, end).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 /// The name column plus the shown columns, at their default widths.
 fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
     let mut columns = vec![ColumnWidth { id: "name".into(), width: 220.0, min_width: 140.0 }];
@@ -5959,6 +6004,18 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 }
 
 impl Pane {
+    fn drag_column(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize else { return };
+        self.table.drag_to(&drag, x);
+        cx.notify();
+    }
+
+    fn end_column_drag(&mut self, cx: &mut Context<Self>) {
+        if self.resize.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The in-pane state for a folder macOS will not list, shared by every view
     /// mode. Offers Retry, and Full Disk Access when privacy protection is the cause.
     fn render_unreadable(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -6377,29 +6434,17 @@ impl Render for Pane {
                 if this.marquee.is_some() {
                     this.update_marquee(event.position, cx);
                 }
-                if let Some(drag) = this.resize {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        this.table.drag_to(&drag, f32::from(event.position.x));
-                        cx.notify();
-                    } else {
-                        this.resize = None;
-                    }
-                }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.resize = None;
-                    this.commit_marquee(cx);
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.commit_marquee(cx)))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.resize = None;
                     this.cancel_marquee(cx);
                 }),
             )
+            .when(self.resize.is_some(), |pane| {
+                pane.child(column_resize_tracker(cx.weak_entity(), Self::drag_column, Self::end_column_drag))
+            })
             .flex()
             .flex_col()
             .flex_1()

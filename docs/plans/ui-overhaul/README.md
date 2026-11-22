@@ -16,17 +16,17 @@ The 2× board renders and variant crops live in [img/](img/). Files named `built
 
 | Piece | Change | PR |
 | --- | --- | --- |
-| U1 | Keycaps from the live keymap, tooltips, shared sheets, SVG icons, and selection tints | [#8](https://github.com/paraversal/file-crow/pull/8) |
-| U2 | Native menus built from the command registry | [#9](https://github.com/paraversal/file-crow/pull/9) |
-| U3 | Toolbar with Search, Go To, and All / Names / Contents | [#10](https://github.com/paraversal/file-crow/pull/10) |
-| U4 | Inline filter in the focused column with match highlighting | [#12](https://github.com/paraversal/file-crow/pull/12) |
-| U5 | Bottom bar with path, hints, progress, errors, and counts | [#13](https://github.com/paraversal/file-crow/pull/13) |
-| U6 | Search scope, footer, idle examples, and preview | [#14](https://github.com/paraversal/file-crow/pull/14), [#15](https://github.com/paraversal/file-crow/pull/15) |
-| U7 | Palette sections, tab completion, and recent commands | [#16](https://github.com/paraversal/file-crow/pull/16), [#18](https://github.com/paraversal/file-crow/pull/18) |
-| U8 | Sidebar selection treatments, disk usage, and Vim marks | [#20](https://github.com/paraversal/file-crow/pull/20) |
-| U9 | One-time contextual tips | [#21](https://github.com/paraversal/file-crow/pull/21) |
-| U10 | Motion and sound feedback, Reduce Motion support, and the motion lab | [#22](https://github.com/paraversal/file-crow/pull/22) |
-| U11 | Whole-window check against the assembled boards, docs, and benchmark | [#23](https://github.com/paraversal/file-crow/pull/23) |
+| U1 | Keycaps from the live keymap, tooltips, shared sheets, SVG icons, and selection tints | [#8](https://github.com/paraversal/crow/pull/8) |
+| U2 | Native menus built from the command registry | [#9](https://github.com/paraversal/crow/pull/9) |
+| U3 | Toolbar with Search, Go To, and All / Names / Contents | [#10](https://github.com/paraversal/crow/pull/10) |
+| U4 | Inline filter in the focused column with match highlighting | [#12](https://github.com/paraversal/crow/pull/12) |
+| U5 | Bottom bar with path, hints, progress, errors, and counts | [#13](https://github.com/paraversal/crow/pull/13) |
+| U6 | Search scope, footer, idle examples, and preview | [#14](https://github.com/paraversal/crow/pull/14), [#15](https://github.com/paraversal/crow/pull/15) |
+| U7 | Palette sections, tab completion, and recent commands | [#16](https://github.com/paraversal/crow/pull/16), [#18](https://github.com/paraversal/crow/pull/18) |
+| U8 | Sidebar selection treatments, disk usage, and Vim marks | [#20](https://github.com/paraversal/crow/pull/20) |
+| U9 | One-time contextual tips | [#21](https://github.com/paraversal/crow/pull/21) |
+| U10 | Motion and sound feedback, Reduce Motion support, and the motion lab | [#22](https://github.com/paraversal/crow/pull/22) |
+| U11 | Whole-window check against the assembled boards, docs, and benchmark | [#23](https://github.com/paraversal/crow/pull/23) |
 
 ## Design decisions
 

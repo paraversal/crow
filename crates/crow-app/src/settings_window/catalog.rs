@@ -97,14 +97,6 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::Theme],
     ),
     unit(
-        ControlId::AppIcon,
-        Category::Appearance,
-        "App icon",
-        &["dock", "icon", "crow icon"],
-        &["app_icon"],
-        &[ControlId::AppIcon],
-    ),
-    unit(
         ControlId::IconPack,
         Category::Appearance,
         "Icon pack",
@@ -119,6 +111,14 @@ pub(super) const UNITS: &[Unit] = &[
         &["breadcrumb", "explorer", "path", "bottom bar", "path field"],
         &["path_bar"],
         &[ControlId::PathBar],
+    ),
+    unit(
+        ControlId::SidebarStyle,
+        Category::Appearance,
+        "Sidebar style",
+        &["sidebar", "groups", "cards", "ledger", "accordion", "pills", "floating", "headings"],
+        &["sidebar_style"],
+        &[ControlId::SidebarStyle],
     ),
     unit(
         ControlId::TranslucentSidebar,

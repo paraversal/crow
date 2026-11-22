@@ -41,6 +41,9 @@ Both skills are generic. The Crow specifics are in the next section and win wher
 - Style with theme roles only (`theme.role("fg")` etc.), never raw palette slots except for named colors.
 - Performance budgets (100k folder): warm first paint < 50 ms, scroll p99 < 1.5 × frame time. Bench: `cargo run --release -p crow-app -- --bench target/fixture-100k` (fixture: `--make-fixture target/fixture-100k 100000`). Bench numbers vary by a few ms run to run; compare with `main` before calling something a regression.
 
+## Docs that must follow the code
+A change that adds or removes a feature updates `docs/features.md` in the same commit. `docs/keys.md` and `docs/configuration.md` are generated and checked by tests: after a keymap or config-default change run `CROW_UPDATE_DOCS=1 cargo test -p crow-app keys_doc` and `CROW_UPDATE_DOCS=1 cargo test -p crow-core --test docs`.
+
 ## Before every commit
 `cargo fmt --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`. CI runs the same on macOS.
 

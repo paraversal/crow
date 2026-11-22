@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crow_core::icon_pack::{
     IconColor, IconPack, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_ASSET_BYTES, MAX_PACK_BYTES, NATIVE_ICON_SOURCE,
-    validate_source, validate_svg,
+    validate_glyph, validate_source,
 };
 use crow_core::{LocalId, PluginId};
 use crow_plugin::RegisteredIconPack;
@@ -27,6 +27,19 @@ struct LoadedPack {
     name: String,
     pack: IconPack,
     assets: HashMap<String, Arc<[u8]>>,
+    /// PNG glyphs, decoded once per catalog load so a frame never rebuilds an image.
+    images: HashMap<String, Arc<gpui::Image>>,
+}
+
+/// The PNG glyphs among `assets`, as images GPUI can cache by id.
+fn png_images(assets: &HashMap<String, Arc<[u8]>>) -> HashMap<String, Arc<gpui::Image>> {
+    assets
+        .iter()
+        .filter(|(reference, _)| crow_core::is_png_ref(reference))
+        .map(|(reference, bytes)| {
+            (reference.clone(), Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec())))
+        })
+        .collect()
 }
 
 /// An immutable set of packs published together. Rows keep an `Arc` of this for
@@ -62,9 +75,20 @@ impl IconSnapshot {
     /// The first matching pack entry for this path, with the exact bytes the
     /// snapshot loaded. `None` means "draw the native icon".
     pub fn resolve(&self, source: &str, path: &Path, is_dir: bool, is_package: bool) -> Option<ResolvedIcon> {
-        if source == NATIVE_ICON_SOURCE {
-            return None;
+        // Layered sources: the first pack with an icon for this item wins; `native` ends the
+        // list, and a pack that is not installed is skipped.
+        for part in crow_core::split_sources(source) {
+            if part == NATIVE_ICON_SOURCE {
+                return None;
+            }
+            if let Some(icon) = self.resolve_in(part, path, is_dir, is_package) {
+                return Some(icon);
+            }
         }
+        None
+    }
+
+    fn resolve_in(&self, source: &str, path: &Path, is_dir: bool, is_package: bool) -> Option<ResolvedIcon> {
         let pack = self.packs.get(source)?;
         let type_ids = if pack.pack.uses_type() {
             let folder_like = is_dir && !is_package;
@@ -78,18 +102,24 @@ impl IconSnapshot {
         };
         let entry = pack.pack.resolve(path, is_dir, is_package, type_ids.as_deref().unwrap_or(&[]))?;
         let asset = pack.assets.get(&entry.icon)?.clone();
-        Some(ResolvedIcon { asset, color: entry.color.clone() })
+        let image = pack.images.get(&entry.icon).cloned();
+        Some(ResolvedIcon { asset, image, color: entry.color.clone() })
     }
 
     /// A display name for a configured source, including the missing case.
     pub fn display_name(&self, source: &str) -> String {
-        if source == NATIVE_ICON_SOURCE {
-            return "Native".into();
-        }
-        match self.packs.get(source) {
-            Some(pack) => pack.name.clone(),
-            None => format!("{source} (not installed)"),
-        }
+        let names: Vec<String> = crow_core::split_sources(source)
+            .map(|part| {
+                if part == NATIVE_ICON_SOURCE {
+                    return "Native".to_owned();
+                }
+                match self.packs.get(part) {
+                    Some(pack) => pack.name.clone(),
+                    None => format!("{part} (not installed)"),
+                }
+            })
+            .collect();
+        names.join(" + ")
     }
 }
 
@@ -97,6 +127,8 @@ impl IconSnapshot {
 #[derive(Clone)]
 pub struct ResolvedIcon {
     pub asset: Arc<[u8]>,
+    /// Set for a PNG glyph: drawn as a full-color image, ignoring `color`.
+    pub image: Option<Arc<gpui::Image>>,
     pub color: IconColor,
 }
 
@@ -115,7 +147,7 @@ pub fn effective_icon_source(ui: &Ui, dir: &Path) -> String {
 
 impl Resolver {
     pub fn for_source(cx: &App, source: &str) -> Self {
-        if source == NATIVE_ICON_SOURCE {
+        if crow_core::is_native(source) {
             return Self::default();
         }
         let snapshot = cx.try_global::<IconPacks>().map(IconPacks::snapshot);
@@ -491,7 +523,8 @@ fn load_local_pack(dir: &Path, key: &str, home: &Path) -> Result<LoadedPack, Str
         assets.insert(reference.to_owned(), asset);
     }
     let name = pack.name().map(str::to_owned).unwrap_or_else(|| key.to_owned());
-    Ok(LoadedPack { name, pack, assets })
+    let images = png_images(&assets);
+    Ok(LoadedPack { name, pack, assets, images })
 }
 
 fn read_local_asset(root: &Path, dir: &Path, reference: &str) -> Result<Arc<[u8]>, String> {
@@ -515,7 +548,7 @@ fn read_local_asset(root: &Path, dir: &Path, reference: &str) -> Result<Arc<[u8]
     if bytes.len() > MAX_GLYPH_BYTES {
         return Err(format!("glyph \"{reference}\" is larger than {} KiB", MAX_GLYPH_BYTES / 1024));
     }
-    validate_svg(&bytes).map_err(|error| format!("glyph \"{reference}\": {error}"))?;
+    validate_glyph(reference, &bytes).map_err(|error| format!("glyph \"{reference}\": {error}"))?;
     Ok(Arc::from(bytes))
 }
 
@@ -555,14 +588,16 @@ fn load_plugin_pack<P: PluginPackSource>(
                 MAX_PACK_ASSET_BYTES / 1024 / 1024
             ));
         }
-        validate_svg(&asset).map_err(|error| format!("icon pack \"{key}\": glyph \"{reference}\": {error}"))?;
+        validate_glyph(reference, &asset)
+            .map_err(|error| format!("icon pack \"{key}\": glyph \"{reference}\": {error}"))?;
         assets.insert(reference.to_owned(), asset);
     }
     if assets.len() > MAX_GLYPHS {
         return Err(format!("icon pack \"{key}\": more than {MAX_GLYPHS} glyphs"));
     }
     let name = pack.name().map(str::to_owned).unwrap_or_else(|| key.to_owned());
-    Ok(LoadedPack { name, pack, assets })
+    let images = png_images(&assets);
+    Ok(LoadedPack { name, pack, assets, images })
 }
 
 #[cfg(test)]

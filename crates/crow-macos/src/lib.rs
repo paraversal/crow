@@ -36,8 +36,8 @@ pub use volumes::{MountWatcher, Volume, eject, reduce_motion, reduce_transparenc
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSWorkspace};
-use objc2_foundation::{NSString, NSURL};
+use objc2_app_kit::{NSApplication, NSBitmapImageRep, NSImage, NSWorkspace};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::path::Path;
 
 fn main_thread() -> Option<MainThreadMarker> {
@@ -57,18 +57,60 @@ fn ns_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&ns_string(path))
 }
 
+/// The Dock draws every icon inside a template: artwork about 80% of the canvas, centered,
+/// with a transparent margin. Art that fills its canvas looks a quarter too big next to
+/// its neighbours, so `set_app_icon` adds that margin unless the picture already has one.
+const ICON_ARTWORK: f64 = 824. / 1024.;
+
+/// Whether an icon needs the Dock margin added, from the alpha at the middle of its four
+/// edges: any visible pixel there means the artwork reaches the edge.
+fn icon_needs_margin(edge_alphas: [f64; 4]) -> bool {
+    edge_alphas.iter().any(|alpha| *alpha > 0.1)
+}
+
 /// Show `png` as the app's icon in the Dock (and the About panel and app switcher)
-/// while Crow runs. The bundle's own icon, which Finder shows, is unchanged.
+/// while Crow runs, drawn at the Dock's template size. The bundle's own icon, which
+/// Finder shows, is made by `scripts/bundle.sh` the same way.
 pub fn set_app_icon(png: &[u8]) {
     let Some(mtm) = main_thread() else { return };
     let data = objc2_foundation::NSData::with_bytes(png);
-    let Some(image) =
-        objc2_app_kit::NSImage::initWithData(<objc2_app_kit::NSImage as objc2::AnyThread>::alloc(), &data)
-    else {
+    let Some(image) = NSImage::initWithData(<NSImage as objc2::AnyThread>::alloc(), &data) else {
         return;
     };
+    let image = with_dock_margin(&data, image);
     // SAFETY: the image is a valid NSImage; AppKit retains it.
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+}
+
+/// `image` redrawn at `ICON_ARTWORK` of a square canvas, or `image` itself when its
+/// artwork already leaves a margin (or cannot be read).
+// `lockFocus` is deprecated for resolution-independent drawing, but this canvas is drawn
+// once at 1024 px and handed to the Dock, which scales it; a drawing-handler image would
+// redraw on every Dock repaint.
+#[allow(deprecated)]
+fn with_dock_margin(data: &objc2_foundation::NSData, image: Retained<NSImage>) -> Retained<NSImage> {
+    let Some(rep) = NSBitmapImageRep::imageRepWithData(data) else { return image };
+    let (w, h) = (rep.pixelsWide(), rep.pixelsHigh());
+    if w < 2 || h < 2 {
+        return image;
+    }
+    let alpha = |x: isize, y: isize| rep.colorAtX_y(x, y).map_or(0., |c| c.alphaComponent());
+    if !icon_needs_margin([alpha(w / 2, 0), alpha(w / 2, h - 1), alpha(0, h / 2), alpha(w - 1, h / 2)]) {
+        return image;
+    }
+    let side = 1024.;
+    let art = side * ICON_ARTWORK;
+    let inset = (side - art) / 2.;
+    let canvas = NSImage::initWithSize(<NSImage as objc2::AnyThread>::alloc(), NSSize::new(side, side));
+    canvas.lockFocus();
+    image.drawInRect_fromRect_operation_fraction(
+        NSRect::new(NSPoint::new(inset, inset), NSSize::new(art, art)),
+        NSRect::ZERO,
+        objc2_app_kit::NSCompositingOperation::SourceOver,
+        1.0,
+    );
+    canvas.unlockFocus();
+    canvas
 }
 
 /// The standard About panel, filled from the app bundle's Info.plist.
@@ -112,4 +154,17 @@ pub fn finder_empty_trash() -> Result<(), String> {
 /// Open the folder `dir` itself in a Finder window.
 pub fn open_folder_in_finder(dir: &Path) -> bool {
     main_thread().is_some() && NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(None, &ns_string(dir))
+}
+
+#[cfg(test)]
+mod icon_margin_tests {
+    use super::icon_needs_margin;
+
+    #[test]
+    fn art_that_reaches_an_edge_gets_the_margin_and_art_with_one_does_not() {
+        assert!(icon_needs_margin([1., 1., 1., 1.]), "full-bleed art");
+        assert!(icon_needs_margin([0., 0., 0., 1.]), "one edge touched");
+        assert!(!icon_needs_margin([0., 0., 0., 0.]), "a transparent border is already there");
+        assert!(!icon_needs_margin([0.05, 0., 0.08, 0.]), "antialiasing at the border is not art");
+    }
 }
