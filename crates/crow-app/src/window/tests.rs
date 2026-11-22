@@ -218,6 +218,32 @@ fn first_row_sits_below_the_header_line(cx: &mut TestAppContext) {
     assert_eq!(row.top() - header.bottom(), px(crate::pane::LIST_TOP_INSET));
 }
 
+#[gpui::test]
+fn list_dividers_trade_width_with_the_next_column(cx: &mut TestAppContext) {
+    let root = fixture("list-dividers");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    let width = |cx: &mut VisualTestContext, i: usize| {
+        let id = ["column-header-0", "column-header-1", "column-header-2"][i];
+        cx.debug_bounds(id).expect("header cell").size.width
+    };
+    let (name, first, second) = (width(&mut cx, 0), width(&mut cx, 1), width(&mut cx, 2));
+    let start = cx.debug_bounds("column-resize-1").expect("divider").center();
+    // Far past the pane's edge, over the sidebar: the drag keeps following the pointer.
+    let end = start - gpui::point(px(2000.), px(0.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(start + gpui::point(px(25.), px(0.)), Some(gpui::MouseButton::Left), modifiers);
+    assert_eq!(cx.debug_bounds("column-resize-1").unwrap().center().x - start.x, px(25.), "the divider follows");
+    assert_eq!((width(&mut cx, 1), width(&mut cx, 2)), (first + px(25.), second - px(25.)), "the next column gives");
+    assert_eq!(width(&mut cx, 0), name, "Name stays");
+    cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert!(width(&mut cx, 1) < first, "the column shrank to its minimum: {:?}", width(&mut cx, 1));
+    assert_eq!(width(&mut cx, 1) + width(&mut cx, 2), first + second, "and the next column took the rest");
+}
+
 struct FixedSizer;
 
 impl crate::folder_sizes::Sizer for FixedSizer {
@@ -4856,6 +4882,72 @@ fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
         search.read_with(&cx, |search, _| search.result_content(&root.join("beta/other.txt"))),
         Some((1, "needle in beta".to_owned()))
     );
+}
+
+#[gpui::test]
+fn search_columns_resize_by_their_dividers(app: &mut TestAppContext) {
+    let root = fixture("search-columns");
+    std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+    let (view, mut cx) = open_sized(app, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    // Press a divider, move by dx, release; returns how far the divider itself moved.
+    let drag = |cx: &mut VisualTestContext, divider: &'static str, dx: f32| {
+        let start = cx.debug_bounds(divider).expect("divider").center();
+        let end = start + gpui::point(px(dx), px(0.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+        settle(&view, cx);
+        cx.debug_bounds(divider).expect("divider").center().x - start.x
+    };
+    let width = |cx: &mut VisualTestContext, id: &'static str| cx.debug_bounds(id).expect("header cell").size.width;
+    let aligned = |cx: &mut VisualTestContext| {
+        let header = cx.debug_bounds("search-column-1").expect("Folder header");
+        let cell = cx.debug_bounds("search-folder-0").expect("Folder cell");
+        assert_eq!((header.origin.x, header.size.width), (cell.origin.x, cell.size.width), "header and rows agree");
+        header.size.width
+    };
+    assert_eq!(aligned(&mut cx), px(180.));
+    let name = width(&mut cx, "search-column-0");
+
+    assert_eq!(drag(&mut cx, "search-resize-1", 40.), px(40.), "the divider follows the pointer");
+    assert_eq!(aligned(&mut cx), px(220.), "Folder widens");
+    assert_eq!(width(&mut cx, "search-column-2"), px(70.), "and the rightmost column, Modified, gives the same");
+    assert_eq!(width(&mut cx, "search-column-0"), name, "Name stays");
+    assert_eq!(drag(&mut cx, "search-resize-1", 500.), px(0.), "Modified is at its minimum");
+    assert_eq!(drag(&mut cx, "search-resize-1", -60.), px(-60.), "and the divider comes back at once");
+    assert_eq!(width(&mut cx, "search-column-2"), px(130.));
+    assert_eq!(drag(&mut cx, "search-resize-0", 30.), px(30.), "Name's divider trades with Folder");
+    assert_eq!(aligned(&mut cx), px(130.));
+
+    // A drag that leaves the results (over the preview) keeps following the pointer.
+    assert_eq!(drag(&mut cx, "search-resize-0", -2000.), px(140.) - (name + px(30.)), "to Name's minimum");
+    assert_eq!(width(&mut cx, "search-column-0"), px(140.));
+    assert_eq!(width(&mut cx, "search-column-2"), px(130.), "Modified does not move");
+    let folder = aligned(&mut cx);
+
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Escape closes the search");
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens again");
+    assert_eq!(
+        search.read_with(&cx, |search, _| search.column_width_for_test("folder")),
+        Some(f32::from(folder)),
+        "the next search keeps the widths"
+    );
+
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_resize(size(px(640.), px(500.)));
+    settle(&view, &mut cx);
+    aligned(&mut cx);
 }
 
 #[gpui::test]

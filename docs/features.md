@@ -26,7 +26,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - ripgrep's libraries and an fzf-style matcher run in-process; nothing to install.
 - Skipped folders are visible with the rule that skipped them; `dev` set on by default (`node_modules`, `target`, `.git`, ...), more sets in `exclude.toml`; Find Everything turns them all off.
 - Saved searches with kind, age and tag predicates become live sidebar places.
-- Results show line numbers for content hits, preview at the hit line, and take the usual file keys.
+- Results show line numbers for content hits, preview at the hit line, and take the usual file keys; drag the header dividers to resize Name, Folder and Modified.
 
 ## File operations
 - Copy, move, duplicate, trash, delete permanently, empty Trash (home and every volume), new folder and file, rename, batch rename (find/replace, prefix/suffix, numbering, live preview, one undo).
