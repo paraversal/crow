@@ -2551,7 +2551,7 @@ impl Render for Sidebar {
                                 .flex()
                                 .justify_center()
                                 .debug_selector(move || format!("sidebar-pack-icon-{i}"))
-                                .child(crate::icons::pack_glyph(&packed.asset, 15., icon_tint))
+                                .child(crate::icons::pack_glyph(&packed, 15., icon_tint))
                                 .into_any_element()
                         } else {
                             let icon_tint = tint.map(color).unwrap_or_else(|| color(theme.role("link")));
@@ -2580,7 +2580,7 @@ impl Render for Sidebar {
                                 .flex()
                                 .justify_center()
                                 .debug_selector(move || format!("sidebar-pack-icon-{i}"))
-                                .child(crate::icons::pack_glyph(&packed.asset, 15., icon_tint))
+                                .child(crate::icons::pack_glyph(&packed, 15., icon_tint))
                                 .into_any_element()
                         } else {
                             div()

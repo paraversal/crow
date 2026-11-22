@@ -529,7 +529,7 @@ fn render_icon(
     size: f32,
 ) -> gpui::AnyElement {
     match packed {
-        Some(icon) => crate::icons::pack_glyph(&icon.asset, size, color(icon.color.rgb(theme))).into_any_element(),
+        Some(icon) => crate::icons::pack_glyph(&icon, size, color(icon.color.rgb(theme))),
         None => div().children(native().map(|image| img(image).flex_none().size(px(size)))).into_any_element(),
     }
 }

@@ -18847,3 +18847,27 @@ fn layered_icon_packs_try_each_pack_in_order_and_fall_back_to_native(cx: &mut Te
     let names = cx.read(|cx| cx.global::<crate::icon_packs::IconPacks>().display_name("first,second"));
     assert_eq!(names, "first + second");
 }
+
+#[gpui::test]
+fn a_png_glyph_loads_as_a_full_color_image_and_a_bad_one_rejects_the_pack(cx: &mut TestAppContext) {
+    let root = fixture("icon-pack-png");
+    let (_view, cx) = open(cx, &root);
+    let (config, home) = cx.read(|cx| (cx.global::<Ui>().config_dir.clone(), cx.global::<Ui>().home.clone()));
+    let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+    png.extend_from_slice(&[0, 0, 0, 13]);
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&32u32.to_be_bytes());
+    png.extend_from_slice(&32u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let pack = config.join("icon-packs/pics");
+    std::fs::create_dir_all(&pack).expect("pack dir");
+    std::fs::write(pack.join("pack.toml"), "api = 1\nname = \"Pics\"\n[extension]\ntxt = { icon = \"a.png\" }\n")
+        .expect("pack");
+    std::fs::write(pack.join("a.png"), &png).expect("glyph");
+    let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("a PNG glyph is accepted");
+    let icon = snapshot.resolve("pics", &root.join("notes.txt"), false, false).expect("txt resolves");
+    assert!(icon.image.is_some(), "a PNG glyph is drawn as an image, not tinted");
+    std::fs::write(pack.join("a.png"), "not a png").expect("glyph");
+    let error = crate::icon_packs::load_catalog(&config, &home).err().expect("a fake PNG rejects the pack");
+    assert!(error.to_string().contains("a.png"), "{error}");
+}

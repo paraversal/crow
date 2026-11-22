@@ -137,8 +137,24 @@ pub fn glyph_color(name: Glyph, size: f32, tint: Rgba) -> Svg {
 /// One packed glyph from already-validated, in-memory bytes. GPUI hashes the
 /// bytes for its cache key and paints from memory, so a theme change reuses the
 /// alpha mask and no file is read at render time.
-pub fn pack_glyph(asset: &[u8], size: f32, tint: Rgba) -> Svg {
-    svg().data(asset).w(px(size)).h(px(size)).flex_none().text_color(tint).debug_selector(|| "pack-glyph".into())
+pub fn pack_glyph(icon: &crate::icon_packs::ResolvedIcon, size: f32, tint: Rgba) -> gpui::AnyElement {
+    match &icon.image {
+        // A PNG glyph is a full-color picture: no tint, scaled to the icon box.
+        Some(image) => gpui::img(image.clone())
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .debug_selector(|| "pack-glyph".into())
+            .into_any_element(),
+        None => svg()
+            .data(&icon.asset)
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .text_color(tint)
+            .debug_selector(|| "pack-glyph".into())
+            .into_any_element(),
+    }
 }
 
 #[cfg(test)]

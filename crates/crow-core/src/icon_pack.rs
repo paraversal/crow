@@ -392,7 +392,7 @@ fn convert(raw: RawEntry, where_: &str) -> Result<IconEntry, String> {
     Ok(IconEntry { icon: raw.icon, color })
 }
 
-/// A glyph must be one safe, bundle-relative `.svg` path.
+/// A glyph must be one safe, bundle-relative `.svg` or `.png` path.
 pub fn validate_asset_ref(reference: &str) -> Result<(), String> {
     if reference.is_empty() || reference.len() > MAX_ASSET_REF_BYTES {
         return Err(format!("glyph path must be 1–{MAX_ASSET_REF_BYTES} bytes"));
@@ -403,13 +403,50 @@ pub fn validate_asset_ref(reference: &str) -> Result<(), String> {
     if reference.contains(['\\', ':', '\0']) || reference.chars().any(char::is_control) {
         return Err(format!("glyph \"{reference}\" must be a plain relative path"));
     }
-    if !reference.to_ascii_lowercase().ends_with(".svg") {
-        return Err(format!("glyph \"{reference}\" must be an .svg file"));
+    let lower = reference.to_ascii_lowercase();
+    if !lower.ends_with(".svg") && !lower.ends_with(".png") {
+        return Err(format!("glyph \"{reference}\" must be an .svg or .png file"));
     }
     if reference.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
         return Err(format!("glyph \"{reference}\" must not escape the pack with . or .."));
     }
     Ok(())
+}
+
+/// Largest PNG glyph side, in pixels.
+pub const MAX_PNG_SIDE: u32 = 1024;
+
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+/// Whether `reference` names a PNG glyph (a full-color image, drawn without a tint).
+pub fn is_png_ref(reference: &str) -> bool {
+    reference.to_ascii_lowercase().ends_with(".png")
+}
+
+/// Validate a PNG glyph: the file signature, a leading IHDR chunk, and a side of 1 to
+/// [`MAX_PNG_SIDE`] pixels. Decoding happens later in GPUI; this only reads the header,
+/// so a hostile file is rejected before anything decodes it.
+pub fn validate_png(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_GLYPH_BYTES {
+        return Err(format!("glyph is larger than {} KiB", MAX_GLYPH_BYTES / 1024));
+    }
+    if bytes.len() < 33 || &bytes[..8] != PNG_SIGNATURE {
+        return Err("glyph is not a PNG file".into());
+    }
+    if &bytes[12..16] != b"IHDR" {
+        return Err("PNG glyph has no header chunk".into());
+    }
+    let side = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let (width, height) = (side(16), side(20));
+    if width == 0 || height == 0 || width > MAX_PNG_SIDE || height > MAX_PNG_SIDE {
+        return Err(format!("PNG glyph is {width}x{height}; each side must be 1 to {MAX_PNG_SIDE} pixels"));
+    }
+    Ok(())
+}
+
+/// Validate one glyph by its file type: `.svg` as a vector glyph, `.png` as an image.
+pub fn validate_glyph(reference: &str, bytes: &[u8]) -> Result<(), String> {
+    if is_png_ref(reference) { validate_png(bytes) } else { validate_svg(bytes) }
 }
 
 /// Validate a single-color vector glyph before it reaches GPUI: bounded,
@@ -685,6 +722,27 @@ fn check_css_references(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_glyphs_are_checked_by_header_and_size() {
+        let mut png = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        png.extend_from_slice(&[0, 0, 0, 13]);
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&64u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(validate_png(&png).is_ok());
+        assert!(validate_glyph("icons/a.PNG", &png).is_ok());
+        assert!(validate_glyph("icons/a.svg", &png).is_err(), "a PNG is not an SVG");
+        assert!(validate_asset_ref("icons/a.png").is_ok() && validate_asset_ref("icons/a.gif").is_err());
+        let mut huge = png.clone();
+        huge[16..20].copy_from_slice(&5000u32.to_be_bytes());
+        assert!(validate_png(&huge).is_err(), "too large a side");
+        assert!(validate_png(b"not a png at all, just text that is long enough to pass the length").is_err());
+        let mut no_ihdr = png.clone();
+        no_ihdr[12..16].copy_from_slice(b"IDAT");
+        assert!(validate_png(&no_ihdr).is_err());
+    }
 
     #[test]
     fn layered_sources_validate_split_and_toggle() {
