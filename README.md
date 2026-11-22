@@ -10,7 +10,7 @@
 Crow is a Finder-style file manager for macOS that keeps Finder’s directness and adds speed, predictability and a keyboard-first layer.
 It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), the GPU-accelerated framework behind the Zed editor.
 
-[Download](https://github.com/paraversal/crow/releases/latest) · [Install guide](docs/install.md) · [Website](https://paraversal.github.io/crow/) · [Manual](docs/manual/index.html) · [All features](docs/features.md)
+[Download](https://github.com/paraversal/crow/releases/latest) · [Install guide](docs/install.md) · [Website](https://paraversal.github.io/crow/) · [Manual](https://paraversal.github.io/crow/manual/) · [All features](docs/features.md)
 
 ## What it does
 
@@ -25,7 +25,7 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 </tr>
 <tr>
 <td><picture><source srcset="docs/media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-developer-light.webp" alt="Crow set up for a developer"></picture><br><b>Make it yours.</b> Themes, icon packs, five sidebar styles, a Vim layer, rebindable keys.</td>
-<td><picture><source srcset="docs/media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-photographer-light.webp" alt="Crow set up for a photographer"></picture><br><b>Your setup, not ours.</b> A floating-panel sidebar, Lucide icons and Rosé Pine Dawn: one person’s config of many.</td>
+<td><picture><source srcset="docs/media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-photographer-light.webp" alt="Crow set up for a photographer"></picture><br><b>Your setup, not ours.</b> A floating-panel sidebar, Lucide icons and Rosé Pine: one person’s config of many.</td>
 </tr>
 </table>
 
@@ -38,7 +38,7 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 - A Vim layer, and every key rebindable.
 - Views that follow the folder (`views.toml`), with Why This View? to explain them.
 - Git badges, lines changed and a review sheet; Projects in the sidebar.
-- A path bar you can type into, folder sizes, Open Terminal Here, spring-loaded folders with a way back.
+- A path bar you can type into, Open Terminal Here, spring-loaded folders with a way back.
 - Plain-text config with live reload, themes shared with your other apps, icon packs, plugins.
 
 **What Finder does that Crow doesn’t (yet)**
@@ -68,7 +68,7 @@ From source:
 
 | | |
 | --- | --- |
-| [Manual](docs/manual/index.html) | Getting started and every task, with screenshots |
+| [Manual](https://paraversal.github.io/crow/manual/) | Getting started and every task, with screenshots |
 | [Features](docs/features.md) | Everything Crow does today |
 | [Keys](docs/keys.md) | Every shortcut, Finder and Vim layers |
 | [Configuration](docs/configuration.md) | The TOML files and every key |
