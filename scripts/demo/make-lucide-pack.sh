@@ -81,10 +81,10 @@ project synth-rs keyboard-music base0F
 project wasm-life dna base0B
 project advent-of-code tree-pine base09
 project 2026 calendar-days base09
-project Lofoten mountain-snow base0C
-project Dolomites mountain base0F
-project "Fog Valley" cloud-fog base0D
-project "Faroe Islands" sailboat base0B
+project "2026-03 Lofoten" mountain-snow base0C
+project "2026-05 Dolomites" mountain base0F
+project "2026-10 Fog Valley" cloud-fog base0D
+project "2026-07 Faroe Islands" sailboat base0B
 project "Anna and Tom" heart base08
 project "Atelier Noor" palette base09
 project "Nordic Outdoors" compass base0C
