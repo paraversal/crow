@@ -7,9 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
-#[cfg(test)]
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -364,12 +362,11 @@ pub struct Folder {
     #[cfg(test)]
     sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
-    /// The first load attaches the watcher on its background thread.
-    watch: Option<(
-        std::sync::mpsc::Sender<crow_fs::FolderChange>,
-        futures::channel::oneshot::Sender<Option<FolderWatcher>>,
-    )>,
-    _attach: Task<()>,
+    /// A load attaches the watcher on its background thread while there is none:
+    /// the first load, and later loads when the folder was missing at the time.
+    watch_tx: Sender<FolderChange>,
+    /// An attach is in flight; the next load doesn't start another.
+    attaching: bool,
     error: Option<SharedString>,
     error_kind: Option<FolderErrorKind>,
     /// Paths a watcher batch added; re-stat them once the stream is quiet,
@@ -396,16 +393,6 @@ impl Folder {
                 if this.update(cx, |this, cx| this.apply_folder_changes(cx)).is_err() {
                     break;
                 }
-            }
-        });
-        // Attaching the FSEvents stream resolves paths (disk I/O), so the first
-        // load does it on its background thread, before listing: a change after
-        // the listing still reaches the watcher.
-        let (watcher_tx, watcher_rx) = futures::channel::oneshot::channel();
-        let watch = Some((changes_tx, watcher_tx));
-        let attach = cx.spawn(async move |this, cx| {
-            if let Ok(watcher) = watcher_rx.await {
-                this.update(cx, |this, _| this._watcher = watcher).ok();
             }
         });
         let mut folder = Self {
@@ -475,8 +462,8 @@ impl Folder {
             #[cfg(test)]
             sort_delay: Duration::ZERO,
             _watcher: None,
-            watch,
-            _attach: attach,
+            watch_tx: changes_tx,
+            attaching: false,
             error: None,
             error_kind: None,
             reconcile: Vec::new(),
@@ -1684,7 +1671,24 @@ impl Folder {
         let started = Instant::now();
         let cancel = Arc::new(AtomicBool::new(false));
         std::mem::replace(&mut self.load_cancel, cancel.clone()).store(true, Ordering::Relaxed);
-        let watch = self.watch.take();
+        // Attaching the FSEvents stream resolves paths (disk I/O), so it happens on
+        // the load's background thread, before listing: a change after the listing
+        // still reaches the watcher. A folder that was missing (deleted while shown
+        // in another window) has no watcher yet; the next load tries again.
+        let watch = (self._watcher.is_none() && !self.attaching).then(|| {
+            self.attaching = true;
+            let (attached_tx, attached_rx) = futures::channel::oneshot::channel();
+            cx.spawn(async move |this, cx| {
+                let watcher = attached_rx.await.ok().flatten();
+                this.update(cx, |this, _| {
+                    this.attaching = false;
+                    this._watcher = watcher;
+                })
+                .ok();
+            })
+            .detach();
+            (self.watch_tx.clone(), attached_tx)
+        });
         cx.background_spawn(async move {
             if let Some((changes, attached)) = watch {
                 let watcher = crow_fs::watch_folder(&dir, changes)

@@ -14984,6 +14984,29 @@ fn deleting_the_shown_folder_keeps_the_invariants(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_replaced_root_lists_the_disk_after_a_new_window(cx: &mut TestAppContext) {
+    // fuzz_long seed 1795350625255522000, shrunk: the listing kept the replaced files
+    // while the disk held only `alpha`.
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-replace-root", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::DeleteShownFolder,
+            Step::Keys("cmd-n".into()),
+            Step::ReplaceShownFolder,
+            Step::Keys("cmd-shift-.".into()),
+            Step::Keys("cmd-k".into()),
+            Step::Keys("enter".into()),
+            Step::ReplaceShownFolder
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
 fn replace_shown_folder_reloads(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
     let tree = fuzz_tree("fuzz-replace", 40);
