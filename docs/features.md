@@ -6,7 +6,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Four views: icons (Compact, Standard, Large, optional caption), list (resizable, hideable columns, nested folders), columns, and gallery (a filename rail beside a large preview; two selected files compare side by side).
 - Per-folder view, sort and columns, saved when you change them. Rules by path pattern in `views.toml`; View ▸ Why This View? (⌘J) names the layer that decided each setting.
 - Tabs, Back and Forward history, Enclosing Folder, Go to Folder, and several windows.
-- A sidebar of favorites in groups, Recent, Projects, Tags, saved searches and Locations (free space, eject). Five looks: ledger lines, cards, accordion, floating panel, pills. Groups take an icon; favorites take a name, icon, colour and Vim mark.
+- A sidebar of favorites in groups, Recent, Projects, Tags, saved searches and Locations (free space, eject). Five looks: ledger lines, cards, accordion, floating panel, pills. Groups take an icon; favorites take a name, icon, colour and Vim mark. The default Outline icons draw sidebar folders and special folders (Home, Desktop, Documents, Downloads, Applications…) as SF Symbol line glyphs, like Finder's sidebar, and the path bar and the title's folder icon follow; Finder keeps Finder's colored icons. An icon pack still wins.
 - An opt-in Shelf at the bottom of the sidebar: carry files between folders, then Move or Copy Shelf Here.
 - A right sidebar with Preview, Info and Git Diff tabs: ⇧⌘P shows or hides it, ⌥⌘P opens it or cycles its tabs, ⌘I opens it on Info. The left sidebar hides with ⌃⌘S; both slide.
 - Its Info tab shows kind, size, dates, tags, permissions and owner; a multi-selection shows totals and shared tags.
@@ -42,7 +42,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 
 ## Make it yours
 - Ten built-in themes: Finder Light and Dark, Catppuccin Latte and Mocha, Gruvbox Light and Dark, Solarized Light and Dark, Rosé Pine and Rosé Pine Dawn; "System" follows macOS. Any Base24 theme in `~/.config/themes` is listed too, and Apply to All Apps sets it for every program reading that index.
-- Icon packs (SVG and PNG), layered in order; a font and size; a translucent sidebar.
+- Default icons (Outline or Finder) with icon packs (SVG and PNG) layered over them in order; a font and size; a translucent sidebar.
 - Motion (off, low, full), Finder-style or Crow sounds, respecting Reduce Motion.
 - Plain TOML config with live reload and comments kept; a Settings window over the same files with search.
 - Plugins (Rhai packages with grants): commands, sidebar sections, preview providers, columns. See [plugins.md](plugins.md).

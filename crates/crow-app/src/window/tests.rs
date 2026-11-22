@@ -3987,9 +3987,14 @@ fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("down cmd-down");
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-native-icon-1").is_some(), "the favorite's folder is Finder's own icon");
-    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_none(), "not the line folder");
+    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_some(), "the default outline style draws a line folder");
+    assert!(cx.debug_bounds("sidebar-native-icon-1").is_none(), "not Finder's colored icon");
     assert!(cx.debug_bounds("sidebar-clock-icon-3").is_some(), "Recent's clock is a line icon");
+
+    write_config(&view, &mut cx, "settings.toml", "icon_style = \"finder\"\n");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-native-icon-1").is_some(), "the Finder style keeps Finder's own icon");
+    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_none(), "not the line folder");
 }
 
 #[gpui::test]
@@ -9471,7 +9476,7 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
         slot_height,
         "the path slot keeps its height"
     );
-    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(28.), "the field fits inside it");
+    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(22.), "the field fits inside it");
     let state = bar_state(&view, &mut cx);
     assert_eq!(hint_labels(&state), ["go", "complete", "cancel"]);
     assert_eq!(hint_keys(&state), ["↩", "⇥", "esc"]);
@@ -9747,7 +9752,7 @@ fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext)
     let bar = cx.debug_bounds("bar-path").expect("path slot");
     let first = cx.debug_bounds("path-segment-0").expect("first segment");
     assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "the bar keeps its height");
-    assert_eq!(first.left(), bar.left() + px(13.), "the first segment sits inside the pill's padding");
+    assert_eq!(first.left(), bar.left() + px(3.), "the first segment sits inside the pill's border and padding");
 
     cx.simulate_mouse_move(gpui::point(bar.right() - px(8.), bar.center().y), None, Default::default());
     cx.run_until_parked();
@@ -9757,7 +9762,7 @@ fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext)
     cx.run_until_parked();
     let bar = cx.debug_bounds("bar-path").expect("path slot");
     assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "640 px keeps the bar's height");
-    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment").left(), bar.left() + px(13.));
+    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment").left(), bar.left() + px(3.));
 }
 
 #[gpui::test]
@@ -9932,7 +9937,7 @@ fn path_bar_modes_keep_geometry_at_640_with_a_config_error(cx: &mut TestAppConte
         settle(&view, &mut cx);
         assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(38.), "{mode} editor bar");
         assert_eq!(cx.debug_bounds("bar-path").expect("slot").size.height, px(32.), "{mode} editor slot");
-        assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(28.), "{mode} editor field");
+        assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(22.), "{mode} editor field");
         assert_eq!(cx.debug_bounds("path-go").is_some(), mode == "explorer", "{mode} Go button");
         cx.simulate_keystrokes("escape");
         settle(&view, &mut cx);

@@ -36,6 +36,16 @@ use crow_fs::human_size;
 
 /// The bar's height; tips sit above it.
 pub const HEIGHT: f32 = 38.;
+/// The path pill (and the field that replaces it): a calm band inside the bar, its segments'
+/// highlights inset by the pill's padding on every side so their corners run parallel.
+const PILL_HEIGHT: f32 = 26.;
+const SEGMENT_HEIGHT: f32 = 20.;
+/// How far a segment's highlight sits from the pill's outer edge, the same on all sides.
+const PILL_INSET: f32 = (PILL_HEIGHT - SEGMENT_HEIGHT) / 2.;
+/// The pill's padding: the inset less its 1 px border.
+const PILL_PAD: f32 = PILL_INSET - 1.;
+const SEGMENT_RADIUS: f32 = 5.;
+const PILL_RADIUS: f32 = SEGMENT_RADIUS + PILL_INSET;
 
 /// One path segment's drawn bounds and destination.
 #[derive(Clone, Debug)]
@@ -452,19 +462,20 @@ pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
     // The sibling separator: 6 px on both sides and "›".
     let separator = px(12.) + measure("›");
     let last = state.path.parts.len().saturating_sub(1);
-    // The pill's 12 px padding on both sides (24, on the first segment), the
-    // segment's px_1, the 14 px icon, its 4 px gap, the name, the separator, and
-    // the pencil (20 px + its 4 px margin) on the last segment.
+    // The pill's padding and border on both sides (on the first segment), the
+    // segment's 6 + 4 px padding, the icon (18 px: the wider of a 14 px Finder icon
+    // and an outline glyph), its 4 px gap, the name, the separator, and the pencil
+    // (20 px + its 4 px margin) on the last segment.
     let segments: Vec<Pixels> = state
         .path
         .parts
         .iter()
         .enumerate()
         .map(|(i, (name, _))| {
-            px(8. + 14. + 4.)
+            px(10. + 18. + 4.)
                 + measure(name)
                 + if i < last { separator } else { px(24.) }
-                + if i == 0 { px(24.) } else { px(0.) }
+                + if i == 0 { px(PILL_INSET * 2.) } else { px(0.) }
         })
         .collect();
     // The "…" segment: its px_1, the "…", the separator's 12 px and "›".
@@ -515,9 +526,9 @@ pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
     // The field spans the left section: the bar less the counts and one gap.
     state.field_width = (bar - fixed + px(GAP)).max(px(0.));
     // The field takes the left section: the input's minimum plus the hints inside
-    // it, the Explorer Go button, and the field's 12 px padding on both sides and
+    // it, the Explorer Go button, and the field's 8 px padding on both sides and
     // 14 px gaps.
-    let field_min = px(PATH_FIELD_MIN + 38.)
+    let field_min = px(PATH_FIELD_MIN + 30.)
         + if state.path_bar == PathBarMode::Explorer { px(PATH_GO_WIDTH) } else { px(0.) }
         + hint_widths.iter().copied().sum::<Pixels>();
     let base_fit =
@@ -739,8 +750,8 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
         .flex_none()
         .items_center()
         .px_1()
-        .h(px(20.))
-        .rounded_sm()
+        .h(px(SEGMENT_HEIGHT))
+        .rounded(px(SEGMENT_RADIUS))
         .hover(move |s| s.bg(hover))
         .child("…")
         .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -799,6 +810,8 @@ pub fn render(
     let explorer = state.path_bar == PathBarMode::Explorer;
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
+    let icon_style = ui.settings.icon_style;
+    let home = ui.home.clone();
 
     let path = {
         let hidden = state.path.hidden.clone().unwrap_or(0..0);
@@ -837,13 +850,17 @@ pub fn render(
                 .flex()
                 .items_center()
                 .gap_1()
-                .px_1()
-                .h(px(20.))
-                .rounded_sm()
+                // Two points more on the left: the icon sits off the highlight's edge.
+                .pl(px(6.))
+                .pr(px(4.))
+                .h(px(SEGMENT_HEIGHT))
+                .rounded(px(SEGMENT_RADIUS))
                 // Only the last segment gives way (with an ellipsis) once nothing else can fold.
                 .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
                 .hover(move |s| s.bg(hover))
-                .child(crate::preview::path_icon(&icons, target, is_dir, is_package, None, &theme, 14.))
+                .child(crate::preview::styled_path_icon(
+                    &icons, target, is_dir, is_package, icon_style, &home, &theme, 14.,
+                ))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()));
             // A segment drags the entry it stands for: the folder, or the file the
             // last segment shows. The click below still navigates; GPUI clears the
@@ -907,8 +924,8 @@ pub fn render(
                 .items_center()
                 .justify_center()
                 .ml_1()
-                .size(px(20.))
-                .rounded(px(4.))
+                .size(px(SEGMENT_HEIGHT))
+                .rounded(px(SEGMENT_RADIUS))
                 .hover(move |s| s.bg(hover))
                 .on_click(|_, window, cx| {
                     cx.stop_propagation();
@@ -964,11 +981,11 @@ pub fn render(
             .id("path-pill")
             .debug_selector(|| "path-pill".into())
             .flex_none()
-            .h(px(32.))
+            .h(px(PILL_HEIGHT))
             .flex()
             .items_center()
-            .px(px(12.))
-            .rounded(px(8.))
+            .px(px(PILL_PAD))
+            .rounded(px(PILL_RADIUS))
             .border_1()
             .border_color(transparent_black())
             .bg(transparent_black())
@@ -1260,19 +1277,16 @@ pub fn render(
             )
         });
         let field = div()
-            .id("bar-path")
-            .debug_selector(|| "bar-path".into())
-            .role(Role::Navigation)
-            .aria_label(format!("Path: {}", state.path.spoken))
+            .id("bar-path-box")
             .flex_1()
             .min_w_0()
-            .h(px(32.))
+            .h(px(PILL_HEIGHT))
             .overflow_hidden()
             .flex()
             .items_center()
             .gap(px(14.))
-            .px(px(12.))
-            .rounded(px(8.))
+            .px(px(8.))
+            .rounded(px(PILL_RADIUS))
             .border_2()
             .border_color(crate::style::field_ring(&theme))
             .bg(color(theme.role("surface")))
@@ -1307,7 +1321,19 @@ pub fn render(
                 )
                 .into_any_element()
         };
-        bar_children.push(field.into_any_element());
+        // The slot keeps the resting path's 32 px; the field is the pill's height inside it.
+        let slot = div()
+            .id("bar-path")
+            .debug_selector(|| "bar-path".into())
+            .role(Role::Navigation)
+            .aria_label(format!("Path: {}", state.path.spoken))
+            .flex_1()
+            .min_w_0()
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .child(field);
+        bar_children.push(slot.into_any_element());
     } else {
         bar_children.push(path.into_any_element());
         if let Some(text) = state.status.clone() {

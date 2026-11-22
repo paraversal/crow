@@ -289,6 +289,21 @@ impl IconPack {
         })
     }
 
+    /// Also match each `[item]` path under the name `resolve_link` gives it, so a key written
+    /// through a symlink (`~/projects` → `~/code/projects`) still matches the real folder the
+    /// listing shows. The literal key keeps matching too. The caller does the disk reads.
+    pub fn add_item_aliases(&mut self, resolve_link: impl Fn(&Path) -> Option<PathBuf>) {
+        let aliases: Vec<(PathBuf, IconEntry)> = self
+            .item
+            .iter()
+            .filter_map(|(path, entry)| Some((resolve_link(path)?, entry.clone())))
+            .filter(|(alias, _)| !self.item.contains_key(alias))
+            .collect();
+        for (alias, entry) in aliases {
+            self.item.entry(alias).or_insert(entry);
+        }
+    }
+
     pub fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
@@ -918,6 +933,25 @@ folder = { icon = "folder.svg" }
 "##,
         );
         assert_eq!(pack.resolve(Path::new("/x/App.app"), true, true, &[]).unwrap().icon, "app.svg");
+    }
+
+    #[test]
+    fn an_item_written_through_a_symlink_also_matches_the_real_folder() {
+        let mut pack = pack(
+            r##"
+api = 1
+[item]
+"~/projects/crow" = { icon = "crow.svg" }
+"##,
+        );
+        pack.add_item_aliases(|path| {
+            path.strip_prefix("/Users/test/projects").ok().map(|rest| Path::new("/Users/test/code/projects").join(rest))
+        });
+        assert_eq!(pack.resolve(Path::new("/Users/test/projects/crow"), true, false, &[]).unwrap().icon, "crow.svg");
+        assert_eq!(
+            pack.resolve(Path::new("/Users/test/code/projects/crow"), true, false, &[]).unwrap().icon,
+            "crow.svg"
+        );
     }
 
     #[test]

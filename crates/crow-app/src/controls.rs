@@ -287,9 +287,23 @@ pub fn dropdown(
     toggle: Activate,
     select: Select,
 ) -> gpui::Stateful<Div> {
+    let value = options.get(selected).cloned().unwrap_or_default();
+    dropdown_valued(meta, options, value, menu, style, toggle, select)
+}
+
+/// A [`dropdown`] whose closed button shows `value` instead of one option, for a menu that picks
+/// several entries (the button then names all of them).
+pub fn dropdown_valued(
+    meta: ControlMeta,
+    options: &[String],
+    value: String,
+    menu: Option<Menu>,
+    style: ControlStyle,
+    toggle: Activate,
+    select: Select,
+) -> gpui::Stateful<Div> {
     let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
-    let value = options.get(selected).cloned().unwrap_or_default();
     let mut button = div()
         .id(control_id)
         .debug_selector(move || format!("{control_id}-control"))

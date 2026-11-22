@@ -5,6 +5,7 @@
 //! bundle's Resources.
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use crow_theme::Theme;
 use gpui::{AssetSource, Result, Rgba, SharedString, Svg, prelude::*, px, svg};
@@ -35,6 +36,21 @@ pub enum Glyph {
     Cloud,
     CloudOff,
     Lock,
+    Home,
+    Desktop,
+    Documents,
+    Downloads,
+    Applications,
+    Movies,
+    Music,
+    Pictures,
+    Public,
+    Library,
+    Developer,
+    /// The startup disk in Locations.
+    Drive,
+    /// Any other volume in Locations.
+    ExternalDrive,
 }
 
 impl Glyph {
@@ -60,6 +76,19 @@ impl Glyph {
         Glyph::Cloud,
         Glyph::CloudOff,
         Glyph::Lock,
+        Glyph::Home,
+        Glyph::Desktop,
+        Glyph::Documents,
+        Glyph::Downloads,
+        Glyph::Applications,
+        Glyph::Movies,
+        Glyph::Music,
+        Glyph::Pictures,
+        Glyph::Public,
+        Glyph::Library,
+        Glyph::Developer,
+        Glyph::Drive,
+        Glyph::ExternalDrive,
     ];
 
     pub fn path(self) -> &'static str {
@@ -84,7 +113,99 @@ impl Glyph {
             Glyph::Cloud => "icons/cloud.svg",
             Glyph::CloudOff => "icons/cloud-off.svg",
             Glyph::Lock => "icons/lock.svg",
+            Glyph::Home => "icons/house.svg",
+            Glyph::Desktop => "icons/monitor.svg",
+            Glyph::Documents => "icons/file-text.svg",
+            Glyph::Downloads => "icons/circle-arrow-down.svg",
+            Glyph::Applications => "icons/app-window.svg",
+            Glyph::Movies => "icons/clapperboard.svg",
+            Glyph::Music => "icons/music.svg",
+            Glyph::Pictures => "icons/image.svg",
+            Glyph::Public => "icons/users.svg",
+            Glyph::Library => "icons/library.svg",
+            Glyph::Developer => "icons/hammer.svg",
+            Glyph::Drive | Glyph::ExternalDrive => "icons/hard-drive.svg",
         }
+    }
+}
+
+/// The line glyph Finder's sidebar draws for a special folder (house for Home, a monitor for
+/// Desktop…), so a native sidebar looks the way Finder's does. `None` for any other folder.
+pub fn special_folder_glyph(path: &Path, home: &Path) -> Option<Glyph> {
+    if path == home {
+        return Some(Glyph::Home);
+    }
+    if path == Path::new("/Applications") {
+        return Some(Glyph::Applications);
+    }
+    if path == Path::new("/Library") {
+        return Some(Glyph::Library);
+    }
+    if path.parent() != Some(home) {
+        return None;
+    }
+    Some(match path.file_name()?.to_str()? {
+        "Desktop" => Glyph::Desktop,
+        "Documents" => Glyph::Documents,
+        "Downloads" => Glyph::Downloads,
+        "Applications" => Glyph::Applications,
+        "Movies" => Glyph::Movies,
+        "Music" => Glyph::Music,
+        "Pictures" => Glyph::Pictures,
+        "Public" => Glyph::Public,
+        "Library" => Glyph::Library,
+        "Developer" => Glyph::Developer,
+        _ => return None,
+    })
+}
+
+/// The outline glyph for any folder: its special glyph, a drive for the startup disk or a
+/// mounted volume, else a plain folder.
+pub fn outline_folder_glyph(path: &Path, home: &Path) -> Glyph {
+    special_folder_glyph(path, home).unwrap_or_else(|| {
+        if path == Path::new("/") {
+            Glyph::Drive
+        } else if path.parent() == Some(Path::new("/Volumes")) {
+            Glyph::ExternalDrive
+        } else {
+            Glyph::Folder
+        }
+    })
+}
+
+/// The SF Symbol Finder's sidebar draws for `glyph`, for the glyphs that have one.
+fn symbol_name(glyph: Glyph) -> Option<&'static str> {
+    Some(match glyph {
+        Glyph::Folder => "folder",
+        Glyph::Home => "house",
+        Glyph::Desktop => "dock.rectangle",
+        Glyph::Documents => "doc",
+        Glyph::Downloads => "arrow.down.circle",
+        Glyph::Applications => "a.square",
+        Glyph::Movies => "film",
+        Glyph::Music => "music.note",
+        Glyph::Pictures => "photo.fill",
+        Glyph::Public => "figure.walk.diamond",
+        Glyph::Library => "building.columns",
+        Glyph::Developer => "hammer",
+        Glyph::Drive => "internaldrive",
+        Glyph::ExternalDrive => "externaldrive",
+        _ => return None,
+    })
+}
+
+/// An outline sidebar icon: the system's SF Symbol in `tint`, so it follows the macOS version
+/// like Finder's sidebar; the shipped Lucide glyph when the symbol is missing or off the main
+/// thread.
+pub fn outline_glyph(name: Glyph, size: f32, tint: Rgba) -> gpui::AnyElement {
+    let rgba = [tint.r, tint.g, tint.b, tint.a].map(|channel| (channel.clamp(0., 1.) * 255.0).round() as u8);
+    let image = symbol_name(name)
+        .and_then(|symbol| crow_macos::symbol_png(symbol, size.round() as u32, rgba))
+        .and_then(|(png, width, height)| Some((crate::style::image_from_png(png)?, width, height)));
+    match image {
+        // Drawn at the symbol's own size and proportions, in points.
+        Some((image, width, height)) => gpui::img(image).w(px(width)).h(px(height)).flex_none().into_any_element(),
+        None => glyph_color(name, size, tint).into_any_element(),
     }
 }
 
@@ -110,6 +231,18 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/cloud.svg", include_bytes!("../assets/icons/cloud.svg")),
     ("icons/cloud-off.svg", include_bytes!("../assets/icons/cloud-off.svg")),
     ("icons/lock.svg", include_bytes!("../assets/icons/lock.svg")),
+    ("icons/house.svg", include_bytes!("../assets/icons/house.svg")),
+    ("icons/monitor.svg", include_bytes!("../assets/icons/monitor.svg")),
+    ("icons/file-text.svg", include_bytes!("../assets/icons/file-text.svg")),
+    ("icons/circle-arrow-down.svg", include_bytes!("../assets/icons/circle-arrow-down.svg")),
+    ("icons/app-window.svg", include_bytes!("../assets/icons/app-window.svg")),
+    ("icons/clapperboard.svg", include_bytes!("../assets/icons/clapperboard.svg")),
+    ("icons/music.svg", include_bytes!("../assets/icons/music.svg")),
+    ("icons/image.svg", include_bytes!("../assets/icons/image.svg")),
+    ("icons/users.svg", include_bytes!("../assets/icons/users.svg")),
+    ("icons/library.svg", include_bytes!("../assets/icons/library.svg")),
+    ("icons/hammer.svg", include_bytes!("../assets/icons/hammer.svg")),
+    ("icons/hard-drive.svg", include_bytes!("../assets/icons/hard-drive.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 
@@ -160,6 +293,16 @@ pub fn pack_glyph(icon: &crate::icon_packs::ResolvedIcon, size: f32, tint: Rgba)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn special_folders_get_finders_sidebar_glyphs() {
+        let home = Path::new("/Users/me");
+        assert_eq!(special_folder_glyph(home, home), Some(Glyph::Home));
+        assert_eq!(special_folder_glyph(Path::new("/Users/me/Downloads"), home), Some(Glyph::Downloads));
+        assert_eq!(special_folder_glyph(Path::new("/Applications"), home), Some(Glyph::Applications));
+        assert_eq!(special_folder_glyph(Path::new("/Users/me/Projects"), home), None);
+        assert_eq!(special_folder_glyph(Path::new("/Users/me/Projects/Downloads"), home), None);
+    }
 
     #[test]
     fn every_glyph_resolves() {

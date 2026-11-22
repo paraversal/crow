@@ -25,7 +25,7 @@ pub use drag::{ComboDrag, begin_drag, drop_is_premature, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;
 pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch, watch_under};
-pub use icons::{icon_png, type_icon_png};
+pub use icons::{icon_png, symbol_png, type_icon_png};
 pub use metadata::{Permissions, kind_name, permissions, tags, tags_checked, thumbnail_png, type_identifiers};
 pub use names::{display_component_paths, display_components, display_name_at, localized_display_name_at};
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};

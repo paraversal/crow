@@ -509,6 +509,28 @@ pub(crate) fn path_icon(
     render_icon(packed, || cloud_icon(cloud, path, is_dir, size as u32), theme, size)
 }
 
+/// A path's icon where the default icon style applies (the path bar, the title's proxy icon):
+/// in Outline a folder no pack matches draws the sidebar's line glyph, two points larger than
+/// a Finder icon the way the sidebar's are; files, packages and Finder style use [`path_icon`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn styled_path_icon(
+    resolver: &crate::icon_packs::Resolver,
+    path: &std::path::Path,
+    is_dir: bool,
+    is_package: bool,
+    style: crow_core::IconStyle,
+    home: &std::path::Path,
+    theme: &Theme,
+    size: f32,
+) -> gpui::AnyElement {
+    if is_dir && !is_package && style == crow_core::IconStyle::Outline && resolver.resolve(path, true, false).is_none()
+    {
+        let glyph = crate::icons::outline_folder_glyph(path, home);
+        return crate::icons::outline_glyph(glyph, size + 2., color(theme.role("link")));
+    }
+    path_icon(resolver, path, is_dir, is_package, None, theme, size)
+}
+
 pub(crate) fn entry_icon(
     resolver: &crate::icon_packs::Resolver,
     entry: &Entry,

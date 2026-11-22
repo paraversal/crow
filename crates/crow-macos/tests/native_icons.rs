@@ -3,7 +3,7 @@ use std::os::unix::fs::symlink;
 use std::sync::Arc;
 
 use crow_fs::{IconKind, stat_entry};
-use crow_macos::{icon_png, type_icon_png};
+use crow_macos::{icon_png, symbol_png, type_icon_png};
 
 fn main() {
     let root = tempfile::tempdir().expect("temporary icon fixtures");
@@ -27,4 +27,18 @@ fn main() {
     let folder = type_icon_png("", true, 32).expect("AppKit folder icon");
     let file = type_icon_png("dir", false, 32).expect("AppKit file icon");
     assert!(!Arc::ptr_eq(&file, &folder));
+    // SF Symbols: Finder's sidebar glyphs, in one color; a missing name is None.
+    let (house, width, height) = symbol_png("house", 16, [10, 132, 255, 255]).expect("the house symbol");
+    let (red, ..) = symbol_png("house", 16, [255, 0, 0, 255]).expect("the house symbol, red");
+    assert_ne!(house, red, "the color is part of the icon");
+    assert!(width > height && (14.0..=22.0).contains(&width), "drawn at its natural size in points: {width}x{height}");
+    let (_, doc_width, doc_height) = symbol_png("doc", 16, [10, 132, 255, 255]).expect("the doc symbol");
+    assert!(doc_width < doc_height, "a document is taller than wide: {doc_width}x{doc_height}");
+    assert!(symbol_png("no.such.symbol.name", 16, [0, 0, 0, 255]).is_none());
+    if let Some(dir) = std::env::var_os("CROW_SYMBOL_DUMP") {
+        for name in ["house", "dock.rectangle", "doc", "arrow.down.circle", "folder", "a.square"] {
+            let (png, ..) = symbol_png(name, 32, [10, 132, 255, 255]).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join(format!("{name}.png")), png.as_slice()).unwrap();
+        }
+    }
 }

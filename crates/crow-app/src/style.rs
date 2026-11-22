@@ -229,7 +229,7 @@ pub fn native_cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path) -> b
     status.map_or_else(|| crow_fs::is_cloud_candidate(path), |status| !status.is_local())
 }
 
-fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {
+pub(crate) fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {
     const MAX_CACHED_IMAGES: usize = 4096;
     let key = Arc::as_ptr(&png) as usize;
     Some(IMAGES.with_borrow_mut(|images| {

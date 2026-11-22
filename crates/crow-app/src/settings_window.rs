@@ -161,6 +161,7 @@ fn open_window(cx: &mut App) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ControlId {
     Theme,
+    IconStyle,
     IconPack,
     PathBar,
     SidebarStyle,
@@ -219,9 +220,10 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 54] = [
+    const ALL: [ControlId; 55] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
+        ControlId::IconStyle,
         ControlId::IconPack,
         ControlId::PathBar,
         ControlId::SidebarStyle,
@@ -279,6 +281,7 @@ impl ControlId {
     fn key(self) -> &'static str {
         match self {
             ControlId::Theme => "settings-theme",
+            ControlId::IconStyle => "settings-icon-style",
             ControlId::IconPack => "settings-icon-pack",
             ControlId::PathBar => "settings-path-bar",
             ControlId::SidebarStyle => "settings-sidebar-style",
@@ -351,6 +354,7 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::IconStyle
             | ControlId::SidebarStyle
             | ControlId::ShowHidden
             | ControlId::SearchHidden
@@ -378,7 +382,8 @@ impl ControlId {
     fn label(self) -> &'static str {
         match self {
             ControlId::Theme => "Theme",
-            ControlId::IconPack => "Icon pack",
+            ControlId::IconStyle => "Default icons",
+            ControlId::IconPack => "Icon packs",
             ControlId::PathBar => "Path bar",
             ControlId::SidebarStyle => "Sidebar style",
             ControlId::FontFamily => "Font",
@@ -449,6 +454,7 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::IconStyle
             | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
@@ -493,8 +499,11 @@ impl ControlId {
     fn description(self, cx: &App) -> Option<SharedString> {
         let text = match self {
             ControlId::Theme => "Themes from ~/.config/themes.",
+            ControlId::IconStyle => {
+                "Outline draws the sidebar's folders as line glyphs, like Finder; Finder uses its colored icons."
+            }
             ControlId::IconPack => {
-                "Native, local icon-packs and approved plugin packs; a folder's views.toml source wins."
+                "Tick packs to override the default icons; the first pack with an icon wins. A folder's views.toml source wins."
             }
             ControlId::PathBar => "Crow fades in an editor over the breadcrumb; Explorer keeps a visible path field.",
             ControlId::SidebarStyle => "How the sidebar draws its groups. Any group can carry an icon in sidebar.toml.",
@@ -821,6 +830,8 @@ pub struct SettingsWindow {
     /// Icon pack choices for the current render and the id under the menu cursor.
     icon_pack_ids: Vec<String>,
     icon_pack_labels: Vec<String>,
+    /// What the closed icon-pack button shows: every chosen pack, in layer order.
+    icon_pack_value: String,
     icon_pack_cursor: Option<String>,
     icon_pack_scroll: ScrollHandle,
     /// Default-sort menu cursor (index into the fixed sort-key list).
@@ -1055,6 +1066,7 @@ impl SettingsWindow {
             font_scroll: ScrollHandle::new(),
             icon_pack_ids: Vec::new(),
             icon_pack_labels: Vec::new(),
+            icon_pack_value: String::new(),
             icon_pack_cursor: None,
             icon_pack_scroll: ScrollHandle::new(),
             sort_cursor: 0,
@@ -1624,6 +1636,7 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::IconStyle
             | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
@@ -1642,6 +1655,7 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::IconStyle
             | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::SearchMatch
@@ -1918,6 +1932,7 @@ impl SettingsWindow {
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
             ControlId::PathBar => (path_bar_index(cx.global::<Ui>().settings.path_bar), 2),
+            ControlId::IconStyle => (icon_style_index(cx.global::<Ui>().settings.icon_style), 2),
             ControlId::SidebarStyle => (sidebar_style_index(cx.global::<Ui>().settings.sidebar_style), 5),
             ControlId::SearchMatch => (search_match_index(cx.global::<Ui>().settings.search_match), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
@@ -1943,6 +1958,11 @@ impl SettingsWindow {
             ControlId::FolderSizes => {
                 SettingChange::FolderSizes(if index == 0 { FolderSizesMode::Off } else { FolderSizesMode::Visible })
             }
+            ControlId::IconStyle => SettingChange::IconStyle(if index == 0 {
+                crow_core::IconStyle::Outline
+            } else {
+                crow_core::IconStyle::Finder
+            }),
             ControlId::PathBar => {
                 SettingChange::PathBar(if index == 0 { PathBarMode::Crow } else { PathBarMode::Explorer })
             }
@@ -1994,8 +2014,8 @@ impl SettingsWindow {
             .map(crate::icon_packs::IconPacks::snapshot)
             .map(|snapshot| snapshot.choices())
             .unwrap_or_default();
-        let mut ids = vec![crow_core::NATIVE_ICON_SOURCE.to_owned()];
-        let mut labels = vec!["Native".to_owned()];
+        let mut ids = Vec::new();
+        let mut labels = Vec::new();
         for choice in &choices {
             // Duplicate display names are disambiguated with the id; two
             // different ids cannot both be offered as the same label.
@@ -2004,39 +2024,38 @@ impl SettingsWindow {
             ids.push(choice.id.clone());
             labels.push(label);
         }
-        let layered: Vec<&str> = crow_core::split_sources(&saved).collect();
-        if layered.len() > 1 {
-            // Several packs are layered: members are ticked, picking one adds or removes it, and
-            // the saved list is its own row so the closed menu names every pack.
-            for (id, label) in ids.iter().zip(labels.iter_mut()) {
-                if layered.contains(&id.as_str()) {
-                    *label = format!("✓ {label}");
-                }
+        // Several packs can be on at once: every chosen pack is ticked, and picking a row adds it
+        // to the list or takes it out. A chosen pack that is not installed stays listed.
+        let chosen: Vec<&str> =
+            crow_core::split_sources(&saved).filter(|part| *part != crow_core::NATIVE_ICON_SOURCE).collect();
+        for (id, label) in ids.iter().zip(labels.iter_mut()) {
+            if chosen.contains(&id.as_str()) {
+                *label = format!("✓ {label}");
             }
-            for part in &layered {
-                if !ids.iter().any(|id| id == part) {
-                    ids.push((*part).to_owned());
-                    labels.push(format!("✓ {part} (not installed)"));
-                }
-            }
-            let names = cx
-                .try_global::<crate::icon_packs::IconPacks>()
-                .map_or_else(|| saved.clone(), |packs| packs.display_name(&saved));
-            ids.push(saved.clone());
-            labels.push(names);
-        } else if !ids.iter().any(|id| id == &saved) {
-            let label = if saved == crow_core::NATIVE_ICON_SOURCE {
-                "Native".to_owned()
-            } else {
-                format!("{saved} (not installed)")
-            };
-            ids.push(saved.clone());
-            labels.push(label);
         }
-        let selected = ids.iter().position(|id| id == &saved).unwrap_or(0);
+        for part in &chosen {
+            if !ids.iter().any(|id| id == part) {
+                ids.push((*part).to_owned());
+                labels.push(format!("✓ {part} (not installed)"));
+            }
+        }
+        let value = cx
+            .try_global::<crate::icon_packs::IconPacks>()
+            .map_or_else(|| saved.clone(), |packs| packs.snapshot().display_name(&saved));
+        let selected = chosen.first().and_then(|first| ids.iter().position(|id| id == first)).unwrap_or(0);
+        self.icon_pack_value = if chosen.is_empty() { "None".to_owned() } else { value };
         self.icon_pack_ids = ids;
         self.icon_pack_labels = labels;
         selected
+    }
+
+    /// The first chosen pack: where the menu's cursor starts.
+    fn first_icon_pack(&self, saved: &str) -> String {
+        crow_core::split_sources(saved)
+            .find(|part| *part != crow_core::NATIVE_ICON_SOURCE)
+            .map(str::to_owned)
+            .or_else(|| self.icon_pack_ids.first().cloned())
+            .unwrap_or_default()
     }
 
     fn icon_pack_cursor_index(&self) -> Option<usize> {
@@ -2058,7 +2077,7 @@ impl SettingsWindow {
             }
             ControlId::IconPack => {
                 let selected = self.refresh_icon_pack_choices(cx);
-                self.icon_pack_cursor = Some(settings.icon_pack.clone());
+                self.icon_pack_cursor = Some(self.first_icon_pack(&settings.icon_pack));
                 self.icon_pack_scroll.scroll_to_item(selected);
             }
             ControlId::DefaultSort => {
@@ -2087,8 +2106,7 @@ impl SettingsWindow {
             }
             ControlId::FontFamily => self.font_cursor = font_index(&self.fonts, &settings.font_family),
             ControlId::IconPack => {
-                let saved = settings.icon_pack.clone();
-                self.icon_pack_cursor = Some(saved);
+                self.icon_pack_cursor = Some(self.first_icon_pack(&settings.icon_pack));
             }
             ControlId::DefaultSort => {
                 self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
@@ -2104,7 +2122,13 @@ impl SettingsWindow {
         match self.menu {
             Some(ControlId::Theme) => self.commit_theme(window, cx),
             Some(ControlId::FontFamily) => self.commit_font(window, cx),
-            Some(ControlId::IconPack) => self.commit_icon_pack(cx),
+            Some(ControlId::IconPack) => {
+                // A multi-select: Return ticks or unticks the highlighted pack and the menu stays
+                // open; Escape or a click outside closes it.
+                self.commit_icon_pack(cx);
+                cx.notify();
+                return;
+            }
             Some(ControlId::DefaultSort) => self.commit_sort(cx),
             Some(ControlId::PreviewRuleSelect) | Some(ControlId::PreviewAdd) => self.keep_preview_menu(cx),
             _ => {}
@@ -2199,8 +2223,7 @@ impl SettingsWindow {
         }
         // Picking a pack adds it to (or removes it from) the layered list; Native clears it.
         let next = crow_core::toggle_source(&cx.global::<Ui>().settings.icon_pack, &id);
-        let layered_row = crow_core::split_sources(&id).count() > 1;
-        if !layered_row && cx.global::<Ui>().settings.icon_pack != next {
+        if cx.global::<Ui>().settings.icon_pack != next {
             ui::set_setting(SettingChange::IconPack(next), cx);
         }
     }
@@ -2392,7 +2415,12 @@ impl SettingsWindow {
             }),
         });
         let toggle = callback(cx, move |this, window, cx| this.toggle_menu(id, window, cx));
-        controls::dropdown(self.meta(id, cx), options, saved, menu, self.style(id, window, theme), toggle, pick)
+        let value = if id == ControlId::IconPack {
+            self.icon_pack_value.clone()
+        } else {
+            options.get(saved).cloned().unwrap_or_default()
+        };
+        controls::dropdown_valued(self.meta(id, cx), options, value, menu, self.style(id, window, theme), toggle, pick)
     }
 }
 
@@ -2426,11 +2454,15 @@ impl SettingsWindow {
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
                 ControlId::PathBar => Some(path_bar_index(settings.path_bar)),
+                ControlId::IconStyle => Some(icon_style_index(settings.icon_style)),
                 ControlId::SidebarStyle => Some(sidebar_style_index(settings.sidebar_style)),
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
-                ControlId::IconPack => self.icon_pack_ids.iter().position(|id| id == &settings.icon_pack),
+                ControlId::IconPack => {
+                    let first = self.first_icon_pack(&settings.icon_pack);
+                    self.icon_pack_ids.iter().position(|id| *id == first)
+                }
                 ControlId::DefaultView => {
                     Some(view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default()))
                 }
@@ -2496,7 +2528,7 @@ impl Render for SettingsWindow {
         if self.menu != Some(ControlId::IconPack)
             || self.icon_pack_cursor.as_ref().is_none_or(|id| !self.icon_pack_ids.contains(id))
         {
-            self.icon_pack_cursor = Some(settings.icon_pack.clone());
+            self.icon_pack_cursor = Some(self.first_icon_pack(&settings.icon_pack));
         }
         if self.menu != Some(ControlId::DefaultSort) {
             self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
@@ -2567,6 +2599,17 @@ impl Render for SettingsWindow {
                 .text_color(color(theme.role("error")))
                 .child(error)
         }));
+
+        let icon_style_select =
+            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::IconStyle, index, window, cx));
+        let icon_style_row = controls::segmented(
+            self.meta(ControlId::IconStyle, cx),
+            &["Outline", "Finder"],
+            icon_style_index(settings.icon_style),
+            self.style(ControlId::IconStyle, window, &theme),
+            icon_style_select,
+            None,
+        );
 
         let path_bar_select =
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::PathBar, index, window, cx));
@@ -2861,6 +2904,7 @@ impl Render for SettingsWindow {
         let plugin_row = self.plugin_section(&theme, window, cx);
         let mut rows: HashMap<ControlId, gpui::AnyElement> = HashMap::new();
         rows.insert(ControlId::Theme, theme_row.into_any_element());
+        rows.insert(ControlId::IconStyle, icon_style_row.into_any_element());
         rows.insert(ControlId::IconPack, icon_row.into_any_element());
         rows.insert(ControlId::PathBar, path_bar_row.into_any_element());
         rows.insert(ControlId::SidebarStyle, sidebar_style_row.into_any_element());
@@ -3368,6 +3412,13 @@ fn folder_sizes_index(value: FolderSizesMode) -> usize {
     match value {
         FolderSizesMode::Off => 0,
         FolderSizesMode::Visible => 1,
+    }
+}
+
+fn icon_style_index(value: crow_core::IconStyle) -> usize {
+    match value {
+        crow_core::IconStyle::Outline => 0,
+        crow_core::IconStyle::Finder => 1,
     }
 }
 
@@ -4202,18 +4253,48 @@ mod tests {
         }
         draw(&mut vcx);
         let labels = view.read_with(&vcx, |view, _| view.icon_pack_labels.clone());
-        assert_eq!(labels[0], "Native");
-        assert!(labels.contains(&"Same (alpha)".to_owned()), "{labels:?}");
-        assert!(labels.contains(&"Same (beta)".to_owned()), "{labels:?}");
+        assert_eq!(
+            labels,
+            ["Same (alpha)", "Same (beta)"],
+            "only packs are offered: the default icons are a separate setting"
+        );
 
         focus_control(&view, &mut vcx, ControlId::IconPack);
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("down");
         vcx.simulate_keystrokes("enter");
         wait_for(&vcx, "icon_pack = \"alpha\"");
         let text = settings_text(&vcx);
         assert_eq!(text.matches("icon_pack").count(), 1, "only the icon_pack line changes: {text}");
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.icon_pack.clone()), "alpha");
+
+        // Several packs can be chosen: the menu stays open, ticks both, and the button names both.
+        assert!(view.read_with(&vcx, |view, _| view.menu == Some(ControlId::IconPack)), "the menu stays open");
+        vcx.simulate_keystrokes("down");
+        vcx.simulate_keystrokes("enter");
+        wait_for(&vcx, "icon_pack = \"alpha,beta\"");
+        draw(&mut vcx);
+        let (labels, value) =
+            view.read_with(&vcx, |view, _| (view.icon_pack_labels.clone(), view.icon_pack_value.clone()));
+        assert!(labels.contains(&"✓ Same (alpha)".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"✓ Same (beta)".to_owned()), "{labels:?}");
+        assert_eq!(value, "Same + Same");
+        assert!(view.read_with(&vcx, |view, _| view.menu == Some(ControlId::IconPack)), "still open");
+
+        // Picking a ticked pack again takes it out.
+        vcx.simulate_keystrokes("enter");
+        wait_for(&vcx, "icon_pack = \"alpha\"");
+    }
+
+    #[gpui::test]
+    fn the_default_icons_are_a_two_way_choice_that_saves_one_key(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |_| {});
+        draw(&mut vcx);
+        focus_control(&view, &mut vcx, ControlId::IconStyle);
+        assert_eq!(state(&view, &vcx, ControlId::IconStyle).selected, Some(0), "Outline is the default");
+        vcx.simulate_keystrokes("right");
+        wait_for(&vcx, "icon_style = \"finder\"");
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.icon_style), crow_core::IconStyle::Finder);
+        assert_eq!(state(&view, &vcx, ControlId::IconStyle).selected, Some(1));
     }
 
     #[gpui::test]
@@ -4225,11 +4306,10 @@ mod tests {
         });
         draw(&mut vcx);
         let labels = view.read_with(&vcx, |view, _| view.icon_pack_labels.clone());
-        assert!(labels.contains(&"ghost.pack (not installed)".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"✓ ghost.pack (not installed)".to_owned()), "{labels:?}");
         focus_control(&view, &mut vcx, ControlId::IconPack);
-        assert_eq!(state(&view, &vcx, ControlId::IconPack).selected, Some(1), "the saved id stays selected");
+        assert_eq!(state(&view, &vcx, ControlId::IconPack).selected, Some(0), "the saved id stays selected");
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("up");
         vcx.simulate_keystrokes("enter");
         wait_for(&vcx, "icon_pack = \"native\"");
         assert!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.icon_pack == "native"));

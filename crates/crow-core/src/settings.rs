@@ -51,9 +51,14 @@ motion = "auto"
 # interface sound effects" off silences all but the alert.
 sound = "crow"
 
-# Icons in the file list, sidebar, palette and previews: "native" (default) uses
-# macOS icons. Set a pack id to use a data-only pack from icon-packs/<id>/ or a
-# plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
+# The base icons: "outline" (default) draws the sidebar's folders and special folders (Home,
+# Desktop, Documents…) as line glyphs, like Finder's sidebar; "finder" uses Finder's own colored
+# icons everywhere.
+icon_style = "outline"
+
+# Icon packs layered over the base icons, first match wins: a pack id, a list of them
+# (["lucide", "linework"]) or "native" for none. A pack is a data-only folder in icon-packs/<id>/
+# or a plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
 icon_pack = "native"
 
 # The bottom bar's path: "crow" (default) is the Finder-style breadcrumb that
@@ -300,6 +305,27 @@ impl SidebarStyle {
     }
 }
 
+/// The base icons under any icon pack.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconStyle {
+    /// Line glyphs (SF Symbols) for sidebar folders and special folders, like Finder's sidebar.
+    #[default]
+    Outline,
+    /// Finder's own colored icons everywhere.
+    Finder,
+}
+
+impl IconStyle {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            IconStyle::Outline => "outline",
+            IconStyle::Finder => "finder",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PathBarMode {
@@ -368,6 +394,7 @@ pub struct Settings {
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
     pub path_bar: PathBarMode,
+    pub icon_style: IconStyle,
     pub sidebar_style: SidebarStyle,
     pub translucent_sidebar: bool,
     pub font_family: String,
@@ -395,6 +422,7 @@ impl Default for Settings {
             sound: SoundSet::Crow,
             icon_pack: native_icon_pack(),
             path_bar: PathBarMode::Crow,
+            icon_style: IconStyle::Outline,
             sidebar_style: SidebarStyle::Ledger,
             translucent_sidebar: false,
             font_family: String::new(),
@@ -572,6 +600,14 @@ mod tests {
         }
         assert_eq!(parse("theme = \"system\"").sidebar_style, SidebarStyle::Ledger, "an old config is Ledger");
         assert!(toml::from_str::<Settings>("sidebar_style = \"tabs\"").is_err(), "an unknown style is an error");
+    }
+
+    #[test]
+    fn icon_style_parses_and_defaults_to_outline() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).unwrap();
+        assert_eq!(parse("icon_style = \"finder\"").icon_style, IconStyle::Finder);
+        assert_eq!(parse("theme = \"system\"").icon_style, IconStyle::Outline, "an old config is Outline");
+        assert!(toml::from_str::<Settings>("icon_style = \"classic\"").is_err());
     }
 
     #[test]

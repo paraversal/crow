@@ -8,7 +8,7 @@ Recent folders, key-use counts, seen tips and the Shelf live in the state folder
 
 ## settings.toml
 
-Theme, keymap, Return key, hints and tips, folder sizes, motion and sound, sidebar look, icon pack, path bar, font, terminal, hidden files, search defaults, preview, window size. `icon_pack` takes one pack id or a list (`["lucide", "linework"]`): the first pack with an icon for an item wins, then the next, then Finder's icons. `sidebar_style` is `ledger` (default), `cards`, `accordion`, `floating-panel` or `pills`.
+Theme, keymap, Return key, hints and tips, folder sizes, motion and sound, sidebar look, icon pack, path bar, font, terminal, hidden files, search defaults, preview, window size. `icon_style` is the base: `outline` (default; SF Symbol line glyphs for sidebar folders, like Finder's sidebar) or `finder` (Finder's colored icons). `icon_pack` takes one pack id or a list (`["lucide", "linework"]`) layered over it: the first pack with an icon for an item wins, then the next, then the base icons. `sidebar_style` is `ledger` (default), `cards`, `accordion`, `floating-panel` or `pills`.
 
 <!-- defaults:settings.toml -->
 ```toml
@@ -54,9 +54,14 @@ motion = "auto"
 # interface sound effects" off silences all but the alert.
 sound = "crow"
 
-# Icons in the file list, sidebar, palette and previews: "native" (default) uses
-# macOS icons. Set a pack id to use a data-only pack from icon-packs/<id>/ or a
-# plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
+# The base icons: "outline" (default) draws the sidebar's folders and special folders (Home,
+# Desktop, Documents…) as line glyphs, like Finder's sidebar; "finder" uses Finder's own colored
+# icons everywhere.
+icon_style = "outline"
+
+# Icon packs layered over the base icons, first match wins: a pack id, a list of them
+# (["lucide", "linework"]) or "native" for none. A pack is a data-only folder in icon-packs/<id>/
+# or a plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
 icon_pack = "native"
 
 # The bottom bar's path: "crow" (default) is the Finder-style breadcrumb that
@@ -362,4 +367,4 @@ One approval record per plugin, including the bundled Git package: `enabled`, th
 
 ## Icon packs
 
-Data-only: `icon-packs/<id>/pack.toml` with its icons beside it (SVG, tinted with a theme role or palette hue, or PNG up to 1024 px, drawn as is). A pack maps item paths, file names, folder names, extensions, UTType identifiers and generic files and folders to icons. [docs/examples/icon-pack](examples/icon-pack) is a complete pack. Pick packs in Settings ▸ Appearance ▸ Icon pack, and pick several to layer them. See [themes.md](themes.md).
+Data-only: `icon-packs/<id>/pack.toml` with its icons beside it (SVG, tinted with a theme role or palette hue, or PNG up to 1024 px, drawn as is). A pack maps item paths, file names, folder names, extensions, UTType identifiers and generic files and folders to icons. [docs/examples/icon-pack](examples/icon-pack) is a complete pack. Pick the base in Settings ▸ Appearance ▸ Default icons and packs in Icon packs, and tick several to layer them (the menu stays open while you tick packs). An `[item]` path matches the folder whether you wrote it through a symlink or as its real path. See [themes.md](themes.md).

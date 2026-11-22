@@ -221,6 +221,9 @@ fn card_parts(rows: &[Row]) -> Vec<Option<CardPart>> {
     parts
 }
 
+/// Every sidebar row gives its icon the same slot, whatever draws it (an outline
+/// glyph, a Finder or pack image, a text icon), so labels line up across rows and styles.
+const ICON_SLOT: f32 = 22.;
 /// Card corner radius, the strip's and the body's.
 const CARD_RADIUS: f32 = 10.;
 /// Space inside a card above its first row and below its last.
@@ -2413,20 +2416,45 @@ impl Render for Sidebar {
             // pack's match winning. A favorite's custom text icon wins over both,
             // and a favorite with a palette color keeps the tintable line folder
             // (a native icon cannot be recolored). Recent keeps its clock.
+            // The outline style draws every folder row as a line glyph, like Finder's sidebar:
+            // Home, Desktop… get their own, other folders an outline folder, volumes a drive.
+            let outline = ui.settings.icon_style == crow_core::IconStyle::Outline;
+            let outline_folder = || crate::icons::outline_folder_glyph(&path, &ui.home);
             let (glyph, line_icon, tint) = match &row {
                 Row::Favorite(_, f) => {
                     let tint = f.color.as_deref().and_then(|c| favorite_color(c, &theme));
-                    (f.icon.clone(), (f.icon.is_none() && tint.is_some()).then_some(crate::icons::Glyph::Folder), tint)
+                    // A custom icon wins, and a palette color keeps the tintable folder in
+                    // either style.
+                    let line = if f.icon.is_some() {
+                        None
+                    } else if outline {
+                        Some(outline_folder())
+                    } else {
+                        tint.is_some().then_some(crate::icons::Glyph::Folder)
+                    };
+                    (f.icon.clone(), line, tint)
                 }
                 Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
                 Row::PluginItem { row: item, .. } => (
                     None,
                     if matches!(item.destination, SectionDestination::Tag { .. }) {
                         Some(crate::icons::Glyph::Tag)
-                    } else {
+                    } else if path_less {
                         // A saved query has no folder to ask Finder about.
-                        path_less.then_some(crate::icons::Glyph::Folder)
+                        Some(crate::icons::Glyph::Folder)
+                    } else {
+                        // A project or another plugin folder.
+                        outline.then(outline_folder)
                     },
+                    None,
+                ),
+                Row::Volume(volume) if outline => (
+                    None,
+                    Some(if volume.path == Path::new("/") {
+                        crate::icons::Glyph::Drive
+                    } else {
+                        crate::icons::Glyph::ExternalDrive
+                    }),
                     None,
                 ),
                 _ => (None, None, None),
@@ -2529,7 +2557,7 @@ impl Render for Sidebar {
             }
             let icon_element = match glyph {
                 Some(text) => div()
-                    .w(px(16.))
+                    .w(px(ICON_SLOT))
                     .flex()
                     .justify_center()
                     .text_size(px(13.))
@@ -2547,7 +2575,7 @@ impl Render for Sidebar {
                         if let Some(packed) = packed {
                             let icon_tint = tint.map(color).unwrap_or_else(|| color(packed.color.rgb(&theme)));
                             div()
-                                .w(px(16.))
+                                .w(px(ICON_SLOT))
                                 .flex()
                                 .justify_center()
                                 .debug_selector(move || format!("sidebar-pack-icon-{i}"))
@@ -2561,11 +2589,12 @@ impl Render for Sidebar {
                                 _ => "line-icon",
                             };
                             div()
-                                .w(px(16.))
+                                .w(px(ICON_SLOT))
                                 .flex()
+                                .items_center()
                                 .justify_center()
                                 .debug_selector(move || format!("sidebar-{name}-{i}"))
-                                .child(crate::icons::glyph_color(glyph, 15., icon_tint))
+                                .child(crate::icons::outline_glyph(glyph, 18., icon_tint))
                                 .into_any_element()
                         }
                     }
@@ -2576,7 +2605,7 @@ impl Render for Sidebar {
                         if let Some(packed) = packed {
                             let icon_tint = color(packed.color.rgb(&theme));
                             div()
-                                .w(px(16.))
+                                .w(px(ICON_SLOT))
                                 .flex()
                                 .justify_center()
                                 .debug_selector(move || format!("sidebar-pack-icon-{i}"))
@@ -2584,13 +2613,15 @@ impl Render for Sidebar {
                                 .into_any_element()
                         } else {
                             div()
-                                .w(px(16.))
+                                .w(px(ICON_SLOT))
+                                .flex()
+                                .justify_center()
                                 .debug_selector(move || format!("sidebar-native-icon-{i}"))
                                 .children(icon(&path, true, 16).map(|i| img(i).size(px(16.))))
                                 .into_any_element()
                         }
                     }
-                    None => div().w(px(16.)).into_any_element(),
+                    None => div().w(px(ICON_SLOT)).into_any_element(),
                 },
             };
             let mut line = div().flex().items_center().h(px(20.)).child(div().mr(px(8.)).child(icon_element)).child(

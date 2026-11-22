@@ -821,6 +821,7 @@ pub enum SettingChange {
     Sound(SoundSet),
     IconPack(String),
     PathBar(PathBarMode),
+    IconStyle(crow_core::IconStyle),
     SidebarStyle(crow_core::SidebarStyle),
     FontFamily(String),
     FontSize(f32),
@@ -853,6 +854,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
             SettingChange::IconPack(value) => replace(&mut settings.icon_pack, value.clone()),
             SettingChange::PathBar(value) => replace(&mut settings.path_bar, *value),
+            SettingChange::IconStyle(value) => replace(&mut settings.icon_style, *value),
             SettingChange::SidebarStyle(value) => replace(&mut settings.sidebar_style, *value),
             SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
@@ -924,6 +926,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::IconPack(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "icon_pack", &value), cx);
+        }
+        SettingChange::IconStyle(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "icon_style", value.key()), cx);
         }
         SettingChange::PathBar(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "path_bar", value.key()), cx);

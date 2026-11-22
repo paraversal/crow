@@ -1209,7 +1209,17 @@ impl CrowWindow {
                 let source = crate::icon_packs::effective_icon_source(cx.global::<Ui>(), &folder);
                 let resolver = crate::icon_packs::Resolver::for_source(cx, &source);
                 let is_package = crow_fs::is_package_path(&folder);
-                let proxy = preview::path_icon(&resolver, &folder, true, is_package, None, &theme, 16.);
+                let ui = cx.global::<Ui>();
+                let proxy = preview::styled_path_icon(
+                    &resolver,
+                    &folder,
+                    true,
+                    is_package,
+                    ui.settings.icon_style,
+                    &ui.home,
+                    &theme,
+                    16.,
+                );
                 let drag_icon = crate::style::icon(&folder, true, 22);
                 let drag_label: SharedString = title.to_owned().into();
                 let drag_entries = Arc::new(vec![(folder, true)]);

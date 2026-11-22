@@ -501,7 +501,9 @@ fn load_local_pack(dir: &Path, key: &str, home: &Path) -> Result<LoadedPack, Str
     }
     // io-ok: the whole catalog loads in background_spawn
     let text = std::fs::read_to_string(&path).map_err(|error| format!("{}/pack.toml: {error}", dir.display()))?;
-    let pack = IconPack::parse(&text, home).map_err(|error| format!("icon pack \"{key}\": {error}"))?;
+    let mut pack = IconPack::parse(&text, home).map_err(|error| format!("icon pack \"{key}\": {error}"))?;
+    // io-ok: the whole catalog loads in background_spawn
+    pack.add_item_aliases(|path| path.canonicalize().ok());
     if let Some(id) = pack.id()
         && id != key
     {
