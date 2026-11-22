@@ -48,7 +48,7 @@ AirDrop and Share, iCloud sharing, Quick Actions and Services, Get Info editing 
 
 <!-- Speed clips: upload docs/media/big-folder.mp4 and docs/media/search-speed.mp4 through GitHub's web editor and put the two user-attachments links here, one per line (a committed .mp4 only shows as a link). -->
 
-https://github.com/user-attachments/assets/e4d015f6-7950-4473-889d-9c527c81a634
+https://github.com/user-attachments/assets/03e0eb23-7d59-47d6-9f4c-9fa4c1afc616
 
 https://github.com/user-attachments/assets/a8f2a428-3096-4e81-90f6-41163c87e90f
 
