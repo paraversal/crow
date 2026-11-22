@@ -27,7 +27,7 @@ Every file operation goes through `crow_fs::ops`. Operations are jobs with a pla
 Settings, views, sidebar, exclusions, saved queries, keys and plugin grants are TOML files in `~/.config/crow/`. They load at startup, reload on change, report errors with file and line, and are edited through `crow_core::edit_toml` so comments survive. Mutable app state (recent folders, usage counts, the Shelf) is in `~/.local/state/crow/`. The Settings window and the files are two views of the same data.
 
 ## UI structure
-`CrowWindow` (`window.rs`) owns a window: the sidebar, the active tab's pane, the right pane, the bottom bar and the overlays (palette, sheets, tips). Panes render folder listings in the four views. The sidebar is a flat list of rows with a layout of bounds measured each frame, which drives the card backdrops, drag and drop hit tests and keyboard navigation. Commands are defined once in `palette.rs` (`COMMANDS`) and reused by the menu bar, the palette and the key bindings.
+`CrowWindow` (`window.rs`) owns a window: the left sidebar, the active tab's pane, the right sidebar, the bottom bar and the overlays (palette, sheets, tips). Panes render folder listings in the four views. The sidebar is a flat list of rows with a layout of bounds measured each frame, which drives the card backdrops, drag and drop hit tests and keyboard navigation. Commands are defined once in `palette.rs` (`COMMANDS`) and reused by the menu bar, the palette and the key bindings.
 
 ## Keys
 Finder and Vim bindings are declared in `actions.rs`; user overrides from `keys.toml` are applied on top (`keymap.rs`). Menus, tooltips, hints and [keys.md](keys.md) all read the live keymap.

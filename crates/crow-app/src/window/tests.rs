@@ -7723,12 +7723,33 @@ fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
     let sidebar = cx.debug_bounds("sidebar").expect("the sidebar shows at first");
     assert_eq!(toolbar(&mut cx).left(), sidebar.right(), "the toolbar sits right of the full-height sidebar");
     cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar").is_none(), "the sidebar is gone");
     assert_eq!(toolbar(&mut cx).left(), px(0.), "the toolbar takes the whole width");
     cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar").is_some(), "the same key brings it back");
+}
+
+#[gpui::test]
+fn the_left_sidebar_slides_with_motion_on_and_snaps_with_it_off(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-slide");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let full = cx.debug_bounds("sidebar").expect("the sidebar shows").right();
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    let mid = cx.debug_bounds("toolbar").expect("toolbar").left();
+    assert!(mid > px(0.) && mid <= full, "the toolbar is still moving left while the sidebar slides: {mid:?}");
+    assert!(cx.debug_bounds("sidebar").is_some(), "the sidebar is drawn while it slides");
+    finish_motion(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("toolbar").expect("toolbar").left(), px(0.), "the slide ends hidden");
+    assert!(cx.debug_bounds("sidebar").is_none());
+
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::Motion(crow_core::motion::MotionMode::Off), cx));
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    assert_eq!(cx.debug_bounds("toolbar").expect("toolbar").left(), full, "motion off shows it in one frame");
 }
 
 #[gpui::test]
@@ -10377,8 +10398,31 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-i");
     finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("preview").is_none(), "a second ⌘I closes the column");
+    assert!(cx.debug_bounds("preview").is_some(), "a second ⌘I leaves the column on Info");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is still the default");
+}
+
+#[gpui::test]
+fn option_command_p_opens_the_right_sidebar_then_cycles_its_tabs(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("right-sidebar-cycle");
+    let (view, mut cx) = open(cx, &root);
+    let tab = |view: &Entity<CrowWindow>, cx: &VisualTestContext| view.read_with(cx, |w, cx| w.info.read(cx).tab());
+    // Hidden: the key opens it on the tab it had.
+    cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
+    assert!(!view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⇧⌘P hides it");
+    cx.simulate_keystrokes("cmd-alt-p");
+    finish_motion(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⌥⌘P opens it");
+    assert_eq!(tab(&view, &cx), InfoTab::Preview, "on the tab it had");
+    // Open: each press steps to the next tab and wraps (Git is off, so two tabs).
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Info);
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Preview);
+    assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "cycling never closes it");
 }
 
 #[gpui::test]
@@ -18880,4 +18924,19 @@ fn a_png_glyph_loads_as_a_full_color_image_and_a_bad_one_rejects_the_pack(cx: &m
     std::fs::write(pack.join("a.png"), "not a png").expect("glyph");
     let error = crate::icon_packs::load_catalog(&config, &home).err().expect("a fake PNG rejects the pack");
     assert!(error.to_string().contains("a.png"), "{error}");
+}
+
+#[gpui::test]
+fn a_tag_destination_may_own_focus(cx: &mut TestAppContext) {
+    // Found by `fuzz_smoke` once a key binding shifted its seeds: Tab into the sidebar, Option-Down to
+    // the Tags group, Right opens the pinned tag, whose results own focus in the center.
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-tag-focus", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![Step::Keys("tab".into()), Step::Keys("alt-down".into()), Step::Keys("right".into())],
+    );
+    assert!(found.is_empty(), "{found:?}");
 }

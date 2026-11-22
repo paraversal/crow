@@ -94,9 +94,10 @@ search_includes_hidden = true
 # this is the mode each new search starts in.
 search_match = "all"
 
-# The right column in list view and the last column in column view: a Preview tab
-# and an Info tab (Cmd-I). View ▸ Hide Preview (Shift-Cmd-P) toggles the column;
-# off is the default only, Cmd-I still opens it. Quick Look still works.
+# The right sidebar in list view and the last column in column view: a Preview tab
+# and an Info tab (Cmd-I). View ▸ Hide Right Sidebar (Shift-Cmd-P) toggles it and
+# Option-Cmd-P cycles its tabs; off is the default only, Cmd-I still opens it.
+# Quick Look still works.
 show_preview = true
 
 # Cmd-K: list the commands you ran from the palette under "Recently used"

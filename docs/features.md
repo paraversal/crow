@@ -8,7 +8,8 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Tabs, Back and Forward history, Enclosing Folder, Go to Folder, and several windows.
 - A sidebar of favorites in groups, Recent, Projects, Tags, saved searches and Locations (free space, eject). Five looks: ledger lines, cards, accordion, floating panel, pills. Groups take an icon; favorites take a name, icon, colour and Vim mark.
 - An opt-in Shelf at the bottom of the sidebar: carry files between folders, then Move or Copy Shelf Here.
-- Right pane with Preview and Info tabs. Info shows kind, size, dates, tags, permissions and owner; a multi-selection shows totals and shared tags.
+- A right sidebar with Preview, Info and Git Diff tabs: ⇧⌘P shows or hides it, ⌥⌘P opens it or cycles its tabs, ⌘I opens it on Info. The left sidebar hides with ⌃⌘S; both slide.
+- Its Info tab shows kind, size, dates, tags, permissions and owner; a multi-selection shows totals and shared tags.
 - Quick Look thumbnails and previews, syntax-highlighted text, hidden-file toggle, folder sizes, and cloud placeholders with their download badge.
 - A path bar you can type into (⌘L) with Tab completion and a pasted path in any form; every segment drags the folder it shows. A breadcrumb or an always-visible field.
 - Same-named folders show their parent; symlinks are marked.

@@ -411,6 +411,7 @@ mod tests {
                 (CommandId::TogglePreview, "⇧⌘P"),
                 (CommandId::ToggleSidebar, "⌃⌘S"),
                 (CommandId::ShowInfo, "⌘I"),
+                (CommandId::CycleRightSidebar, "⌥⌘P"),
                 (CommandId::OpenParent, "⌘↑"),
                 (CommandId::GoBack, "⌘["),
                 (CommandId::GoForward, "⌘]"),

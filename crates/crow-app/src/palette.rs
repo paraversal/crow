@@ -12,14 +12,14 @@ use gpui::{Action, SharedString};
 
 use crate::actions::{
     Acknowledgements, AddToShelf, AddToSidebar, CalculateFolderSizes, ChooseTags, ClearShelf, CloseTab, CopyFiles,
-    CopyPath, CopyShelfHere, CutFiles, DeletePermanently, Duplicate, EditPath, EditSavedSearch, EditSettings, Eject,
-    EmptyTrash, ExtendToFirst, ExtendToLast, GoBack, GoForward, GoToFolder, IconCaptionLines, IconCaptionOff,
-    IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveShelfHere, MoveToTrash,
-    NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal, PasteFiles,
-    PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView, SaveSearch,
-    SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch,
-    ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, ToggleSidebar, Undo,
-    UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
+    CopyPath, CopyShelfHere, CutFiles, CycleRightSidebar, DeletePermanently, Duplicate, EditPath, EditSavedSearch,
+    EditSettings, Eject, EmptyTrash, ExtendToFirst, ExtendToLast, GoBack, GoForward, GoToFolder, IconCaptionLines,
+    IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveShelfHere,
+    MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal,
+    PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView,
+    SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo,
+    ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview,
+    ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -79,6 +79,7 @@ pub enum CommandId {
     TogglePreview,
     ToggleSidebar,
     ShowInfo,
+    CycleRightSidebar,
     CalculateFolderSizes,
     ReviewGitChanges,
     ShowGitDiff,
@@ -195,6 +196,7 @@ impl CommandId {
             CommandId::TogglePreview => "toggle-preview",
             CommandId::ToggleSidebar => "toggle-sidebar",
             CommandId::ShowInfo => "show-info",
+            CommandId::CycleRightSidebar => "cycle-right-sidebar",
             CommandId::CalculateFolderSizes => "calculate-folder-sizes",
             CommandId::ReviewGitChanges => "review-git-changes",
             CommandId::ShowGitDiff => "show-git-diff",
@@ -676,20 +678,20 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         id: CommandId::TogglePreview,
-        label: "Show or Hide Preview",
+        label: "Show or Hide Right Sidebar",
         action: &TogglePreview,
         scope: KeyScope::Window,
-        // menus::app_menus turns this into "Hide Preview" while the preview shows.
-        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
+        // menus::app_menus turns this into "Hide Right Sidebar" while it shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Right Sidebar" }),
         palette: true,
     },
     Command {
         id: CommandId::ToggleSidebar,
-        label: "Show or Hide Sidebar",
+        label: "Show or Hide Left Sidebar",
         action: &ToggleSidebar,
         scope: KeyScope::Window,
-        // menus::app_menus turns this into "Hide Sidebar" while the sidebar shows.
-        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Sidebar" }),
+        // menus::app_menus turns this into "Hide Left Sidebar" while the sidebar shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Left Sidebar" }),
         palette: true,
     },
     Command {
@@ -698,6 +700,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowInfo,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Info" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::CycleRightSidebar,
+        label: "Cycle Right Sidebar",
+        action: &CycleRightSidebar,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Cycle Right Sidebar" }),
         palette: true,
     },
     Command {
