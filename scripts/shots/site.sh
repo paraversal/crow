@@ -104,9 +104,9 @@ clip() { # <name> <start dir> <keys>
     ./scripts/shot.sh "$1" "$2" finder-dark finder "$3" >/dev/null
   ./scripts/shots/encode-clip.sh "target/shots/$1-finder-dark.mov" "docs/media/$1.mp4"
 }
-# Open a folder of 100,000 files, scroll, jump to the end, switch views.
-clip big-folder "$BIG" \
-  'wait:0.3|text:1|wait:0.4|cmd:o|wait:0.8|hold:down:60|wait:0.2|key:end|wait:0.8|hold:up:25|wait:0.4|cmd:1|wait:0.8|cmd:3|wait:1'
+# A folder of 100,000 files scrolled flat out: Crow's own bench (crow --bench, 3 rows a
+# frame), recorded for 2.5 s of its ~5 s at 120 Hz, before it quits.
+CROW_SHOT_ARGS=--bench CROW_SHOT_RECORD_SECONDS=2.5 clip big-folder "$BIG/100000 files" ''
 # Names and contents of ~54,000 source files, results arriving as you type.
 clip search-speed "$BIG/crates" 'wait:0.3|cmd:f|wait:0.4|text:unsafe impl Send|wait:2.5'
 # Three jumps with Cmd-K.

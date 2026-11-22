@@ -33,6 +33,9 @@
 # CROW_SHOT_RECORD=1 records the window while the keys run instead of a screenshot:
 # target/shots/<state>-<theme>.mov, at 60 fps, without the pointer
 # (scripts/record-window.swift). Motion stays as configured (Full by default).
+# Without [keys] it records CROW_SHOT_RECORD_SECONDS (default 3) instead of waiting.
+# CROW_SHOT_ARGS adds arguments before the folder, e.g. --bench (Crow's own 100k
+# scroll, which quits after 600 frames: keep the recording shorter than that).
 # Without [keys] the script waits for Return: set up the state by hand, then
 # press Return and it captures. Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
@@ -173,7 +176,7 @@ if [ -n "${CROW_SHOT_HOME:-}" ]; then
   rm -f "$shot_home/Library/Logs/Crow/crow.log"
 fi
 RUST_LOG=${RUST_LOG:-warn} HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
-  "$app" "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
+  "$app" ${CROW_SHOT_ARGS:-} "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 
@@ -274,6 +277,8 @@ if [ -n "$keys" ]; then
     sleep 0.35
   done
   sleep 0.8
+elif [ -n "$recorder" ]; then
+  sleep "${CROW_SHOT_RECORD_SECONDS:-3}"
 else
   echo "Set up the '$state' state in the window, then press Return to capture."
   # A piped or closed stdin is an immediate Return (scripted runs).
