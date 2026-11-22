@@ -3867,17 +3867,30 @@ impl Render for CrowWindow {
                 .bg(tone)
                 .child(
                     // The traffic lights' strip: it moves the window like the toolbar does.
-                    div().h(px(BAND_HEIGHT)).flex_none().w_full().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
-                            let effects = crate::effects::effects(cx);
-                            if event.click_count > 1 {
-                                effects.titlebar_double_click(window);
-                            } else {
-                                effects.start_window_move(window);
-                            }
-                        }),
-                    ),
+                    div()
+                        .relative()
+                        .h(px(BAND_HEIGHT))
+                        .flex_none()
+                        .w_full()
+                        .child(div().absolute().top(px(14.)).right(px(8.)).child(chrome::collapse_chevron(
+                            "hide-left-sidebar",
+                            "Hide Left Sidebar",
+                            icons::Glyph::Back,
+                            &ToggleSidebar,
+                            &theme,
+                            cx,
+                        )))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                                let effects = crate::effects::effects(cx);
+                                if event.click_count > 1 {
+                                    effects.titlebar_double_click(window);
+                                } else {
+                                    effects.start_window_move(window);
+                                }
+                            }),
+                        ),
                 )
                 .child(if floating {
                     // One rounded, bordered panel lifted off the column, holding the rows and the shelf.

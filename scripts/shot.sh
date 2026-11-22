@@ -15,6 +15,7 @@
 #   key:escape       return, escape, tab, space, up, down, left, right, delete, f2, home, end
 #   shift:down       the same keys with Shift (extend a selection)
 #   hold:down:40     press the key 40 times, 50 a second (a held key, for scrolling)
+#   ctrlcmd:s        Control-Command with that key (ctrlcmd:s hides the sidebar)
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
 # CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
 # one), so the path bar reads ~/... and the sidebar lists that home's folders.
@@ -310,6 +311,7 @@ press() {
       fi
       ;;
     cmd:*) osascript -e "tell application \"System Events\" to keystroke \"${1#cmd:}\" using command down" ;;
+    ctrlcmd:*) osascript -e "tell application \"System Events\" to keystroke \"${1#ctrlcmd:}\" using {control down, command down}" ;;
     cmdshift:*)
       osascript -e "tell application \"System Events\" to keystroke \"${1#cmdshift:}\" using {command down, shift down}"
       ;;

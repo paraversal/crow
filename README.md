@@ -27,6 +27,10 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 <td><picture><source srcset="docs/media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-developer-light.webp" alt="Crow set up for a developer"></picture><br><b>Make it yours.</b> Themes, icon packs, five sidebar styles, a Vim layer, rebindable keys.</td>
 <td><picture><source srcset="docs/media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-photographer-light.webp" alt="Crow set up for a photographer"></picture><br><b>Same app, another look.</b> A photographer’s setup: a floating-panel sidebar, Lucide icons and Rosé Pine, all from settings.</td>
 </tr>
+<tr>
+<td><picture><source srcset="docs/media/sidebars-closed-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/sidebars-closed-light.webp" alt="Both sidebars closed"></picture><br><b>Two sidebars, both closable.</b> A chevron at each edge (or ⌃⌘S and ⇧⌘P) hides favorites on the left and Preview, Info and Git Diff on the right.</td>
+<td><picture><source srcset="docs/media/info-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/info-light.webp" alt="The Info tab for two selected photos"></picture><br><b>Details on demand.</b> Preview, Info and a Git diff in the right sidebar, with totals and shared tags for a multi-selection.</td>
+</tr>
 </table>
 
 ## Crow vs Finder

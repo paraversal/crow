@@ -57,6 +57,9 @@ both hero hero "$D/Pictures" finder-light finder-dark \
 both view-icons view-icons "$D/Pictures/Trips" finder-light finder-dark 'wait:0.6|cmd:1|key:down|key:right|key:right|key:right|wait:0.8'
 both view-list view-list "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:2|$down9|wait:0.8"
 both view-columns view-columns "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:3|$down9|wait:0.8"
+# Both sidebars closed (⌃⌘S and ⇧⌘P): the folder gets the whole window.
+both sidebars-closed sidebars-closed "$D/Pictures/Trips" finder-light finder-dark \
+  "wait:1|cmd:4|ctrlcmd:s|cmdshift:p|key:down|key:down|wait:2"
 CROW_SHOT_SETTINGS=$preview_off \
   both view-gallery view-gallery "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:4|$down9|wait:0.8"
 both palette palette "$D/Projects/tidepool" finder-light finder-dark 'wait:0.6|cmd:k|wait:0.6|text:pro|wait:0.6'

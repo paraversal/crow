@@ -3026,6 +3026,23 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_chevrons_hide_the_left_and_right_sidebars(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-chevrons");
+    let (view, mut cx) = open(cx, &root);
+    let right_visible = |cx: &VisualTestContext| view.read_with(cx, |window, cx| window.info.read(cx).visible());
+    assert!(!cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "the left sidebar starts shown");
+    assert!(right_visible(&cx), "the right sidebar starts shown");
+    let left = cx.debug_bounds("hide-left-sidebar").expect("a chevron in the left sidebar");
+    cx.simulate_click(left.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "its chevron hides the left sidebar");
+    let right = cx.debug_bounds("hide-right-sidebar").expect("a chevron in the right sidebar");
+    cx.simulate_click(right.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(!right_visible(&cx), "its chevron hides the right sidebar");
+}
+
+#[gpui::test]
 fn gallery_mode_keeps_selection_filter_and_returns(cx: &mut TestAppContext) {
     let root = fixture("gallery-mode");
     let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
