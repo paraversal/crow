@@ -171,7 +171,27 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .views figure { margin: 0; }
 .views figcaption { margin-top: 12px; display: flex; gap: 10px; align-items: baseline; color: var(--muted); font-size: 15px; }
 .views .shot { filter: drop-shadow(0 8px 16px var(--shadow)); }
+.zoom { display: block; width: 100%; padding: 0; border: 0; background: none; color: inherit; cursor: zoom-in; border-radius: 10px; }
+.zoom .shot { transition: transform .2s ease-out; }
+.zoom:hover .shot { transform: translateY(-3px); }
 .also { margin: 32px 0 0; color: var(--muted); }
+
+/* Enlarged view shot: ←/→ step through the four views, Esc or a click outside closes. */
+.viewer { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; color: #f3f3f5; }
+.viewer::backdrop { background: rgba(8, 8, 10, .92); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.viewer[open] { display: grid; grid-template-rows: 1fr auto; place-items: center; }
+.viewer figure { margin: 0; display: contents; }
+.viewer img { max-width: min(1600px, calc(100vw - 48px)); max-height: calc(100vh - 110px); width: auto; border-radius: 10px; cursor: zoom-out; }
+.viewer[open] img { animation: grow .18s ease-out; }
+@keyframes grow { from { opacity: 0; transform: scale(.97); } }
+.viewer .bar { display: flex; align-items: center; gap: 18px; padding: 18px 16px 26px; }
+.viewer figcaption { display: flex; gap: 10px; align-items: baseline; min-width: 8.5em; justify-content: center; }
+.viewer kbd { background: transparent; border-color: rgba(255, 255, 255, .3); }
+.viewer button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(255, 255, 255, .08); color: inherit; font-size: 20px; line-height: 1; cursor: pointer; }
+.viewer button:hover { background: rgba(255, 255, 255, .18); }
+.viewer :focus-visible { outline-color: #f3f3f5; }
+.viewer .close { position: fixed; top: 16px; right: 16px; }
+@media (prefers-reduced-motion: reduce) { .zoom .shot { transition: none; } .zoom:hover .shot { transform: none; } .viewer[open] img { animation: none; } }
 .also b { color: var(--ink); font-weight: 400; }
 
 /* Install */
@@ -337,11 +357,15 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="finder-h">And all the Finder you know.</h2>
       <ul class="views">
-        <li><figure><picture><source srcset="media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-icons-light.webp" width="2560" height="1600" alt="Icon view"></picture><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
-        <li><figure><picture><source srcset="media/view-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-list-light.webp" width="2560" height="1600" alt="List view"></picture><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
-        <li><figure><picture><source srcset="media/view-columns-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-columns-light.webp" width="2560" height="1600" alt="Column view"></picture><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
-        <li><figure><picture><source srcset="media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-gallery-light.webp" width="2560" height="1600" alt="Gallery view"></picture><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" aria-label="Enlarge Icon view"><picture><source srcset="media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-icons-light.webp" width="2560" height="1600" alt="Icon view"></picture></button><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" aria-label="Enlarge List view"><picture><source srcset="media/view-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-list-light.webp" width="2560" height="1600" alt="List view"></picture></button><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" aria-label="Enlarge Column view"><picture><source srcset="media/view-columns-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-columns-light.webp" width="2560" height="1600" alt="Column view"></picture></button><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" aria-label="Enlarge Gallery view"><picture><source srcset="media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-gallery-light.webp" width="2560" height="1600" alt="Gallery view"></picture></button><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
       </ul>
+      <dialog class="viewer" id="viewer" aria-label="View shots">
+        <figure><img alt=""><div class="bar"><button class="prev" type="button" aria-label="Previous view">‹</button><figcaption></figcaption><button class="next" type="button" aria-label="Next view" autofocus>›</button></div></figure>
+        <button class="close" type="button" aria-label="Close">×</button>
+      </dialog>
       <p class="also"><b>Sidebar</b> · <b>Tabs</b> · <b>Quick Look</b> · <b>Finder tags</b> · <b>Trash by default</b> · <b>Spring-loaded folders</b> · <b>iCloud status</b> · <b>Drag and drop</b></p>
     </div>
   </section>
@@ -420,6 +444,29 @@ buttons.forEach((b, i) => {
     if (d) { e.preventDefault(); select(buttons[(i + d + buttons.length) % buttons.length], true); }
   });
 });
+// The four view shots open large; the arrows (or ←/→) step through them.
+const zooms = [...document.querySelectorAll('.views .zoom')];
+const viewer = document.getElementById('viewer');
+const large = viewer.querySelector('img');
+let shown = 0;
+const show = i => {
+  shown = (i + zooms.length) % zooms.length;
+  const img = zooms[shown].querySelector('img');
+  large.src = img.currentSrc || img.src;
+  large.alt = img.alt;
+  viewer.querySelector('figcaption').innerHTML = zooms[shown].nextElementSibling.innerHTML;
+};
+zooms.forEach((z, i) => z.addEventListener('click', () => { show(i); viewer.showModal(); }));
+viewer.querySelector('.prev').addEventListener('click', () => show(shown - 1));
+viewer.querySelector('.next').addEventListener('click', () => show(shown + 1));
+viewer.querySelector('.close').addEventListener('click', () => viewer.close());
+viewer.addEventListener('keydown', e => {
+  const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+  if (d) { e.preventDefault(); show(shown + d); }
+});
+// A click on the shot or the dark area closes; the bar's buttons don't.
+viewer.addEventListener('click', e => { if (e.target === viewer || e.target === large) viewer.close(); });
+viewer.addEventListener('close', () => zooms[shown].focus());
 document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
