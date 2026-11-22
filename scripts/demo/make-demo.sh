@@ -248,6 +248,62 @@ printf '[user]\n\tname = Demo\n' >git/config
 git_demo init -q && git_demo add -A && git_demo commit -qm "Dotfiles"
 cd "$home"
 
+# --- A fuller life: more repos, paperwork, music, camera roll --------------
+mkdir -p Projects/homelab/compose Projects/homelab/ansible
+cd Projects/homelab
+printf '# homelab\n\nCompose files and playbooks for the Raspberry Pi in the hallway.\n' >README.md
+printf 'services:\n  pihole:\n    image: pihole/pihole\n    restart: unless-stopped\n' >compose/dns.yml
+printf 'services:\n  photos:\n    image: immich\n' >compose/photos.yml
+printf -- '- hosts: pi\n  tasks:\n    - name: Update packages\n      apt: upgrade=yes\n' >ansible/update.yml
+git_demo init -q && git_demo add -A && git_demo commit -qm "Pi-hole and photos"
+printf 'services:\n  vault:\n    image: vaultwarden/server\n' >compose/vault.yml
+printf '# homelab\n\nCompose files and playbooks for the Raspberry Pi in the hallway.\n\n## Backups\nNightly to the NAS.\n' >README.md
+cd "$home"
+
+mkdir -p Projects/recipe-api/cmd Projects/recipe-api/internal
+cd Projects/recipe-api
+printf 'module example.com/recipe-api\n\ngo 1.23\n' >go.mod
+printf 'package main\n\nfunc main() {}\n' >cmd/main.go
+printf 'package recipes\n\ntype Recipe struct{ Name string }\n' >internal/recipes.go
+printf '# recipe-api\n\nServes the recipes in ~/Documents/Recipes as JSON.\n' >README.md
+git_demo init -q && git_demo add -A && git_demo commit -qm "Serve recipes"
+cd "$home"
+
+mkdir -p Projects/scratch Projects/archive/old-site
+printf 'print("scratch")\n' >Projects/scratch/test.py
+printf 'todo: try the new tide model\n' >Projects/scratch/notes.txt
+printf '<h1>Old site</h1>\n' >Projects/archive/old-site/index.html
+
+mkdir -p Documents/Home Documents/Health Documents/Learning Documents/Writing Documents/Archive/2024
+pdf "Documents/Home/Contents insurance.pdf" "Contents insurance policy"
+pdf "Documents/Home/Energy bill 2026-10.pdf" "Energy bill October"
+pdf "Documents/Home/Floor plan.pdf" "Floor plan, flat 3B"
+pdf "Documents/Health/Dentist invoice.pdf" "Dentist invoice"
+pdf "Documents/Health/Vaccination record.pdf" "Vaccination record"
+pdf "Documents/Archive/2024/Tax return 2024.pdf" "Tax return 2024"
+pdf "Documents/Archive/2024/Old lease.pdf" "Lease 2022 to 2024"
+printf '# Rust notes\n\n- ownership, borrowing, lifetimes\n- `?` for errors\n' >"Documents/Learning/Rust notes.md"
+printf '# Vim cheatsheet\n\n- `ciw` change inner word\n- `gg` / `G` top, bottom\n' >"Documents/Learning/Vim cheatsheet.md"
+printf '# Spanish vocab\n\nel cuervo, la urraca, el halcón\n' >"Documents/Learning/Spanish vocab.md"
+printf '# Logging tides on a budget\n\nDraft. A pressure sensor, a Pi and a week of patience.\n' >"Documents/Writing/Blog draft.md"
+printf '# Newsletter, issue 4\n\nBirds of the month: the rook.\n' >"Documents/Writing/Newsletter 04.md"
+
+mkdir -p "Pictures/Camera Roll"
+i=4100
+for photo in "Golden forest.jpg" "Trips/Larches.jpg" "Trips/Meadow.jpg" "Trips/Lake shore.jpg" "Wallpapers/Blue sky.jpg" "Wallpapers/Turquoise lake.jpg"; do
+  cp "Pictures/$photo" "Pictures/Camera Roll/IMG_$i.jpg"
+  i=$((i + 3))
+done
+
+mkdir -p "Music/Field recordings"
+python3 - <<'PY'
+import wave
+for name, seconds in (("Raven at dawn", 2), ("Rain on the roof", 3), ("Harbour", 2)):
+    with wave.open(f"Music/Field recordings/{name}.wav", "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+        w.writeframes(b"\x00\x00" * 8000 * seconds)
+PY
+
 # --- Tags (Finder's xattr) -------------------------------------------------
 tag() { # tag <file> <name>\n<color> ...
   local f=$1; shift

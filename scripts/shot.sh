@@ -77,6 +77,7 @@ hints = "always"
 motion = "off"
 ${CROW_SHOT_SETTINGS:-}
 $( [ -n "${CROW_SHOT_CUSTOM:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "linework"' )
+$( [ -z "${CROW_SHOT_CUSTOM:-}" ] && [ -z "${CROW_SHOT_PERSONA:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "lucide"' )
 $( [ -n "${CROW_SHOT_PERSONA:-}" ] && sed "s|^sidebar_style = .*|sidebar_style = \"${CROW_SHOT_SIDEBAR_STYLE:-}\"|;" "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml" | { if [ -n "${CROW_SHOT_SIDEBAR_STYLE:-}" ]; then cat; else cat "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml"; fi; } )
 [window]
 width = 1280
@@ -120,6 +121,30 @@ items = [
     mkdir -p "$work/config/icon-packs"
     cp -R "$root/scripts/demo/icon-pack" "$work/config/icon-packs/linework"
   fi
+  # The plain demo home: Favorites keep Crow's outline icons, two more groups of folders
+  # that exist in it, and Lucide icons for the individual projects (only those folders are
+  # in the pack, so every other icon stays the base icon).
+  extra_groups=""
+  if [ -z "${CROW_SHOT_CUSTOM:-}" ] && [ -z "${CROW_SHOT_PERSONA:-}" ]; then
+    group() { # <heading> <path>...
+      local heading=$1 items="" rel
+      shift
+      for rel in "$@"; do
+        [ -d "$shot_home/$rel" ] && items="$items  { path = \"$shot_home/$rel\" },
+"
+      done
+      [ -n "$items" ] && extra_groups="$extra_groups
+[[group]]
+name = \"$heading\"
+items = [
+$items]
+"
+    }
+    group Paperwork "Documents/Taxes 2025" Documents/Invoices Documents/Travel
+    group Media Pictures/Trips Music
+    mkdir -p "$work/config/icon-packs"
+    LUCIDE_ONLY=projects "$root/scripts/demo/make-lucide-pack.sh" "$work/config/icon-packs/lucide" >/dev/null
+  fi
   shot_locations=${CROW_SHOT_LOCATIONS:-true}
   shot_sections="[section.\"tags\"]
 show = false
@@ -142,7 +167,7 @@ cat >"$work/config/sidebar.toml" <<EOF
 name = "Favorites"
 items = [
 $fav_items]
-
+${extra_groups:-}
 [recent]
 show = true
 count = 6
