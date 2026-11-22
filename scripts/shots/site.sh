@@ -49,11 +49,10 @@ both() {
 }
 
 export CROW_SHOT_SETTINGS=$preview_on
-# The hero is the photographer's setup: groups, emoji, the Lucide pack, big thumbnails.
-PH=$PARENT/Demo-photographer
-CROW_SHOT_HOME=$PH CROW_SHOT_PERSONA=photographer CROW_SHOT_SIDEBAR_STYLE=ledger \
-  both hero hero "$PH/Pictures/Shoots/2026/2026-07 Faroe Islands/Selects" finder-light finder-dark \
-  'wait:2.5|cmd:1|key:down|key:right|key:right|wait:3'
+# The hero is the plain demo home in the Finder themes, like the rest of the page: column
+# view through Pictures › Wallpapers with a photo in the preview. The personas come later.
+both hero hero "$D/Pictures" finder-light finder-dark \
+  'wait:2.5|cmd:3|text:wallp|wait:1|key:right|wait:1|text:fog|wait:3'
 
 both view-icons view-icons "$D/Pictures/Trips" finder-light finder-dark 'wait:2.5|cmd:1|key:down|key:right|key:right|key:right|wait:3'
 both view-list view-list "$D/Pictures/Trips" finder-light finder-dark "wait:2.5|cmd:2|$down9|wait:3"
