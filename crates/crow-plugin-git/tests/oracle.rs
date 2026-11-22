@@ -510,6 +510,14 @@ fn discovery_prunes_packages_symlinks_and_keeps_nested_repos() {
     assert!(!paths.iter().any(|path| path.starts_with(root.join("pkg.app"))));
     assert!(!paths.iter().any(|path| path == &root.join("link")));
 
+    // A root that is itself a symlink to a folder is scanned.
+    let via_link = temp.path().join("via-link");
+    std::os::unix::fs::symlink(&root, &via_link).unwrap();
+    let linked = discover(&[via_link], DiscoveryLimits::default(), &AtomicBool::new(false), |_| {});
+    assert!(
+        linked.repositories.iter().any(|repo| repo.identity.worktree == std::fs::canonicalize(root.join("a")).unwrap())
+    );
+
     let bounded = discover(
         &[root],
         DiscoveryLimits { max_depth: 8, max_directories: 1, max_repositories: 8 },

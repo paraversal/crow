@@ -1,7 +1,7 @@
 //! Embedded Lucide stroke icons, tinted with a theme role.
 //!
-//! Icons are Lucide 1.72.0 (https://lucide.dev), unmodified. Lucide is
-//! ISC-licensed; the notice is `assets/icons/LICENSE` and ships in the app
+//! Icons are Lucide 1.72.0 (https://lucide.dev), unmodified, except the two wide chevrons
+//! (Lucide's with a flatter angle). Lucide is ISC-licensed; the notice is `assets/icons/LICENSE` and ships in the app
 //! bundle's Resources.
 
 use std::borrow::Cow;
@@ -18,6 +18,9 @@ use crate::style::color;
 pub enum Glyph {
     Back,
     Forward,
+    /// Wider-angled chevrons for the sidebar controls, so they don't read as Back and Forward.
+    CollapseLeft,
+    CollapseRight,
     Grid,
     List,
     Columns,
@@ -58,6 +61,8 @@ impl Glyph {
     pub const ALL: &'static [Glyph] = &[
         Glyph::Back,
         Glyph::Forward,
+        Glyph::CollapseLeft,
+        Glyph::CollapseRight,
         Glyph::Grid,
         Glyph::List,
         Glyph::Columns,
@@ -95,6 +100,8 @@ impl Glyph {
         match self {
             Glyph::Back => "icons/chevron-left.svg",
             Glyph::Forward => "icons/chevron-right.svg",
+            Glyph::CollapseLeft => "icons/chevron-wide-left.svg",
+            Glyph::CollapseRight => "icons/chevron-wide-right.svg",
             Glyph::Grid => "icons/layout-grid.svg",
             Glyph::List => "icons/list.svg",
             Glyph::Columns => "icons/columns-3.svg",
@@ -214,6 +221,8 @@ pub struct Assets;
 const FILES: &[(&str, &[u8])] = &[
     ("icons/chevron-left.svg", include_bytes!("../assets/icons/chevron-left.svg")),
     ("icons/chevron-right.svg", include_bytes!("../assets/icons/chevron-right.svg")),
+    ("icons/chevron-wide-left.svg", include_bytes!("../assets/icons/chevron-wide-left.svg")),
+    ("icons/chevron-wide-right.svg", include_bytes!("../assets/icons/chevron-wide-right.svg")),
     ("icons/layout-grid.svg", include_bytes!("../assets/icons/layout-grid.svg")),
     ("icons/list.svg", include_bytes!("../assets/icons/list.svg")),
     ("icons/columns-3.svg", include_bytes!("../assets/icons/columns-3.svg")),

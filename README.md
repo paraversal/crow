@@ -25,7 +25,11 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 </tr>
 <tr>
 <td><picture><source srcset="docs/media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-developer-light.webp" alt="Crow set up for a developer"></picture><br><b>Make it yours.</b> Themes, icon packs, five sidebar styles, a Vim layer, rebindable keys.</td>
-<td><picture><source srcset="docs/media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-photographer-light.webp" alt="Crow set up for a photographer"></picture><br><b>Your setup, not ours.</b> A floating-panel sidebar, Lucide icons and Rosé Pine: one person’s config of many.</td>
+<td><picture><source srcset="docs/media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-photographer-light.webp" alt="Crow set up for a photographer"></picture><br><b>Same app, another look.</b> A photographer’s setup: a floating-panel sidebar, Lucide icons and Rosé Pine, all from settings.</td>
+</tr>
+<tr>
+<td><picture><source srcset="docs/media/sidebars-closed-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/sidebars-closed-light.webp" alt="Both sidebars closed"></picture><br><b>Two sidebars, both closable.</b> A chevron at each edge (or ⌃⌘S and ⇧⌘P) hides favorites on the left and Preview, Info and Git Diff on the right.</td>
+<td><picture><source srcset="docs/media/info-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/info-light.webp" alt="The Info tab for two selected photos"></picture><br><b>Details on demand.</b> Preview, Info and a Git diff in the right sidebar, with totals and shared tags for a multi-selection.</td>
 </tr>
 </table>
 
@@ -37,9 +41,11 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 - Undo for every file operation, trash and batch rename included; a copy queue you can pause, with conflicts shown before it starts.
 - A Vim layer, and every key rebindable.
 - Views that follow the folder (`views.toml`), with Why This View? to explain them.
-- Git badges, lines changed and a review sheet; Projects in the sidebar.
+- Git badges, lines changed, a diff tab and a review sheet; a Projects section for the repositories in one folder.
 - A path bar you can type into, Open Terminal Here, spring-loaded folders with a way back.
-- Plain-text config with live reload, themes shared with your other apps, icon packs, plugins.
+- Themes and looks that go far past light, dark and an accent colour: ten built-in themes plus any Base24 theme, shared with your other apps; five sidebar styles; icon packs layered over Outline or Finder icons; your own font, size and translucency; motion and sound. Almost everything is a setting, so Crow can look the way you want.
+- A Shelf for carrying files between folders, saved searches that become sidebar places, and a gallery view that compares two files side by side.
+- Plain-text config with live reload and your comments kept, and plugins for new columns, previews and sidebar sections.
 
 **What Finder does that Crow doesn’t (yet)**
 AirDrop and Share, iCloud sharing, Quick Actions and Services, Get Info editing (permissions, default app), Spotlight smart folders, compress and archive, Connect to Server, Time Machine, Finder extensions such as Dropbox badges, and a signed and notarized build. The full list is in [docs/features.md](docs/features.md).
@@ -77,7 +83,7 @@ From source:
 | [Manual](https://paraversal.github.io/crow/manual/) | Getting started and every task, with screenshots |
 | [Features](docs/features.md) | Everything Crow does today |
 | [Keys](docs/keys.md) | Every shortcut, Finder and Vim layers |
-| [Configuration](docs/configuration.md) | The TOML files and every key |
+| [Configuration](docs/configuration.md) | The TOML files and every key; a [commented sidebar example](docs/examples/sidebar.toml) |
 | [Themes and icon packs](docs/themes.md) | Built-in themes, the global index, writing your own |
 | [Plugins](docs/plugins.md) | Writing a package |
 | [Motion](docs/motion.md) | What moves, and in which mode |

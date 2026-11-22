@@ -3026,6 +3026,36 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_chevrons_hide_the_left_and_right_sidebars(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-chevrons");
+    let (view, mut cx) = open(cx, &root);
+    let right_visible = |cx: &VisualTestContext| view.read_with(cx, |window, cx| window.info.read(cx).visible());
+    assert!(!cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "the left sidebar starts shown");
+    assert!(right_visible(&cx), "the right sidebar starts shown");
+    let left = cx.debug_bounds("hide-left-sidebar").expect("a chevron in the left sidebar");
+    cx.simulate_click(left.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "its chevron hides the left sidebar");
+    let right = cx.debug_bounds("hide-right-sidebar").expect("a chevron in the right sidebar");
+    cx.simulate_click(right.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(!right_visible(&cx), "its chevron hides the right sidebar");
+    let show_right =
+        cx.debug_bounds("show-right-sidebar").expect("a button in the toolbar brings the right sidebar back");
+    cx.simulate_click(show_right.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(right_visible(&cx), "the toolbar button shows the right sidebar");
+    // The slides run on the wall clock: let both finish so the bounds are the resting ones.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    cx.update(|window, _| window.refresh());
+    settle(&view, &mut cx);
+    let show_left = cx.debug_bounds("show-left-sidebar").expect("a button in the toolbar brings the left sidebar back");
+    cx.simulate_click(show_left.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(!cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "the toolbar button shows the left sidebar");
+}
+
+#[gpui::test]
 fn gallery_mode_keeps_selection_filter_and_returns(cx: &mut TestAppContext) {
     let root = fixture("gallery-mode");
     let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
@@ -3815,6 +3845,47 @@ fn file_effects_are_recorded_not_run(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     let calls = effect_calls(&mut cx);
     assert!(calls.contains(&Call::RevealInFinder(vec![root.join("notes.txt")])), "{calls:?}");
+}
+
+#[gpui::test]
+fn open_with_several_files_selected_opens_them_all(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("effects-open-many");
+    std::fs::write(root.join("other.txt"), "x\n").unwrap();
+    std::fs::write(root.join("third.txt"), "x\n").unwrap();
+    let (_view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.simulate_keystrokes("shift-down shift-down");
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-down");
+    let opened: Vec<_> = effect_calls(&mut cx)
+        .into_iter()
+        .filter_map(|call| if let Call::OpenPath(path) = call { Some(path) } else { None })
+        .collect();
+    assert_eq!(opened, [root.join("notes.txt"), root.join("other.txt"), root.join("third.txt")]);
+}
+
+#[gpui::test]
+fn search_results_drive_an_open_quick_look_panel(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("search-quick-look");
+    std::fs::write(root.join("note-a.txt"), "x\n").unwrap();
+    std::fs::write(root.join("note-b.txt"), "x\n").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("note");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("space");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::SetQuickLookKeyHandler), "the panel's arrows come back: {calls:?}");
+    assert!(calls.iter().any(|call| matches!(call, Call::ToggleQuickLook(_))), "{calls:?}");
+    cx.simulate_keystrokes("down");
+    let calls = effect_calls(&mut cx);
+    assert!(
+        calls.iter().any(|call| matches!(call, Call::UpdateQuickLook(_))),
+        "↓ in the results updates it: {calls:?}"
+    );
 }
 
 #[gpui::test]
@@ -5868,54 +5939,6 @@ fn search_shift_cmd_m_cycles_the_match_mode(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn search_idle_example_fills_the_query(cx: &mut TestAppContext) {
-    let root = fixture("search-idle");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-0");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "config");
-    let focus = search.read_with(&cx, |search, cx| search.input_focus_handle(cx));
-    assert!(cx.update(|window, _| focus.is_focused(window)), "focus returns to the field");
-}
-
-#[gpui::test]
-fn search_idle_example_this_mac_switches_scope(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-scope");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-2");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::ThisMac);
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
-}
-
-#[gpui::test]
-fn search_idle_example_home_switches_scope(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-home");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-3");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
-}
-
-#[gpui::test]
-fn search_idle_example_everything_flips_rules(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-everything");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-4");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert!(search.read_with(&cx, |search, _| search.everything()));
-}
-
-#[gpui::test]
 fn search_idle_shows_for_empty_query(cx: &mut TestAppContext) {
     let root = fixture("search-idle-again");
     let (view, mut cx) = open(cx, &root);
@@ -5923,10 +5946,26 @@ fn search_idle_shows_for_empty_query(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_input("x");
     wait_for_search(&view, &mut cx);
-    assert!(cx.debug_bounds("search-example-0").is_none());
+    assert!(cx.debug_bounds("search-idle").is_none());
     cx.simulate_keystrokes("backspace");
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("search-example-0").is_some());
+    assert!(cx.debug_bounds("search-idle").is_some(), "an empty query shows the quiet hint");
+}
+
+#[gpui::test]
+fn search_field_flags_a_regular_expression_only_when_slashes_wrap_it(cx: &mut TestAppContext) {
+    let root = fixture("search-regex-badge");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("fn");
+    wait_for_search(&view, &mut cx);
+    assert!(cx.debug_bounds("search-regex").is_none(), "a plain query has no badge");
+    cx.simulate_input("/");
+    cx.simulate_keystrokes("home");
+    cx.simulate_input("/");
+    wait_for_search(&view, &mut cx);
+    assert!(cx.debug_bounds("search-regex").is_some(), "/fn/ is a regular expression");
 }
 
 #[gpui::test]
@@ -17446,7 +17485,7 @@ fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestApp
     let (view, mut cx) = open(cx, &root);
     cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
     let config = format!(
-        "{}\n[projects]\nroots = [\"{}\"]\n",
+        "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
         root.display()
     );
@@ -17488,7 +17527,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
 
     // Adding the current folder through the action makes a Projects root.
     cx.simulate_keystrokes("cmd-k");
-    cx.simulate_input(">add folder as project root");
+    cx.simulate_input(">set current folder as projects root");
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
     let roots = cx.read(|cx| {
@@ -17499,7 +17538,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
 
     // The row menu matches rows to roots by path, so spell the root the way the rows are.
     let config = format!(
-        "{}\n[projects]\nroots = [\"{}\"]\n",
+        "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
         repo.parent().unwrap().display()
     );
@@ -17532,7 +17571,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
         let ui = cx.global::<Ui>();
         ui.sidebar.project_roots(&ui.home)
     });
-    assert!(roots.is_empty(), "Remove Project Root on a project row removes the root that holds it: {roots:?}");
+    assert!(roots.is_empty(), "Clear Projects Root on a project row clears the root: {roots:?}");
 }
 
 #[gpui::test]

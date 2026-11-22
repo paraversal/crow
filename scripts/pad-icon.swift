@@ -16,7 +16,8 @@ else {
 }
 let w = rep.pixelsWide, h = rep.pixelsHigh
 func alpha(_ x: Int, _ y: Int) -> CGFloat { rep.colorAt(x: x, y: y)?.alphaComponent ?? 0 }
-let reachesEdge = [alpha(w / 2, 0), alpha(w / 2, h - 1), alpha(0, h / 2), alpha(w - 1, h / 2)].contains { $0 > 0.1 }
+let dx = max(w / 50, 1), dy = max(h / 50, 1)  // a rounded icon is ~transparent exactly at the edge
+let reachesEdge = [alpha(w / 2, dy), alpha(w / 2, h - 1 - dy), alpha(dx, h / 2), alpha(w - 1 - dx, h / 2)].contains { $0 > 0.1 }
 
 let side: CGFloat = 1024
 let art = reachesEdge ? side * 824 / 1024 : side

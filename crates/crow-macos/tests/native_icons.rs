@@ -33,7 +33,8 @@ fn main() {
     assert_ne!(house, red, "the color is part of the icon");
     assert!(width > height && (14.0..=22.0).contains(&width), "drawn at its natural size in points: {width}x{height}");
     let (_, doc_width, doc_height) = symbol_png("doc", 16, [10, 132, 255, 255]).expect("the doc symbol");
-    assert!(doc_width < doc_height, "a document is taller than wide: {doc_width}x{doc_height}");
+    // The glyph's proportions depend on the macOS version (the CI runner draws "doc" square).
+    assert!(doc_width <= doc_height, "a document is not wider than tall: {doc_width}x{doc_height}");
     assert!(symbol_png("no.such.symbol.name", 16, [0, 0, 0, 255]).is_none());
     if let Some(dir) = std::env::var_os("CROW_SYMBOL_DUMP") {
         for name in ["house", "dock.rectangle", "doc", "arrow.down.circle", "folder", "a.square"] {

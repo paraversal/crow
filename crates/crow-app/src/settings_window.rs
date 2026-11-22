@@ -816,6 +816,9 @@ pub struct SettingsWindow {
     window_height: Entity<TextInput>,
     theme: ThemeChoice,
     theme_scroll: ScrollHandle,
+    /// Frames left in which an opening menu re-asks its scroll handle to show the cursor: the
+    /// first frame has no viewport bounds yet, so the first request lands nowhere.
+    menu_settle: std::cell::Cell<u8>,
     fonts: Vec<String>,
     font_cursor: usize,
     /// Stable row identity; never an inventory index.
@@ -1057,6 +1060,7 @@ impl SettingsWindow {
             window_height,
             theme,
             theme_scroll: ScrollHandle::new(),
+            menu_settle: std::cell::Cell::new(0),
             fonts,
             font_cursor,
             selected_plugin: None,
@@ -2065,6 +2069,7 @@ impl SettingsWindow {
 
     /// Open `id`'s menu with the cursor on the saved value.
     fn open_menu(&mut self, id: ControlId, cx: &mut Context<Self>) {
+        self.menu_settle.set(3);
         let settings = &cx.global::<Ui>().settings;
         match id {
             ControlId::Theme => {
@@ -2406,6 +2411,11 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
         pick: controls::Select,
     ) -> gpui::Stateful<gpui::Div> {
+        if self.menu == Some(id) && self.menu_settle.get() > 0 {
+            self.menu_settle.set(self.menu_settle.get() - 1);
+            scroll.scroll_to_item(cursor);
+            cx.notify();
+        }
         let menu = (self.menu == Some(id)).then(|| controls::Menu {
             cursor,
             scroll,
@@ -5136,6 +5146,101 @@ preview_providers = ["example.one.preview"]
         draw(&mut vcx);
         let row = vcx.debug_bounds("settings-font-family-option-0").expect("first entry");
         assert!(row.size.height >= px(16.), "rows keep their height: {:?}", row.size);
+    }
+
+    #[gpui::test]
+    fn the_menu_scrolls_to_keep_the_cursor_in_view(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let fonts: Vec<String> =
+            std::iter::once("System".to_owned()).chain((0..300).map(|i| format!("Font {i:03}"))).collect();
+        view.update(&mut vcx, |view, cx| {
+            view.set_fonts_for_tests(fonts, "");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        focus_control(&view, &mut vcx, ControlId::FontFamily);
+        vcx.simulate_keystrokes("space");
+        draw(&mut vcx);
+        for step in 1..=40 {
+            vcx.simulate_keystrokes("down");
+            draw(&mut vcx);
+            draw(&mut vcx);
+            let menu = vcx.debug_bounds("settings-font-family-menu").expect("menu");
+            let row =
+                vcx.debug_bounds(format!("settings-font-family-option-{step}").leak()).expect("cursor row is mounted");
+            assert!(
+                row.top() >= menu.top() && row.bottom() <= menu.bottom(),
+                "step {step}: cursor row {row:?} stays inside the menu {menu:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn the_theme_menu_scrolls_to_keep_the_cursor_in_view(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        view.update(&mut vcx, |view, cx| {
+            let entries = (0..60)
+                .map(|i| ThemeInfo {
+                    id: format!("theme-{i:02}"),
+                    name: format!("Theme {i:02}"),
+                    variant: if i % 2 == 0 { Variant::Dark } else { Variant::Light },
+                    source: crow_theme::Source::Index,
+                })
+                .collect();
+            view.set_theme_entries_for_tests(entries, "theme-00");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        focus_control(&view, &mut vcx, ControlId::Theme);
+        vcx.simulate_keystrokes("space");
+        draw(&mut vcx);
+        for step in 1..=40 {
+            vcx.simulate_keystrokes("down");
+            draw(&mut vcx);
+            draw(&mut vcx);
+            let menu = vcx.debug_bounds("settings-theme-menu").expect("menu");
+            let row = vcx.debug_bounds(format!("settings-theme-option-{step}").leak()).expect("cursor row is mounted");
+            assert!(
+                row.top() >= menu.top() && row.bottom() <= menu.bottom(),
+                "step {step}: cursor row {row:?} stays inside the menu {menu:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn the_theme_menu_opens_with_the_saved_theme_in_view(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        view.update(&mut vcx, |view, cx| {
+            let entries = (0..60)
+                .map(|i| ThemeInfo {
+                    id: format!("theme-{i:02}"),
+                    name: format!("Theme {i:02}"),
+                    variant: Variant::Dark,
+                    source: crow_theme::Source::Index,
+                })
+                .collect();
+            view.set_theme_entries_for_tests(entries, "theme-45");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update_global::<Ui, _>(|ui, _| ui.settings.theme = "theme-45".to_owned());
+        focus_control(&view, &mut vcx, ControlId::Theme);
+        vcx.simulate_keystrokes("space");
+        draw(&mut vcx);
+        draw(&mut vcx);
+        let menu = vcx.debug_bounds("settings-theme-menu").expect("menu");
+        let row = vcx.debug_bounds("settings-theme-option-45").expect("saved row is mounted");
+        assert!(row.top() >= menu.top() && row.bottom() <= menu.bottom(), "saved row {row:?} in menu {menu:?}");
+        for (key, target) in [("pagedown", 0), ("end", 59), ("home", 0)] {
+            vcx.simulate_keystrokes(key);
+            draw(&mut vcx);
+            draw(&mut vcx);
+            let cursor = view.read_with(&vcx, |view, _| view.theme.cursor);
+            let _ = target;
+            let row = vcx.debug_bounds(format!("settings-theme-option-{cursor}").leak());
+            let ok = row.is_some_and(|row| row.top() >= menu.top() && row.bottom() <= menu.bottom());
+            assert!(ok, "{key}: cursor {cursor} row {row:?} in menu {menu:?}");
+        }
     }
 
     #[gpui::test]

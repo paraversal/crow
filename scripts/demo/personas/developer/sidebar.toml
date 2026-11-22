@@ -1,39 +1,36 @@
 [[group]]
 name = "Favorites"
 items = [
-  { path = "@HOME@/Desktop", icon = "🖥️" },
-  { path = "@HOME@/Documents", icon = "📚", color = "yellow" },
-  { path = "@HOME@/Downloads", icon = "📥", color = "green" },
-  { path = "@HOME@/Projects/dotfiles", name = "dotfiles", icon = "⚙️", color = "purple" },
+  { path = "@HOME@/Desktop" },
+  { path = "@HOME@/Documents", color = "yellow" },
+  { path = "@HOME@/Downloads", color = "green" },
+  { path = "@HOME@/Projects/dotfiles", name = "dotfiles", color = "purple" },
 ]
 
 [[group]]
 name = "Work VPS"
-icon = "🛰️"
 items = [
-  { path = "@HOME@/Servers/work-vps/prod-eu", name = "prod-eu", icon = "🔴", color = "red" },
-  { path = "@HOME@/Servers/work-vps/staging", name = "staging", icon = "🟡", color = "yellow" },
-  { path = "@HOME@/Servers/work-vps/bastion", name = "bastion", icon = "🟣", color = "purple" },
+  { path = "@HOME@/Servers/work-vps/prod-eu", name = "prod-eu", color = "red" },
+  { path = "@HOME@/Servers/work-vps/staging", name = "staging", color = "yellow" },
+  { path = "@HOME@/Servers/work-vps/bastion", name = "bastion", color = "purple" },
 ]
 
 [[group]]
 name = "Toy projects"
-icon = "🧪"
 items = [
-  { path = "@HOME@/Projects/toys/tidepool", icon = "🌊", color = "cyan" },
-  { path = "@HOME@/Projects/toys/raven-cam", icon = "🐦‍⬛", color = "purple" },
-  { path = "@HOME@/Projects/toys/synth-rs", icon = "🎹", color = "pink" },
-  { path = "@HOME@/Projects/toys/wasm-life", icon = "🧬", color = "green" },
-  { path = "@HOME@/Projects/toys/advent-of-code", icon = "🎄", color = "orange" },
+  { path = "@HOME@/Projects/toys/tidepool", color = "cyan" },
+  { path = "@HOME@/Projects/toys/raven-cam", color = "purple" },
+  { path = "@HOME@/Projects/toys/synth-rs", color = "pink" },
+  { path = "@HOME@/Projects/toys/wasm-life", color = "green" },
+  { path = "@HOME@/Projects/toys/advent-of-code", color = "orange" },
 ]
 
 [[group]]
 name = "Locations"
-icon = "💾"
 items = [
-  { path = "@HOME@/Volumes/Build SSD", icon = "⚡", color = "cyan" },
-  { path = "@HOME@/Volumes/Backups", icon = "🗄️", color = "blue" },
-  { path = "@HOME@/Volumes/Games", icon = "🎮", color = "pink" },
+  { path = "@HOME@/Volumes/Build SSD", color = "cyan" },
+  { path = "@HOME@/Volumes/Backups", color = "blue" },
+  { path = "@HOME@/Volumes/Games", color = "pink" },
 ]
 
 [recent]
@@ -52,4 +49,5 @@ show = false
 order = []
 
 [projects]
-roots = ["@HOME@/Projects/work", "@HOME@/Projects/toys"]
+root = "@HOME@/Projects/work"
+name = "Work"

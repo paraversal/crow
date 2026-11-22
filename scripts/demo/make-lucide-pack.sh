@@ -3,6 +3,8 @@
 # licence), tinted with the theme's palette hues. Used by the persona shots.
 #
 #   scripts/demo/make-lucide-pack.sh [out-dir]     # default target/demo/lucide-pack
+#   LUCIDE_ONLY=projects scripts/demo/make-lucide-pack.sh <out-dir>
+#       just the project folders' icons, so everything else keeps the base icons
 #
 # Lucide is fetched once, pinned, from the npm registry into target/demo/lucide
 # (not committed). Install the result by copying it to
@@ -37,9 +39,16 @@ cp "$(dirname "$0")/lucide-pack-readme.md" "$out/README.md"
 
 section=""
 used=""
-# add <section> <key> <lucide icon> [color]
+seen=""
+only=${LUCIDE_ONLY:-}
+force=""
+# add <section> <key> <lucide icon> [color]; a key already added is skipped, and with
+# LUCIDE_ONLY set only `project` entries are written.
 add() {
   local sec=$1 key=$2 icon=$3 color=${4:-}
+  [ -z "$only" ] || [ -n "$force" ] || return 0
+  case "$seen" in *"|$sec/$key|"*) return 0 ;; esac
+  seen="$seen|$sec/$key|"
   [ -f "$icons/$icon.svg" ] || { echo "make-lucide-pack: no Lucide icon '$icon'" >&2; exit 1; }
   if [ "$sec" != "$section" ]; then printf '\n[%s]\n' "$sec" >>"$out/pack.toml"; section=$sec; fi
   case " $used " in *" $icon "*) ;; *)
@@ -53,6 +62,46 @@ add() {
     printf '"%s" = { icon = "icons/%s.svg" }\n' "$key" "$icon" >>"$out/pack.toml"
   fi
 }
+
+project() { force=1 add folder_name "$@"; }
+
+# --- project folders: the demo home's repositories and the personas' ------------------
+project tidepool waves base0C
+project field-guide bird base0E
+project raven-bot bot base0D
+project garden-planner sprout base0B
+project dotfiles terminal base0B
+project homelab server base09
+project recipe-api chef-hat base08
+project prod-eu server base08
+project staging server-cog base0A
+project bastion shield base0E
+project raven-cam camera base0E
+project synth-rs keyboard-music base0F
+project wasm-life dna base0B
+project advent-of-code tree-pine base09
+project 2026 calendar-days base09
+project "2026-03 Lofoten" mountain-snow base0C
+project "2026-05 Dolomites" mountain base0F
+project "2026-10 Fog Valley" cloud-fog base0D
+project "2026-07 Faroe Islands" sailboat base0B
+project "Anna and Tom" heart base08
+project "Atelier Noor" palette base09
+project "Nordic Outdoors" compass base0C
+project "00 Notes" notebook-pen base0A
+project Drafts file-pen base0D
+project Fiction moon base0E
+project Craft hammer base0B
+project Poetry flower-2 base0F
+project "Sample Library" audio-waveform base09
+project "Night Drive" car base0D
+project "Glass Rain" cloud-rain base0C
+project "Violet Hour" sunset base0E
+project Kicks circle-dot base08
+project Hats audio-lines base09
+project Pads cloud base0C
+project Foley door-open base0B
+project Games gamepad-2 base0E
 
 # --- folders by name ------------------------------------------------------------
 for n in src lib crates app; do add folder_name "$n" folder-code base0D; done
@@ -167,6 +216,7 @@ add extension otf type base0D
 add extension stl box base0B
 
 # --- generic ----------------------------------------------------------------------------------
+[ -z "$only" ] || { echo "built $out ($(ls "$out"/icons/*.svg | wc -l | tr -d ' ') icons, projects only)"; exit 0; }
 printf '\n[generic]\n' >>"$out/pack.toml"
 add_generic() { # name icon color  (add() writes a [section]; generic keys are bare)
   [ -f "$icons/$2.svg" ] || { echo "make-lucide-pack: no Lucide icon '$2'" >&2; exit 1; }

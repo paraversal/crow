@@ -646,7 +646,10 @@ pub fn projects_rows(cx: &mut App, roots: Vec<PathBuf>, home: &Path) -> Vec<Sect
         .values()
         .map(|project| SectionRow {
             id: hex_path(&project.path),
-            text: crow_core::abbreviate_home(&project.path, home),
+            text: project.path.file_name().map_or_else(
+                || crow_core::abbreviate_home(&project.path, home),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             meta: Some(project.head.clone()),
             badge: project
                 .changed
@@ -656,7 +659,7 @@ pub fn projects_rows(cx: &mut App, roots: Vec<PathBuf>, home: &Path) -> Vec<Sect
             destination: SectionDestination::Folder { path: project.path.clone(), identity: project.identity },
         })
         .collect();
-    rows.sort_by(|a, b| a.text.cmp(&b.text));
+    rows.sort_by(|a, b| a.text.to_lowercase().cmp(&b.text.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
     if git.project_truncated {
         rows.push(SectionRow {
             id: "discovery-limit".into(),
@@ -692,7 +695,7 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
     cx.background_spawn(async move {
         let report = crow_plugin_git::discover(
             &roots,
-            crow_plugin_git::DiscoveryLimits { max_depth: 6, max_directories: 20_000, max_repositories: 200 },
+            crow_plugin_git::DiscoveryLimits { max_depth: 1, max_directories: 20_000, max_repositories: 200 },
             &cancel,
             |found| {
                 if cancel.load(Ordering::Relaxed) {
@@ -1018,7 +1021,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(rows.len(), 1, "one discovered repository: {rows:?}");
-        assert!(rows[0].text.ends_with("code/crow"), "the path is abbreviated against HOME: {}", rows[0].text);
+        assert_eq!(rows[0].text, "crow", "a row shows its folder name; the root is in the heading");
         assert_eq!(rows[0].meta.as_deref(), Some("main"));
         assert_eq!(rows[0].badge.as_deref(), Some("1"));
         assert!(rows[0].folder_path().is_some_and(|path| path.ends_with("crow")));

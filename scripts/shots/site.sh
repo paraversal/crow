@@ -11,7 +11,7 @@
 #
 # The demo home lives in /Users/Shared so the path bar reads Macintosh HD › Users ›
 # Shared › Demo rather than a checkout path. Needs cwebp (brew install webp) and the
-# permissions scripts/shot.sh lists. Don't touch the Mac while it runs (~2 minutes).
+# permissions scripts/shot.sh lists. Don't touch the Mac while it runs (a few minutes).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -52,16 +52,22 @@ export CROW_SHOT_SETTINGS=$preview_on
 # The hero is the plain demo home in the Finder themes, like the rest of the page: column
 # view through Pictures › Wallpapers with a photo in the preview. The personas come later.
 both hero hero "$D/Pictures" finder-light finder-dark \
-  'wait:2.5|cmd:3|text:wallp|wait:1|key:right|wait:1|text:fog|wait:3'
+  'wait:0.6|cmd:3|text:wallp|wait:1|key:right|wait:1|text:fog|wait:0.8'
 
-both view-icons view-icons "$D/Pictures/Trips" finder-light finder-dark 'wait:2.5|cmd:1|key:down|key:right|key:right|key:right|wait:3'
-both view-list view-list "$D/Pictures/Trips" finder-light finder-dark "wait:2.5|cmd:2|$down9|wait:3"
-both view-columns view-columns "$D/Pictures/Trips" finder-light finder-dark "wait:2.5|cmd:3|$down9|wait:3"
+both view-icons view-icons "$D/Pictures/Trips" finder-light finder-dark 'wait:0.6|cmd:1|key:down|key:right|key:right|key:right|wait:0.8'
+both view-list view-list "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:2|$down9|wait:0.8"
+both view-columns view-columns "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:3|$down9|wait:0.8"
+# Both sidebars closed (⌃⌘S and ⇧⌘P): the folder gets the whole window.
+both sidebars-closed sidebars-closed "$D/Pictures/Trips" finder-light finder-dark \
+  "wait:1|cmd:4|ctrlcmd:s|cmdshift:p|key:down|key:down|wait:2"
 CROW_SHOT_SETTINGS=$preview_off \
-  both view-gallery view-gallery "$D/Pictures/Trips" finder-light finder-dark "wait:2.5|cmd:4|$down9|wait:3"
-both palette palette "$D/Projects/tidepool" finder-light finder-dark 'wait:2.5|cmd:k|wait:0.6|text:pro|wait:1.5'
-both search search "$D" finder-light finder-dark 'wait:2.5|cmd:f|wait:0.5|text:raven|wait:3'
-both git-list git-list "$D/Projects/tidepool/src" finder-light finder-dark 'wait:2.5|cmd:2|wait:0.5|key:down|key:down|wait:2.5'
+  both view-gallery view-gallery "$D/Pictures/Trips" finder-light finder-dark "wait:0.6|cmd:4|$down9|wait:0.8"
+both palette palette "$D/Projects/tidepool" finder-light finder-dark 'wait:0.6|cmd:k|wait:0.6|text:pro|wait:0.6'
+both search search "$D" finder-light finder-dark 'wait:0.6|cmd:f|wait:0.5|text:raven|wait:0.8'
+# The Git plugin at work: the Changed column and the Git Diff tab beside the selected file.
+CROW_SHOT_VIEWS='columns = ["modified", "git.lines-changed"]' CROW_SHOT_SETTINGS=$preview_on \
+  both git-list git-list "$D/Projects/tidepool/src" finder-light finder-dark \
+  'wait:0.6|cmd:2|wait:0.5|key:down|key:down|wait:0.6|cmd:k|wait:0.6|text:>show git diff|wait:1|key:return|wait:0.8'
 
 # "Make it yours": four people, four setups (scripts/demo/personas/), each in a light and a dark theme.
 persona() { # <persona> <home> <start under home> <light theme> <dark theme> <keys>
@@ -69,30 +75,30 @@ persona() { # <persona> <home> <start under home> <light theme> <dark theme> <ke
     both "persona-$1" "persona-$1" "$PARENT/Demo-$2/$3" "$4" "$5" "$6"
 }
 persona developer developer "Projects/work/acme-api/src" catppuccin-latte catppuccin-mocha \
-  'wait:2.5|cmd:2|key:down|key:down|key:down|key:down|key:down|key:down|wait:3'
+  'wait:0.6|cmd:2|key:down|key:down|key:down|key:down|key:down|key:down|wait:0.8'
 CROW_SHOT_SETTINGS=$preview_off \
   persona photographer photographer "Pictures/Shoots/2026/2026-03 Lofoten/Selects" rose-pine-dawn rose-pine \
-  'wait:2.5|cmd:4|key:down|wait:3'
+  'wait:0.6|cmd:4|key:down|wait:0.8'
 persona writer writer "Manuscripts/The Lantern Year/Chapters" gruvbox-light gruvbox-dark \
-  'wait:2.5|cmd:2|key:down|key:down|key:down|key:down|wait:2.5'
+  'wait:0.6|cmd:2|key:down|key:down|key:down|key:down|wait:0.6'
 persona producer producer "Sample Library/Drums" solarized-light solarized-dark \
-  'wait:2.5|cmd:3|key:down|key:right|key:down|wait:3'
+  'wait:0.6|cmd:3|key:down|key:right|key:down|wait:0.8'
 
 # The manual's task shots, in the Finder themes.
 both batch-rename batch-rename "$D/Pictures/Trips" finder-light finder-dark \
-  'wait:2.5|cmd:2|key:down|cmd:a|key:f2|wait:1|text:Lake|key:tab|text:Loch|wait:1.5'
+  'wait:0.6|cmd:2|key:down|cmd:a|key:f2|wait:1|text:Lake|key:tab|text:Loch|wait:0.6'
 # Two photos: the Info tab's totals and shared tags (one item would show its owner, this Mac's user).
 both info info "$D/Pictures/Trips" finder-light finder-dark \
-  'wait:2.5|cmd:2|key:down|key:down|shift:down|cmd:i|wait:2.5'
-both filter filter "$D/Downloads" finder-light finder-dark 'wait:2.5|cmd:2|text:/|wait:0.5|text:pdf|wait:1.5'
+  'wait:0.6|cmd:2|key:down|key:down|shift:down|cmd:i|wait:0.6'
+both filter filter "$D/Downloads" finder-light finder-dark 'wait:0.6|cmd:2|text:/|wait:0.5|text:pdf|wait:0.6'
 # Downloads/Ideas.md pasted over Documents/Notes/Ideas.md: the conflict comes up before anything copies.
 both copy-conflict copy-conflict "$D/Downloads" finder-light finder-dark \
-  'wait:2.5|cmd:2|text:Ideas|wait:0.5|cmd:c|cmdshift:g|wait:0.8|cmd:a|text:~/Documents/Notes|wait:0.5|key:return|wait:2|cmd:v|wait:2'
+  'wait:0.6|cmd:2|text:Ideas|wait:0.5|cmd:c|cmdshift:g|wait:0.8|cmd:a|text:~/Documents/Notes|wait:0.5|key:return|wait:0.8|cmd:v|wait:0.8'
 # Settings ▸ Keyboard with the Vim layer on: the Vim column of the shortcut list.
 CROW_SHOT_KEYMAP=vim CROW_SHOT_OTHER_WINDOW=1 \
-  both keys keys "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2|text:keyboard|wait:1.5'
+  both keys keys "$D/Documents" finder-light finder-dark 'wait:0.6|cmd:,|wait:0.8|text:keyboard|wait:0.6'
 CROW_SHOT_OTHER_WINDOW=1 \
-  both settings settings "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2.5'
+  both settings settings "$D/Documents" finder-light finder-dark 'wait:0.6|cmd:,|wait:0.6'
 
 # Speed clips, in Finder Dark: recordings of the window (scripts/shot.sh CROW_SHOT_RECORD),
 # list view and no preview pane, encoded by encode-clip.sh to docs/media/<name>.mp4.

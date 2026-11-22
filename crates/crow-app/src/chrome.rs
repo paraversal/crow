@@ -178,6 +178,44 @@ fn tooltip<E: StatefulInteractiveElement>(
     })
 }
 
+/// The small chevron at a sidebar's edge that hides it (or, in the toolbar, brings it back):
+/// it points the way the column goes, stays quiet until hovered, and runs `action` (the same command as the key and
+/// the menu item). `label` is the tooltip and the aria label.
+pub fn collapse_chevron(
+    id: &'static str,
+    label: &'static str,
+    glyph: crate::icons::Glyph,
+    action: &dyn gpui::Action,
+    theme: &crow_theme::Theme,
+    cx: &App,
+) -> Stateful<Div> {
+    let hover_icon = color(theme.role("fg"));
+    let icon = crate::icons::glyph(glyph, 14., "fg-subtle", theme)
+        .id("icon")
+        .group_hover(id, move |s| s.text_color(hover_icon));
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(Role::Button)
+        .aria_label(label)
+        .group(id)
+        .flex_none()
+        .w(px(24.))
+        .h(px(24.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(color(theme.role("surface"))))
+        .active(|s| s.bg(color(theme.role("surface-raised"))))
+        // The traffic lights' strip drags the window: a press here must not start that.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(icon);
+    let dispatch = action.boxed_clone();
+    with_action_tooltip(button, label, action, KeyScope::Window, cx)
+        .on_click(move |_, window, cx| window.dispatch_action(dispatch.boxed_clone(), cx))
+}
+
 /// Attach a tooltip with an optional displayed key. The element keeps its aria
 /// label; the tooltip's own label is `label` plus the key.
 pub fn with_tooltip<E: StatefulInteractiveElement>(

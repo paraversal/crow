@@ -806,7 +806,7 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// File ▸ Add Folder as Project Root: the folder shown becomes a Projects root.
+    /// File ▸ Set Folder as Projects Root: the folder shown becomes the Projects root.
     fn add_project_root(&mut self, _: &crate::actions::AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
         crate::ui::edit_sidebar(crow_core::SidebarEdit::AddProjectRoot(dir), cx);
@@ -835,6 +835,8 @@ impl CrowWindow {
             });
             self.begin_pane_slide(was_visible, cx);
             cx.notify();
+        } else {
+            crate::operations::message("Git Diff needs the Git plugin: approve it in Settings ▸ Plugins", false, cx);
         }
     }
 
@@ -1468,13 +1470,27 @@ impl CrowWindow {
             .debug_selector(|| "toolbar".into())
             .role(Role::Toolbar)
             .aria_label("Toolbar")
+            .relative()
             .h(px(BAND_HEIGHT))
             .flex_none()
-            // With the sidebar hidden the traffic lights sit at the toolbar's left.
+            // With the sidebar hidden the traffic lights sit at the toolbar's left, and the
+            // button that brings the sidebar back sits right after them.
             .pl(px({
                 let base = if tight { 8. } else { 12. };
-                base + (86. - base) * (1.0 - left_share)
+                base + (86. + 28. - base) * (1.0 - left_share)
             }))
+            .when(left_share < 1.0, |bar| {
+                bar.child(div().absolute().top(px(14.)).left(px(84.)).opacity(1.0 - left_share).child(
+                    chrome::collapse_chevron(
+                        "show-left-sidebar",
+                        "Show Left Sidebar",
+                        icons::Glyph::CollapseRight,
+                        &ToggleSidebar,
+                        &theme,
+                        cx,
+                    ),
+                ))
+            })
             .pr(px(if tight { 8. } else { 12. }))
             .flex()
             .items_center()
@@ -1508,6 +1524,16 @@ impl CrowWindow {
                     .child(views.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(search_field)
+            })
+            .when(!self.info.read(cx).visible(), |bar| {
+                bar.child(chrome::collapse_chevron(
+                    "show-right-sidebar",
+                    "Show Right Sidebar",
+                    icons::Glyph::CollapseLeft,
+                    &TogglePreview,
+                    &theme,
+                    cx,
+                ))
             })
     }
 
@@ -3865,17 +3891,30 @@ impl Render for CrowWindow {
                 .bg(tone)
                 .child(
                     // The traffic lights' strip: it moves the window like the toolbar does.
-                    div().h(px(BAND_HEIGHT)).flex_none().w_full().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
-                            let effects = crate::effects::effects(cx);
-                            if event.click_count > 1 {
-                                effects.titlebar_double_click(window);
-                            } else {
-                                effects.start_window_move(window);
-                            }
-                        }),
-                    ),
+                    div()
+                        .relative()
+                        .h(px(BAND_HEIGHT))
+                        .flex_none()
+                        .w_full()
+                        .child(div().absolute().top(px(14.)).right(px(8.)).child(chrome::collapse_chevron(
+                            "hide-left-sidebar",
+                            "Hide Left Sidebar",
+                            icons::Glyph::CollapseLeft,
+                            &ToggleSidebar,
+                            &theme,
+                            cx,
+                        )))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                                let effects = crate::effects::effects(cx);
+                                if event.click_count > 1 {
+                                    effects.titlebar_double_click(window);
+                                } else {
+                                    effects.start_window_move(window);
+                                }
+                            }),
+                        ),
                 )
                 .child(if floating {
                     // One rounded, bordered panel lifted off the column, holding the rows and the shelf.

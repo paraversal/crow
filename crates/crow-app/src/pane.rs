@@ -149,6 +149,25 @@ pub enum PaneEvent {
     },
 }
 
+/// The Quick Look panel is key while it is open, so the arrows come back through its
+/// delegate instead of the window. Run them as the arrows those keys are bound to, in
+/// whichever list (folder or search results) has focus.
+pub fn install_quick_look_keys(window: &Window, cx: &mut App) {
+    let handle = window.window_handle();
+    let async_cx = cx.to_async();
+    crate::effects::effects(cx).set_quick_look_key_handler(Box::new(move |key| {
+        async_cx.update(|cx| {
+            let action: Box<dyn Action> = match key {
+                crow_macos::QuickLookKey::Up => Box::new(MoveUp),
+                crow_macos::QuickLookKey::Down => Box::new(MoveDown),
+                crow_macos::QuickLookKey::Left => Box::new(MoveLeft),
+                crow_macos::QuickLookKey::Right => Box::new(MoveRight),
+            };
+            let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+        });
+    }));
+}
+
 /// Vim: after `m` or `'`, the next letter names a mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarkPending {
@@ -2440,6 +2459,22 @@ impl Pane {
     }
 
     fn open_selected(&mut self, cx: &mut Context<Self>) {
+        // With several items selected, open them all, like Finder: files in their apps.
+        // Folders open only when they are all there is (the cursor's folder is entered).
+        let selected = self.selected_entries(cx);
+        if selected.len() > 1 && selected.iter().any(|(_, is_dir)| !is_dir) {
+            let packages: Vec<PathBuf> = selected
+                .iter()
+                .filter(|(path, is_dir)| {
+                    !is_dir || path.file_name().is_some_and(|name| crow_fs::is_package_name(&name.to_string_lossy()))
+                })
+                .map(|(path, _)| path.clone())
+                .collect();
+            for path in packages {
+                self.open_file(path, cx);
+            }
+            return;
+        }
         let Some(entry) = self.cursor_entry(cx) else { return };
         if entry.is_dir && !entry.is_package() {
             self.navigate(entry.path, cx);
@@ -2990,22 +3025,8 @@ impl Pane {
             return;
         }
         let Some(entry) = self.cursor_entry(cx) else { return };
-        // The panel is key while it is open, so the arrows come back through its
-        // delegate instead of the window. Run them as the arrows those keys are bound to.
         let effects = crate::effects::effects(cx);
-        let handle = window.window_handle();
-        let async_cx = cx.to_async();
-        effects.set_quick_look_key_handler(Box::new(move |key| {
-            async_cx.update(|cx| {
-                let action: Box<dyn Action> = match key {
-                    crow_macos::QuickLookKey::Up => Box::new(MoveUp),
-                    crow_macos::QuickLookKey::Down => Box::new(MoveDown),
-                    crow_macos::QuickLookKey::Left => Box::new(MoveLeft),
-                    crow_macos::QuickLookKey::Right => Box::new(MoveRight),
-                };
-                let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
-            });
-        }));
+        install_quick_look_keys(window, cx);
         effects.toggle_quick_look(&entry.path);
     }
 

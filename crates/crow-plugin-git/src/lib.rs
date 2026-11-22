@@ -937,8 +937,9 @@ pub fn discover(
     let mut report = DiscoveryReport::default();
     let mut stack = Vec::new();
     for root in roots {
-        let Ok(metadata) = std::fs::symlink_metadata(root) else { continue };
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        // A root may itself be a symlink to a folder (children that are links stay skipped).
+        let Ok(metadata) = std::fs::metadata(root) else { continue };
+        if metadata.is_dir() {
             stack.push((root.clone(), 0usize));
         }
     }

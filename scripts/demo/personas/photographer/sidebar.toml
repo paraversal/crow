@@ -1,38 +1,35 @@
 [[group]]
 name = "Favorites"
 items = [
-  { path = "@HOME@/Pictures/Shoots/2026", name = "Shoots 2026", icon = "📸", color = "orange" },
-  { path = "@HOME@/Portfolio", icon = "🖼️", color = "purple" },
-  { path = "@HOME@/Catalogs", icon = "🗂️", color = "yellow" },
-  { path = "@HOME@/Downloads", icon = "📥", color = "green" },
+  { path = "@HOME@/Pictures/Shoots/2026", name = "Shoots 2026", color = "orange" },
+  { path = "@HOME@/Portfolio", color = "purple" },
+  { path = "@HOME@/Catalogs", color = "yellow" },
+  { path = "@HOME@/Downloads", color = "green" },
 ]
 
 [[group]]
 name = "On the bench"
-icon = "🎞️"
 items = [
-  { path = "@HOME@/Pictures/Shoots/2026/2026-03 Lofoten", name = "Lofoten", icon = "🏔️", color = "cyan" },
-  { path = "@HOME@/Pictures/Shoots/2026/2026-05 Dolomites", name = "Dolomites", icon = "⛰️", color = "pink" },
-  { path = "@HOME@/Pictures/Shoots/2026/2026-10 Fog Valley", name = "Fog Valley", icon = "🌫️", color = "blue" },
-  { path = "@HOME@/Pictures/Shoots/2026/2026-07 Faroe Islands", name = "Faroe Islands", icon = "🐑", color = "green" },
+  { path = "@HOME@/Pictures/Shoots/2026/2026-03 Lofoten", name = "Lofoten", color = "cyan" },
+  { path = "@HOME@/Pictures/Shoots/2026/2026-05 Dolomites", name = "Dolomites", color = "pink" },
+  { path = "@HOME@/Pictures/Shoots/2026/2026-10 Fog Valley", name = "Fog Valley", color = "blue" },
+  { path = "@HOME@/Pictures/Shoots/2026/2026-07 Faroe Islands", name = "Faroe Islands", color = "green" },
 ]
 
 [[group]]
 name = "Clients"
-icon = "🤝"
 items = [
-  { path = "@HOME@/Clients/Anna and Tom", icon = "💍", color = "pink" },
-  { path = "@HOME@/Clients/Atelier Noor", icon = "🏺", color = "orange" },
-  { path = "@HOME@/Clients/Nordic Outdoors", icon = "🧭", color = "cyan" },
+  { path = "@HOME@/Clients/Anna and Tom", color = "pink" },
+  { path = "@HOME@/Clients/Atelier Noor", color = "orange" },
+  { path = "@HOME@/Clients/Nordic Outdoors", color = "cyan" },
 ]
 
 [[group]]
 name = "Locations"
-icon = "💾"
 items = [
-  { path = "@HOME@/Volumes/EOS R5 Card", icon = "🔴", color = "red" },
-  { path = "@HOME@/Volumes/Archive SSD", icon = "🗃️", color = "blue" },
-  { path = "@HOME@/Volumes/Backup RAID", icon = "🛡️", color = "green" },
+  { path = "@HOME@/Volumes/EOS R5 Card", color = "red" },
+  { path = "@HOME@/Volumes/Archive SSD", color = "blue" },
+  { path = "@HOME@/Volumes/Backup RAID", color = "green" },
 ]
 
 [recent]

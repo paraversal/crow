@@ -1,36 +1,33 @@
 [[group]]
 name = "Favorites"
 items = [
-  { path = "@HOME@/Manuscripts", icon = "📖", color = "orange" },
-  { path = "@HOME@/Journal", icon = "🪶", color = "yellow" },
-  { path = "@HOME@/Research", icon = "🔍", color = "cyan" },
-  { path = "@HOME@/Submissions", icon = "✉️", color = "purple" },
+  { path = "@HOME@/Manuscripts", color = "orange" },
+  { path = "@HOME@/Journal", color = "yellow" },
+  { path = "@HOME@/Research", color = "cyan" },
+  { path = "@HOME@/Submissions", color = "purple" },
 ]
 
 [[group]]
 name = "Now writing"
-icon = "✍️"
 items = [
-  { path = "@HOME@/Manuscripts/The Lantern Year/Chapters", name = "Chapters", icon = "🏮", color = "orange" },
-  { path = "@HOME@/Manuscripts/The Lantern Year/00 Notes", name = "Notes", icon = "📝", color = "yellow" },
-  { path = "@HOME@/Manuscripts/The Lantern Year/Drafts", name = "Drafts", icon = "🗒️", color = "blue" },
+  { path = "@HOME@/Manuscripts/The Lantern Year/Chapters", name = "Chapters", color = "orange" },
+  { path = "@HOME@/Manuscripts/The Lantern Year/00 Notes", name = "Notes", color = "yellow" },
+  { path = "@HOME@/Manuscripts/The Lantern Year/Drafts", name = "Drafts", color = "blue" },
 ]
 
 [[group]]
 name = "Reading"
-icon = "📚"
 items = [
-  { path = "@HOME@/Reading/Fiction", icon = "🌙", color = "purple" },
-  { path = "@HOME@/Reading/Craft", icon = "🛠️", color = "green" },
-  { path = "@HOME@/Reading/Poetry", icon = "🌿", color = "pink" },
+  { path = "@HOME@/Reading/Fiction", color = "purple" },
+  { path = "@HOME@/Reading/Craft", color = "green" },
+  { path = "@HOME@/Reading/Poetry", color = "pink" },
 ]
 
 [[group]]
 name = "Locations"
-icon = "💾"
 items = [
-  { path = "@HOME@/Volumes/Backup stick", icon = "🔌", color = "blue" },
-  { path = "@HOME@/Volumes/Typewriter archive", icon = "⌨️", color = "yellow" },
+  { path = "@HOME@/Volumes/Backup stick", color = "blue" },
+  { path = "@HOME@/Volumes/Typewriter archive", color = "yellow" },
 ]
 
 [recent]

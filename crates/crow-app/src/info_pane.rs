@@ -704,7 +704,15 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .border_color(crate::style::hairline(theme))
         .child(tab("info-tab-preview", "Preview", InfoTab::Preview))
         .child(tab("info-tab-info", "Info", InfoTab::Info))
-        .when(git, |tabs| tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff)));
+        .when(git, |tabs| tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff)))
+        .child(div().flex_1().min_w_0().flex().items_center().justify_end().child(crate::chrome::collapse_chevron(
+            "hide-right-sidebar",
+            "Hide Right Sidebar",
+            crate::icons::Glyph::CollapseRight,
+            &crate::actions::TogglePreview,
+            theme,
+            cx,
+        )));
     if let Some(((motion, t), tabs)) = underline.zip(tab_bounds) {
         let position = motion.position(t);
         let accent = color(theme.role("accent"));
