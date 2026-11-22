@@ -3818,6 +3818,47 @@ fn file_effects_are_recorded_not_run(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn open_with_several_files_selected_opens_them_all(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("effects-open-many");
+    std::fs::write(root.join("other.txt"), "x\n").unwrap();
+    std::fs::write(root.join("third.txt"), "x\n").unwrap();
+    let (_view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.simulate_keystrokes("shift-down shift-down");
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-down");
+    let opened: Vec<_> = effect_calls(&mut cx)
+        .into_iter()
+        .filter_map(|call| if let Call::OpenPath(path) = call { Some(path) } else { None })
+        .collect();
+    assert_eq!(opened, [root.join("notes.txt"), root.join("other.txt"), root.join("third.txt")]);
+}
+
+#[gpui::test]
+fn search_results_drive_an_open_quick_look_panel(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("search-quick-look");
+    std::fs::write(root.join("note-a.txt"), "x\n").unwrap();
+    std::fs::write(root.join("note-b.txt"), "x\n").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("note");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("space");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::SetQuickLookKeyHandler), "the panel's arrows come back: {calls:?}");
+    assert!(calls.iter().any(|call| matches!(call, Call::ToggleQuickLook(_))), "{calls:?}");
+    cx.simulate_keystrokes("down");
+    let calls = effect_calls(&mut cx);
+    assert!(
+        calls.iter().any(|call| matches!(call, Call::UpdateQuickLook(_))),
+        "↓ in the results updates it: {calls:?}"
+    );
+}
+
+#[gpui::test]
 fn copy_records_the_pasteboard_write(cx: &mut TestAppContext) {
     use crate::effects::Call;
     let root = fixture("effects-copy");
@@ -17446,7 +17487,7 @@ fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestApp
     let (view, mut cx) = open(cx, &root);
     cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
     let config = format!(
-        "{}\n[projects]\nroots = [\"{}\"]\n",
+        "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
         root.display()
     );
@@ -17488,7 +17529,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
 
     // Adding the current folder through the action makes a Projects root.
     cx.simulate_keystrokes("cmd-k");
-    cx.simulate_input(">add folder as project root");
+    cx.simulate_input(">set current folder as projects root");
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
     let roots = cx.read(|cx| {
@@ -17499,7 +17540,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
 
     // The row menu matches rows to roots by path, so spell the root the way the rows are.
     let config = format!(
-        "{}\n[projects]\nroots = [\"{}\"]\n",
+        "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
         repo.parent().unwrap().display()
     );
@@ -17532,7 +17573,7 @@ fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &m
         let ui = cx.global::<Ui>();
         ui.sidebar.project_roots(&ui.home)
     });
-    assert!(roots.is_empty(), "Remove Project Root on a project row removes the root that holds it: {roots:?}");
+    assert!(roots.is_empty(), "Clear Projects Root on a project row clears the root: {roots:?}");
 }
 
 #[gpui::test]

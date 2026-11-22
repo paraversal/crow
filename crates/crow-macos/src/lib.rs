@@ -63,7 +63,7 @@ fn ns_url(path: &Path) -> Retained<NSURL> {
 const ICON_ARTWORK: f64 = 824. / 1024.;
 
 /// Whether an icon needs the Dock margin added, from the alpha at the middle of its four
-/// edges: any visible pixel there means the artwork reaches the edge.
+/// edges (sampled 2% inside): any visible pixel there means the artwork reaches the edge.
 fn icon_needs_margin(edge_alphas: [f64; 4]) -> bool {
     edge_alphas.iter().any(|alpha| *alpha > 0.1)
 }
@@ -95,7 +95,10 @@ fn with_dock_margin(data: &objc2_foundation::NSData, image: Retained<NSImage>) -
         return image;
     }
     let alpha = |x: isize, y: isize| rep.colorAtX_y(x, y).map_or(0., |c| c.alphaComponent());
-    if !icon_needs_margin([alpha(w / 2, 0), alpha(w / 2, h - 1), alpha(0, h / 2), alpha(w - 1, h / 2)]) {
+    // Sampled a little inside the edge: a rounded, anti-aliased icon is nearly transparent
+    // exactly at the edge yet still fills the canvas.
+    let (dx, dy) = ((w / 50).max(1), (h / 50).max(1));
+    if !icon_needs_margin([alpha(w / 2, dy), alpha(w / 2, h - 1 - dy), alpha(dx, h / 2), alpha(w - 1 - dx, h / 2)]) {
         return image;
     }
     let side = 1024.;

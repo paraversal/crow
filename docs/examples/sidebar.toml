@@ -1,0 +1,100 @@
+# An example ~/.config/crow/sidebar.toml with every option switched on and explained.
+# Copy what you want into your own file; Crow reloads it as you save. Crow also edits
+# your file when you drag favorites around, collapse a group or add a folder to the
+# sidebar, and it keeps your comments and everything else you wrote.
+#
+# Nothing here is needed: with no file Crow writes the default one on first launch.
+
+# (A top-level key, so it sits above every [table].)
+# Finder tags to list even when no file uses them. Crow finds the tags in use through
+# Spotlight; Finder's own list of unused tags is private. Case-sensitive.
+pinned_tags = ["Work", "Review"]
+
+# ───────────────────────────── Favorites ─────────────────────────────
+# Each [[group]] is a titled list of folders. Make as many as you like; they show in
+# this order, above the built-in sections.
+
+[[group]]
+name = "Favorites"        # the group's heading
+# collapsed = true        # hide the items under the heading (Crow writes this when you
+#                         # click the heading's chevron)
+# icon = "⭐"             # a short text or emoji shown before the heading; none by default
+items = [
+  # path   the folder. "~" is your home folder.
+  { path = "~" },
+
+  # name   the label, if you don't want the folder's own name (Finder's localized one)
+  { path = "~/Documents/Work", name = "Work" },
+
+  # icon   a short text or emoji shown instead of the folder icon
+  { path = "~/Desktop", icon = "🖥️" },
+
+  # color  a theme role ("accent", "error", "success"…),
+  #        a color name (red, orange, yellow, green, cyan, blue, purple, pink) or "#rrggbb"
+  { path = "~/Downloads", color = "green" },
+  { path = "~/Pictures", color = "#c678dd" },
+
+  # key    one letter for the Vim layer: 'c jumps to the favorite with key "c"
+  #        (`m c` on any folder sets it)
+  { path = "~/code", key = "c" },
+
+  # They combine. Only `path` is required.
+  { path = "/Applications", name = "Apps", icon = "🚀", color = "orange", key = "a" },
+]
+
+# A second group, collapsed until you open it.
+[[group]]
+name = "Archive"
+collapsed = true
+icon = "🗄️"
+items = [
+  { path = "~/Documents/Old" },
+  { path = "/Volumes/Backup/Photos", name = "Photo backup" },
+]
+
+# ──────────────────────── Built-in sections ──────────────────────────
+
+[recent]
+show = true               # the Recent section: folders you used lately
+count = 8                 # how many to list (default 6). Crow also reads zoxide's
+#                           # ranking when zoxide is installed.
+
+[locations]
+show = true               # Locations: your disk and other volumes, with free space and eject
+
+# The Shelf: a strip at the bottom of the sidebar that holds files while you move
+# between folders. Drag files onto it, or use Add to Shelf, then Move Shelf Here or Copy
+# Shelf Here. It holds references, not copies, and is remembered between launches.
+[shelf]
+show = true               # off by default
+
+# ───────────────────────────── Projects ──────────────────────────────
+# One folder whose Git repositories are listed under one heading, each by its folder
+# name, with the branch and a count of changed files. Only the folders directly inside
+# `root` count, and only repositories. For an arbitrary set of folders, use a [[group]]
+# above instead. Needs the bundled Git plugin (Settings ▸ Plugins). A symlinked root
+# works. File ▸ Set Folder as Projects Root fills in `root` for the folder you are in.
+[projects]
+root = "~/code"
+name = "Code"             # the heading's title (default "Projects")
+show_root = true          # show the root's path after the title: "Code · ~/code"
+
+# ──────────────────────── Order and visibility ───────────────────────
+# `order` lists section ids top to bottom. Built-ins: "tags", "saved-queries", "recent",
+# "locations", and "crow.projects". A plugin's section uses its package id plus the
+# section's id, such as "example.fixture.folders". Sections you leave out follow in
+# the usual order. Favorites groups always come first.
+[sections]
+order = ["recent", "crow.projects", "tags", "saved-queries", "locations"]
+
+# Per-section options, by the same ids: show (false hides it), collapsed (start closed)
+# and icon (a short text or emoji before the heading).
+[section."tags"]
+show = false
+
+[section."recent"]
+collapsed = false
+icon = "🕘"
+
+[section."crow.projects"]
+icon = "🛠️"

@@ -842,7 +842,7 @@ impl Sidebar {
         if !roots.is_empty() && config.section_shown(crate::git::PROJECTS_SECTION) && crate::git::provider_enabled(cx) {
             sections.push(Section {
                 id: crate::git::PROJECTS_SECTION.into(),
-                title: "Projects".into(),
+                title: config.projects_title(&home),
                 collapsed: config.section_collapsed(crate::git::PROJECTS_SECTION),
                 rows: crate::git::projects_rows(cx, roots, &home),
             });
@@ -1279,6 +1279,8 @@ impl Sidebar {
             let right = match row {
                 Row::Volume(v) if v.total_bytes > 0 => Some(format!("{} free", short_bytes(v.free_bytes))),
                 Row::Favorite(_, f) => f.key.filter(|_| vim).map(|key| key.to_string()),
+                // Projects rows put the branch after the name, like pinned repositories.
+                Row::PluginItem { section, .. } if section == crate::git::PROJECTS_SECTION => None,
                 Row::PluginItem { row, .. } => row.meta.clone(),
                 _ => None,
             };
@@ -1313,6 +1315,12 @@ impl Sidebar {
                     };
                     (None, spoken)
                 }
+            };
+            let hint = match row {
+                Row::PluginItem { section, row } if hint.is_none() && section == crate::git::PROJECTS_SECTION => {
+                    row.meta.clone()
+                }
+                _ => hint,
             };
             let badge = match row {
                 Row::PluginItem { row, .. } => row.badge.clone(),
@@ -1886,14 +1894,11 @@ impl Sidebar {
         }
     }
 
-    /// The configured Projects root that holds `path`: the deepest one when roots nest.
-    fn project_root_of(&self, path: &Path, cx: &gpui::App) -> Option<PathBuf> {
+    /// The configured Projects root. Project rows are canonical paths, so a root that is a
+    /// symlink is not compared by prefix: every Projects row belongs to the one root.
+    fn project_root_of(&self, _path: &Path, cx: &gpui::App) -> Option<PathBuf> {
         let ui = cx.global::<Ui>();
-        ui.sidebar
-            .project_roots(&ui.home)
-            .into_iter()
-            .filter(|root| path.starts_with(root))
-            .max_by_key(|root| root.as_os_str().len())
+        ui.sidebar.project_root(&ui.home)
     }
 
     #[cfg(test)]
@@ -2040,6 +2045,14 @@ impl Render for Sidebar {
             .collect();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let subtle = theme.role("fg-subtle");
+        // A repository's changed-file count says "needs attention": warning for
+        // uncommitted changes, error for conflicts; zero and unknown stay muted.
+        let (warning, error) = (theme.role("warning"), theme.role("error"));
+        let count_tone = move |text: &str| match text {
+            _ if text.starts_with("U ") => error,
+            _ if text.parse::<u32>().is_ok_and(|n| n > 0) => warning,
+            _ => muted,
+        };
 
         // A drag's target comes from the pointer and the last layout, so the
         // highlight only changes when the pointer enters a different row.
@@ -2659,8 +2672,10 @@ impl Render for Sidebar {
                         .id(("git-pin", i))
                         .flex_none()
                         .ml(px(6.))
+                        .min_w(px(24.))
+                        .text_right()
                         .text_size(px(11.))
-                        .text_color(color(muted))
+                        .text_color(color(count_tone(&pin.badge)))
                         .role(Role::Button)
                         .aria_label(format!("Review Git changes for {}", look.label))
                         .on_click({
@@ -2684,8 +2699,15 @@ impl Render for Sidebar {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
+                        .text_right()
                         .text_size(px(11.))
-                        .text_color(color(muted))
+                        .text_color(color(
+                            if matches!(&row, Row::PluginItem { section, .. } if section == crate::git::PROJECTS_SECTION) {
+                                count_tone(badge)
+                            } else {
+                                muted
+                            },
+                        ))
                         .child(badge.clone()),
                 );
             }

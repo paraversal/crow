@@ -52,4 +52,5 @@ show = false
 order = []
 
 [projects]
-roots = ["@HOME@/Projects/work", "@HOME@/Projects/toys"]
+root = "@HOME@/Projects/work"
+name = "Work"

@@ -63,10 +63,15 @@ show = true
 [shelf]
 show = false
 
-# Project roots. Crow scans these folders for Git repositories; empty by default.
-# The native section is "crow.projects" in [sections]/[section] like any other.
+# Projects: one folder whose Git repositories (its direct subfolders) are listed under
+# one heading, each by its own folder name. Use a [[group]] of your own instead if you
+# only want some folders. Off until `root` is set (File ▸ Add Folder as Project Root
+# sets it to the folder you are in). The native section is "crow.projects" in
+# [sections]/[section] like any other.
 [projects]
-roots = []
+# root = "~/Projects"
+# name = "Projects"    # the heading's title
+# show_root = true     # false hides the root's path after the title
 "##;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -138,8 +143,12 @@ pub struct SectionsConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct ProjectsConfig {
-    /// Folders to scan for Git repositories. Empty by default.
-    pub roots: Vec<String>,
+    /// The folder whose Git repositories the Projects section lists. Unset by default.
+    pub root: Option<String>,
+    /// The section heading's title; "Projects" when unset.
+    pub name: Option<String>,
+    /// Show the root's path beside the title. On by default.
+    pub show_root: Option<bool>,
 }
 
 /// The shelf at the bottom of the sidebar: files set aside to carry to another folder.
@@ -288,19 +297,27 @@ impl SidebarConfig {
         self.section(id).collapsed.unwrap_or(false)
     }
 
-    /// Configured project roots with `~` expanded, duplicates removed in order.
+    /// The configured Projects root with `~` expanded; none when unset or blank.
+    pub fn project_root(&self, home: &Path) -> Option<PathBuf> {
+        let root = self.projects.root.as_deref().filter(|root| !root.trim().is_empty())?;
+        Some(expand_home(root, home))
+    }
+
+    /// The Projects root as a list: empty or one folder.
     pub fn project_roots(&self, home: &Path) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = Vec::new();
-        for root in &self.projects.roots {
-            if root.trim().is_empty() {
-                continue;
+        self.project_root(home).into_iter().collect()
+    }
+
+    /// The Projects heading: the configured name (default "Projects"), then the root's
+    /// path unless `show_root = false`.
+    pub fn projects_title(&self, home: &Path) -> String {
+        let name = self.projects.name.as_deref().map(str::trim).filter(|name| !name.is_empty()).unwrap_or("Projects");
+        match self.project_root(home) {
+            Some(root) if self.projects.show_root.unwrap_or(true) => {
+                format!("{name} · {}", abbreviate_home(&root, home))
             }
-            let path = expand_home(root, home);
-            if !out.contains(&path) {
-                out.push(path);
-            }
+            _ => name.to_owned(),
         }
-        out
     }
 
     /// Each group's favorites with `~` expanded.
@@ -459,9 +476,9 @@ pub enum SidebarEdit {
         group: usize,
         collapsed: bool,
     },
-    /// Add one Projects discovery root, keeping comments and the rest of the file.
+    /// Make this folder the Projects root, replacing any other; keeps comments and the rest of the file.
     AddProjectRoot(PathBuf),
-    /// Remove one exact Projects discovery root, keeping comments.
+    /// Unset the Projects root if it is exactly this folder, keeping comments.
     RemoveProjectRoot(PathBuf),
 }
 
@@ -477,17 +494,11 @@ fn groups(doc: &mut DocumentMut) -> Result<&mut toml_edit::ArrayOfTables, String
     doc.get_mut("group").and_then(Item::as_array_of_tables_mut).ok_or_else(|| "`group` must be [[group]] tables".into())
 }
 
-fn project_roots_array(doc: &mut DocumentMut) -> Result<&mut Array, String> {
-    let projects = doc
-        .entry("projects")
+fn projects_table(doc: &mut DocumentMut) -> Result<&mut toml_edit::Table, String> {
+    doc.entry("projects")
         .or_insert_with(|| Item::Table(toml_edit::Table::new()))
         .as_table_mut()
-        .ok_or_else(|| "`projects` must be a table".to_owned())?;
-    projects
-        .entry("roots")
-        .or_insert_with(|| toml_edit::value(Array::new()))
-        .as_array_mut()
-        .ok_or_else(|| "`projects.roots` must be an array".to_owned())
+        .ok_or_else(|| "`projects` must be a table".to_owned())
 }
 
 fn items(doc: &mut DocumentMut, group: usize) -> Result<&mut Array, String> {
@@ -519,19 +530,14 @@ fn item_path(v: &Value) -> Option<&str> {
 fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), String> {
     match edit {
         SidebarEdit::AddProjectRoot(path) => {
-            project_roots_array(doc)?.push(abbreviate_home(path, home));
+            crate::config::set_value(projects_table(doc)?, "root", abbreviate_home(path, home).into());
         }
         SidebarEdit::RemoveProjectRoot(path) => {
-            let roots = project_roots_array(doc)?;
-            let mut index = 0;
-            while index < roots.len() {
-                let matches =
-                    roots.get(index).and_then(Value::as_str).is_some_and(|spelled| expand_home(spelled, home) == *path);
-                if matches {
-                    roots.remove(index);
-                } else {
-                    index += 1;
-                }
+            let table = projects_table(doc)?;
+            let matches =
+                table.get("root").and_then(Item::as_str).is_some_and(|spelled| expand_home(spelled, home) == *path);
+            if matches {
+                table.remove("root");
             }
         }
         SidebarEdit::SetGroupCollapsed { group, collapsed } => {
@@ -930,35 +936,42 @@ mod project_tests {
     use super::*;
 
     #[test]
-    fn project_roots_parse_expand_and_edit_without_losing_comments() {
+    fn the_projects_root_parses_expands_titles_and_edits_without_losing_comments() {
         let text = r#"# keep me
 [[group]]
 name = "Favorites"
 items = [{ path = "~" }]
 
 [projects]
-roots = ["~/code", "~/work"]
+root = "~/code"
+name = "Work"
 "#;
+        let home = Path::new("/Users/me");
         let config = SidebarConfig::parse(text).unwrap();
-        assert_eq!(
-            config.project_roots(Path::new("/Users/me")),
-            vec![PathBuf::from("/Users/me/code"), PathBuf::from("/Users/me/work")]
-        );
+        assert_eq!(config.project_roots(home), vec![PathBuf::from("/Users/me/code")]);
+        assert_eq!(config.projects_title(home), "Work · ~/code");
+        let hidden = SidebarConfig::parse(&text.replace("name = \"Work\"", "show_root = false")).unwrap();
+        assert_eq!(hidden.projects_title(home), "Projects");
+        assert_eq!(SidebarConfig::default().projects_title(home), "Projects");
+        assert!(SidebarConfig::default().project_roots(home).is_empty());
 
         let mut doc = text.parse::<DocumentMut>().unwrap();
-        apply(&mut doc, &SidebarEdit::AddProjectRoot(PathBuf::from("/Volumes/Work/src")), Path::new("/Users/me"))
-            .unwrap();
-        apply(&mut doc, &SidebarEdit::RemoveProjectRoot(PathBuf::from("/Users/me/work")), Path::new("/Users/me"))
-            .unwrap();
+        apply(&mut doc, &SidebarEdit::AddProjectRoot(PathBuf::from("/Volumes/Work/src")), home).unwrap();
         let out = doc.to_string();
-        assert!(out.contains("# keep me"));
-        assert!(out.contains("/Volumes/Work/src"));
-        assert!(!out.contains("~/work"));
-        let reparsed = SidebarConfig::parse(&out).unwrap();
-        assert_eq!(
-            reparsed.project_roots(Path::new("/Users/me")),
-            vec![PathBuf::from("/Users/me/code"), PathBuf::from("/Volumes/Work/src")]
-        );
+        assert!(out.contains("# keep me") && out.contains("name = \"Work\""));
+        assert_eq!(SidebarConfig::parse(&out).unwrap().project_roots(home), vec![PathBuf::from("/Volumes/Work/src")]);
+        apply(&mut doc, &SidebarEdit::RemoveProjectRoot(PathBuf::from("/Users/me/elsewhere")), home).unwrap();
+        assert!(doc.to_string().contains("/Volumes/Work/src"), "only the exact root is removed");
+        apply(&mut doc, &SidebarEdit::RemoveProjectRoot(PathBuf::from("/Volumes/Work/src")), home).unwrap();
+        assert!(SidebarConfig::parse(&doc.to_string()).unwrap().project_roots(home).is_empty());
+    }
+
+    #[test]
+    fn the_documented_example_parses() {
+        let config = SidebarConfig::parse(include_str!("../../../docs/examples/sidebar.toml")).unwrap();
+        assert_eq!(config.group.len(), 2);
+        assert_eq!(config.projects_title(Path::new("/Users/me")), "Code · ~/code");
+        assert!(config.shelf.show && !config.section_shown("tags"));
     }
 
     #[test]

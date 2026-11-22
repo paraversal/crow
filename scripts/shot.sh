@@ -27,6 +27,7 @@
 # sidebar groups, settings and the Lucide icon pack instead of the generic demo setup.
 # CROW_SHOT_SIDEBAR_STYLE overrides the persona's sidebar_style.
 # CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
+# CROW_SHOT_VIEWS adds lines to views.toml's [defaults] (e.g. 'columns = ["modified", "git.lines-changed"]').
 # CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
 # CROW_SHOT_OTHER_WINDOW=1 captures the window the keys opened (Settings) instead of
 # the browser window.
@@ -37,7 +38,9 @@
 # CROW_SHOT_ARGS adds arguments before the folder, e.g. --bench (Crow's own 100k
 # scroll, which quits after 600 frames: keep the recording shorter than that).
 # Without [keys] the script waits for Return: set up the state by hand, then
-# press Return and it captures. Driving keys needs Accessibility permission for
+# press Return and it captures. Crow is brought to the front once before the keys; before
+# every key the script checks it is still frontmost and exits if not (tab out to cancel).
+# Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
 # privacy settings.
 set -euo pipefail
@@ -85,6 +88,7 @@ EOF
 cat >"$work/config/views.toml" <<EOF
 [defaults]
 view = "${CROW_SHOT_VIEW:-columns}"
+${CROW_SHOT_VIEWS:-}
 EOF
 # Favorites inside the repo, so no private folder names reach a shot.
 # CROW_SHOT_ROOT points them at a copy of the repo (a neutral path, used when the
@@ -124,7 +128,7 @@ show = false
 order = [\"recent\", \"crow.projects\", \"locations\"]
 
 [projects]
-roots = [\"$shot_home/Projects\"]"
+root = \"$shot_home/Projects\""
 else
   shot_home=$HOME
   fav_items="  { path = \"$favs\" },
@@ -180,21 +184,45 @@ RUST_LOG=${RUST_LOG:-warn} HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 
+# The swift helpers run as compiled binaries (cached in target/shots/bin): the interpreter's
+# start-up cost about a second each, per shot.
+tool() {
+  local bin="$root/target/shots/bin/$1"
+  if [ ! -x "$bin" ] || [ "$root/scripts/$1.swift" -nt "$bin" ]; then
+    mkdir -p "$root/target/shots/bin"
+    swiftc -O -o "$bin" "$root/scripts/$1.swift" 2>/dev/null || return 1
+  fi
+  printf '%s' "$bin"
+}
+window_id=$(tool window-id) || window_id=""
+lights_active=$(tool lights-active) || lights_active=""
+run_tool() { # <binary or empty> <script name> args...: the compiled helper, else the interpreter
+  local bin=$1 name=$2
+  shift 2
+  if [ -n "$bin" ]; then "$bin" "$@"; else swift "$root/scripts/$name.swift" "$@"; fi
+}
+
 window=""
-for _ in $(seq 1 60); do
+for _ in $(seq 1 150); do
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "shot.sh: Crow exited; log:" >&2
     cat "$work/log" >&2
     exit 1
   fi
-  window=$(swift "$root/scripts/window-id.swift" "$pid" 2>/dev/null || true)
+  window=$(run_tool "$window_id" window-id "$pid" 2>/dev/null || true)
   [ -n "$window" ] && break
-  sleep 0.5
+  sleep 0.2
 done
 if [ -z "$window" ]; then
   echo "shot.sh: no window for pid $pid after 30 s" >&2
   exit 1
 fi
+# A window caught while it is still opening is smaller; give it a moment to reach its size.
+for _ in $(seq 1 25); do
+  [ "${window##* }" = "1280x800" ] && break
+  sleep 0.2
+  window=$(run_tool "$window_id" window-id "$pid" 2>/dev/null || echo "$window")
+done
 id=${window%% *}
 size=${window##* }
 if [ "$size" != "1280x800" ]; then
@@ -203,7 +231,25 @@ fi
 
 echo "Crow pid $pid, window $id ($size), theme $theme, keymap $keymap"
 
+# Bring Crow forward once before the keys, then check before every input that it still is.
+# Tabbing out to another app cancels the run: the keys must never land in something else.
+bring_to_front() {
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+}
+frontmost_pid() {
+  osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true' 2>/dev/null || true
+}
+
 press() {
+  case $1 in
+    wait:*) ;;
+    *)
+      if [ "$(frontmost_pid)" != "$pid" ]; then
+        echo "shot.sh: Crow is no longer the frontmost app; stopping before '$1'" >&2
+        exit 1
+      fi
+      ;;
+  esac
   case $1 in
     text:*) osascript -e "tell application \"System Events\" to keystroke \"${1#text:}\"" ;;
     key:* | shift:* | hold:*)
@@ -269,14 +315,17 @@ if [ -n "${CROW_SHOT_RECORD:-}" ]; then
   done
 fi
 
+# Stills need less settling than a recording, whose clips are paced by these gaps.
+if [ -n "$recorder" ]; then lead=0.8 gap=0.35 tail=0.8; else lead=0.3 gap=0.12 tail=0.4; fi
 if [ -n "$keys" ]; then
-  sleep 0.8
+  bring_to_front
+  sleep "$lead"
   IFS='|' read -ra steps <<<"$keys"
   for step in "${steps[@]}"; do
     press "$step"
-    sleep 0.35
+    sleep "$gap"
   done
-  sleep 0.8
+  sleep "$tail"
 elif [ -n "$recorder" ]; then
   sleep "${CROW_SHOT_RECORD_SECONDS:-3}"
 else
@@ -286,7 +335,7 @@ else
 fi
 
 if [ -n "${CROW_SHOT_OTHER_WINDOW:-}" ]; then
-  other=$(swift "$root/scripts/window-id.swift" "$pid" "$id" 2>/dev/null || true)
+  other=$(run_tool "$window_id" window-id "$pid" "$id" 2>/dev/null || true)
   if [ -z "$other" ]; then
     echo "shot.sh: the keys opened no other window" >&2
     exit 1
@@ -307,12 +356,12 @@ out="$root/target/shots/$state-$theme.png"
 captured=""
 for attempt in 1 2 3 4; do
   osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
-  sleep 0.8
+  sleep 0.3
   if ! screencapture -x -o -l "$id" "$out" 2>/dev/null; then
     echo "shot.sh: screencapture failed (attempt $attempt); retrying" >&2
     continue
   fi
-  if swift "$root/scripts/lights-active.swift" "$out" 2>/dev/null; then captured=yes; break; fi
+  if run_tool "$lights_active" lights-active "$out" 2>/dev/null; then captured=yes; break; fi
   echo "shot.sh: the window was not active (attempt $attempt); retrying" >&2
 done
 if [ -z "$captured" ]; then

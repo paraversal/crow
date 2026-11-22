@@ -38,7 +38,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 
 ## Git and Projects
 - A bundled, read-only plugin (approve it once): badges on changed files and folders, ignored files dimmed, branch and ahead/behind in the status bar, Lines changed column, a Git Diff tab, and Review Git Changes across pinned repositories.
-- A Projects section lists repositories under the roots you choose.
+- A Projects section lists the Git repositories directly inside one folder (`[projects] root`), by folder name, with the branch and a changed count. The heading takes a `name` and can show or hide the root. It is not a general folder list: use a custom favorites group for just the folders you want.
 
 ## Make it yours
 - Ten built-in themes: Finder Light and Dark, Catppuccin Latte and Mocha, Gruvbox Light and Dark, Solarized Light and Dark, Rosé Pine and Rosé Pine Dawn; "System" follows macOS. Any Base24 theme in `~/.config/themes` is listed too, and Apply to All Apps sets it for every program reading that index.

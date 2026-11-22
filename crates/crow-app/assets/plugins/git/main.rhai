@@ -3,8 +3,8 @@
 
 fn register() {
     [
-        #{ kind: "column", id: "lines-changed", title: "Lines", width: 64,
-           min_width: 48, align: "right", function: "lines_changed" },
+        #{ kind: "column", id: "lines-changed", title: "Changed", width: 76,
+           min_width: 60, align: "right", function: "lines_changed" },
         #{ kind: "decoration", id: "status", title: "Git status",
            function: "decoration" },
         #{ kind: "status", id: "repository", title: "Git",

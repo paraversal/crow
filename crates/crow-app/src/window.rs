@@ -806,7 +806,7 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// File ▸ Add Folder as Project Root: the folder shown becomes a Projects root.
+    /// File ▸ Set Folder as Projects Root: the folder shown becomes the Projects root.
     fn add_project_root(&mut self, _: &crate::actions::AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
         crate::ui::edit_sidebar(crow_core::SidebarEdit::AddProjectRoot(dir), cx);
@@ -835,6 +835,8 @@ impl CrowWindow {
             });
             self.begin_pane_slide(was_visible, cx);
             cx.notify();
+        } else {
+            crate::operations::message("Git Diff needs the Git plugin: approve it in Settings ▸ Plugins", false, cx);
         }
     }
 

@@ -59,7 +59,7 @@ const RENAME_PIN: Duration = Duration::from_secs(10);
 /// When these fill, contents stop being read; names keep streaming.
 pub(crate) const MAX_OTHER_ROWS: usize = 20_000;
 /// The results' side padding and the gap between their cells, in points.
-const RESULT_INSET: f32 = 8.0;
+const RESULT_INSET: f32 = 12.0;
 const RESULT_GAP: f32 = 8.0;
 
 /// The last widths a search's columns were dragged to, so the next search in this
@@ -78,7 +78,7 @@ fn default_search_table() -> TableLayout {
         ColumnWidth { id: "modified".into(), width: 110.0, min_width: 70.0 },
     ])
 }
-const ROW_HEIGHT: f32 = 40.0;
+const ROW_HEIGHT: f32 = 46.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -2276,6 +2276,7 @@ impl SearchView {
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         self.load_preview(cx);
+        self.follow_quick_look(cx);
         cx.notify();
     }
 
@@ -2491,9 +2492,17 @@ impl SearchView {
         }
     }
 
-    fn quick_look_selected(&mut self, cx: &App) {
+    fn quick_look_selected(&mut self, window: &Window, cx: &mut App) {
         if let Some(row) = self.results.get(self.cursor) {
+            crate::pane::install_quick_look_keys(window, cx);
             crate::effects::effects(cx).toggle_quick_look(&row.path);
+        }
+    }
+
+    /// An open Quick Look panel follows the cursor row, as it does in a folder.
+    fn follow_quick_look(&self, cx: &App) {
+        if let Some(row) = self.results.get(self.cursor) {
+            crate::effects::effects(cx).update_quick_look(&row.path);
         }
     }
 
@@ -2618,6 +2627,7 @@ impl SearchView {
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(target, ScrollStrategy::Top);
         self.load_preview(cx);
+        self.follow_quick_look(cx);
         cx.notify();
     }
 
@@ -2637,6 +2647,7 @@ impl SearchView {
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(target, ScrollStrategy::Top);
         self.load_preview(cx);
+        self.follow_quick_look(cx);
         cx.notify();
     }
 
@@ -2685,8 +2696,8 @@ impl SearchView {
         self.reveal_selected(cx);
     }
 
-    fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
-        self.quick_look_selected(cx);
+    fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick_look_selected(window, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -2737,7 +2748,7 @@ impl SearchView {
             CommandId::Open => self.open_selected(cx),
             CommandId::Rename => self.rename(&Rename, window, cx),
             CommandId::SearchReveal => self.reveal_selected(cx),
-            CommandId::QuickLook => self.quick_look_selected(cx),
+            CommandId::QuickLook => self.quick_look_selected(window, cx),
             CommandId::Copy => self.copy_selected(false, cx),
             CommandId::Cut => self.copy_selected(true, cx),
             CommandId::CopyPath => self.copy_path(&CopyPath, window, cx),

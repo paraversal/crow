@@ -402,18 +402,18 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         id: CommandId::AddProjectRoot,
-        label: "Add Current Folder as Project Root",
+        label: "Set Current Folder as Projects Root",
         action: &crate::actions::AddProjectRoot,
         scope: KeyScope::Window,
-        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Add Folder as Project Root" }),
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Set Folder as Projects Root" }),
         palette: true,
     },
     Command {
         id: CommandId::RemoveProjectRoot,
-        label: "Remove Current Folder from Project Roots",
+        label: "Clear Projects Root",
         action: &crate::actions::RemoveProjectRoot,
         scope: KeyScope::Window,
-        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Remove Folder from Project Roots" }),
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Clear Projects Root" }),
         palette: true,
     },
     Command {

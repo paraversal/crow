@@ -288,7 +288,8 @@ without restarting Crow.
 ```toml
 # sidebar.toml
 [projects]
-roots = ["~/code", "~/work"]
+root = "~/code"
+name = "Code"        # heading title; show_root = false hides the path after it
 
 [sections]
 order = ["recent", "crow.projects", "locations"]

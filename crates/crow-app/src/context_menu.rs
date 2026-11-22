@@ -178,7 +178,7 @@ const SIDEBAR_PROJECT: &[TitledSlot] = &[
     Some((CommandId::NewTab, Some("Open in New Tab"))),
     None,
     Some((CommandId::RefreshProjects, None)),
-    Some((CommandId::RemoveProjectRoot, Some("Remove Project Root"))),
+    Some((CommandId::RemoveProjectRoot, Some("Clear Projects Root"))),
 ];
 
 pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [TitledSlot] {

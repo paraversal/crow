@@ -152,7 +152,7 @@ How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns a
 #                                 newest and largest first otherwise)
 #   folders_first = true | false
 #   columns = ["modified", "size", "kind", "added"]   list view columns after Name
-#     Include "git.lines-changed" for Lines when the bundled Git plugin is enabled.
+#     Include "git.lines-changed" for the Changed column (lines changed) when the bundled Git plugin is enabled.
 #   preview_providers = ["example.pack.preview"]       plugin previews tried before native
 #   icon_source = "native" | "<pack-id>"               icons for this folder; unset
 #                                                      follows settings.toml
@@ -178,7 +178,9 @@ columns = ["modified", "size", "kind"]
 
 ## sidebar.toml
 
-Groups of favorites (a group takes an optional `icon`, a short text or emoji; favorites take `name`, `icon`, `color` and a Vim mark `key`), whether Recent and Locations show, `pinned_tags`, the order, visibility and collapse state of built-in and plugin sections, `[projects] roots` for the Projects section, and `[shelf] show = true` for the opt-in Shelf: drag files onto it, carry them to another folder, then Move Shelf Here or Copy Shelf Here (palette and File menu). The Shelf holds references and is saved in the state folder.
+[docs/examples/sidebar.toml](examples/sidebar.toml) is a complete, commented example with every option switched on: copy what you want from it.
+
+Groups of favorites (a group takes an optional `icon`, a short text or emoji; favorites take `name`, `icon`, `color` and a Vim mark `key`), whether Recent and Locations show, `pinned_tags`, the order, visibility and collapse state of built-in and plugin sections, `[projects]` (`root`, `name`, `show_root`) for the Projects section: it lists the Git repositories directly inside the root folder (a symlinked root works), under one heading; use a custom group if you only want some folders, and `[shelf] show = true` for the opt-in Shelf: drag files onto it, carry them to another folder, then Move Shelf Here or Copy Shelf Here (palette and File menu). The Shelf holds references and is saved in the state folder.
 
 <!-- defaults:sidebar.toml -->
 ```toml
@@ -236,10 +238,15 @@ show = true
 [shelf]
 show = false
 
-# Project roots. Crow scans these folders for Git repositories; empty by default.
-# The native section is "crow.projects" in [sections]/[section] like any other.
+# Projects: one folder whose Git repositories (its direct subfolders) are listed under
+# one heading, each by its own folder name. Use a [[group]] of your own instead if you
+# only want some folders. Off until `root` is set (File ▸ Add Folder as Project Root
+# sets it to the folder you are in). The native section is "crow.projects" in
+# [sections]/[section] like any other.
 [projects]
-roots = []
+# root = "~/Projects"
+# name = "Projects"    # the heading's title
+# show_root = true     # false hides the root's path after the title
 ```
 <!-- /defaults -->
 
