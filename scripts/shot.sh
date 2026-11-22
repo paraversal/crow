@@ -12,7 +12,8 @@
 # [keys] drives the state from the command line, `|`-separated, each step one of:
 #   text:vi          type the text
 #   cmd:f            press the letter with Command (cmdshift:a, cmdfn:… likewise)
-#   key:escape       return, escape, tab, space, up, down, left, right, delete
+#   key:escape       return, escape, tab, space, up, down, left, right, delete, f2
+#   shift:down       the same keys with Shift (extend a selection)
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
 # CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
 # one), so the path bar reads ~/... and the sidebar lists that home's folders.
@@ -26,6 +27,8 @@
 # CROW_SHOT_SIDEBAR_STYLE overrides the persona's sidebar_style.
 # CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
 # CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
+# CROW_SHOT_OTHER_WINDOW=1 captures the window the keys opened (Settings) instead of
+# the browser window.
 # Without [keys] the script waits for Return: set up the state by hand, then
 # press Return and it captures. Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
@@ -159,7 +162,12 @@ fi
 mkdir -p "$work/bin"
 printf '#!/bin/sh\nexit 1\n' >"$work/bin/zoxide"
 chmod +x "$work/bin/zoxide"
-HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
+# Crow logs into the shot home's ~/Library/Logs; a search shot would list that log (it
+# names the demo folders), so a demo home starts from none, and every shot logs only warnings.
+if [ -n "${CROW_SHOT_HOME:-}" ]; then
+  rm -f "$shot_home/Library/Logs/Crow/crow.log"
+fi
+RUST_LOG=${RUST_LOG:-warn} HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
   "$app" "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
@@ -190,8 +198,8 @@ echo "Crow pid $pid, window $id ($size), theme $theme, keymap $keymap"
 press() {
   case $1 in
     text:*) osascript -e "tell application \"System Events\" to keystroke \"${1#text:}\"" ;;
-    key:*)
-      case ${1#key:} in
+    key:* | shift:*)
+      case ${1#*:} in
         return) code=36 ;;
         escape) code=53 ;;
         tab) code=48 ;;
@@ -201,6 +209,7 @@ press() {
         down) code=125 ;;
         left) code=123 ;;
         right) code=124 ;;
+        f2) code=120 ;;
         pageup) code=116 ;;
         pagedown) code=121 ;;
         *)
@@ -208,7 +217,11 @@ press() {
           return 1
           ;;
       esac
-      osascript -e "tell application \"System Events\" to key code $code"
+      if [ "${1%%:*}" = shift ]; then
+        osascript -e "tell application \"System Events\" to key code $code using shift down"
+      else
+        osascript -e "tell application \"System Events\" to key code $code"
+      fi
       ;;
     cmd:*) osascript -e "tell application \"System Events\" to keystroke \"${1#cmd:}\" using command down" ;;
     cmdshift:*)
@@ -234,6 +247,15 @@ else
   echo "Set up the '$state' state in the window, then press Return to capture."
   # A piped or closed stdin is an immediate Return (scripted runs).
   read -r _ || true
+fi
+
+if [ -n "${CROW_SHOT_OTHER_WINDOW:-}" ]; then
+  other=$(swift "$root/scripts/window-id.swift" "$pid" "$id" 2>/dev/null || true)
+  if [ -z "$other" ]; then
+    echo "shot.sh: the keys opened no other window" >&2
+    exit 1
+  fi
+  id=${other%% *}
 fi
 
 out="$root/target/shots/$state-$theme.png"

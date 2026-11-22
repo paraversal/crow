@@ -5,7 +5,8 @@
 #   scripts/demo/make-demo.sh /Users/Shared/Demo
 #   scripts/demo/make-personas.sh /Users/Shared
 #   scripts/bundle.sh
-#   scripts/shots/site.sh
+#   scripts/shots/site.sh               every shot
+#   scripts/shots/site.sh search info   only those (the <webp name> before -light/-dark)
 #
 # The demo home lives in /Users/Shared so the path bar reads Macintosh HD › Users ›
 # Shared › Demo rather than a checkout path. Needs cwebp (brew install webp) and the
@@ -37,9 +38,12 @@ shot() {
 
 # both <webp name> <state> <start dir> <light theme> <dark theme> <keys>: a light and a dark shot,
 # <name>-light.webp and <name>-dark.webp, so the page can follow the system appearance.
+# CROW_SHOT_KEYMAP=vim takes it with the Vim layer.
+only=" $* "
 both() {
-  shot "$1-light" "$2-light" "$3" "$4" finder "$6"
-  shot "$1-dark" "$2-dark" "$3" "$5" finder "$6"
+  [ "$only" = "  " ] || [[ $only == *" $1 "* ]] || return 0
+  shot "$1-light" "$2-light" "$3" "$4" "${CROW_SHOT_KEYMAP:-finder}" "$6"
+  shot "$1-dark" "$2-dark" "$3" "$5" "${CROW_SHOT_KEYMAP:-finder}" "$6"
 }
 
 export CROW_SHOT_SETTINGS=$preview_on
@@ -72,3 +76,19 @@ persona writer writer "Manuscripts/The Lantern Year/Chapters" gruvbox-light gruv
   'wait:2.5|cmd:2|key:down|key:down|key:down|key:down|wait:2.5'
 persona producer producer "Sample Library/Drums" solarized-light solarized-dark \
   'wait:2.5|cmd:3|key:down|key:right|key:down|wait:3'
+
+# The manual's task shots, in the Finder themes.
+both batch-rename batch-rename "$D/Pictures/Trips" finder-light finder-dark \
+  'wait:2.5|cmd:2|key:down|cmd:a|key:f2|wait:1|text:Lake|key:tab|text:Loch|wait:1.5'
+# Two photos: the Info tab's totals and shared tags (one item would show its owner, this Mac's user).
+both info info "$D/Pictures/Trips" finder-light finder-dark \
+  'wait:2.5|cmd:2|key:down|key:down|shift:down|cmd:i|wait:2.5'
+both filter filter "$D/Downloads" finder-light finder-dark 'wait:2.5|cmd:2|text:/|wait:0.5|text:pdf|wait:1.5'
+# Downloads/Ideas.md pasted over Documents/Notes/Ideas.md: the conflict comes up before anything copies.
+both copy-conflict copy-conflict "$D/Downloads" finder-light finder-dark \
+  'wait:2.5|cmd:2|text:Ideas|wait:0.5|cmd:c|cmdshift:g|wait:0.8|cmd:a|text:~/Documents/Notes|wait:0.5|key:return|wait:2|cmd:v|wait:2'
+# Settings ▸ Keyboard with the Vim layer on: the Vim column of the shortcut list.
+CROW_SHOT_KEYMAP=vim CROW_SHOT_OTHER_WINDOW=1 \
+  both keys keys "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2|text:keyboard|wait:1.5'
+CROW_SHOT_OTHER_WINDOW=1 \
+  both settings settings "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2.5'

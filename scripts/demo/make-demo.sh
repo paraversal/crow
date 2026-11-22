@@ -271,5 +271,10 @@ find . -path '*/.git' -prune -o -print | sort | while read -r p; do
   touch -h -t "$(printf '202611%02d%02d%02d' "$day" "$hour" $((i * 7 % 60)))" "$p"
   i=$((i + 1))
 done
+# A newer export of a note in Downloads, for the copy-conflict shot (pasted into
+# Documents/Notes). Written after the fixed dates so it shifts no other file's date.
+cp Documents/Notes/Ideas.md Downloads/Ideas.md
+printf -- '- Ask about the allotment waiting list\n' >>Downloads/Ideas.md
+touch -t 202611180915 Downloads/Ideas.md
 touch -t "$stamp" .
 echo "demo home: $home"
