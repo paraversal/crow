@@ -448,6 +448,22 @@ fn ahead_behind_peels_a_symbolic_upstream() {
 }
 
 #[test]
+fn a_tracking_ref_that_is_not_a_commit_means_no_upstream() {
+    let repo = Repo::new("broken-upstream");
+    repo.write("a.txt", b"base");
+    repo.commit("base");
+    let blob = repo.git(&["hash-object", "-w", "a.txt"]);
+    repo.git(&["remote", "add", "origin", "."]);
+    std::fs::create_dir_all(repo.dir.join(".git/refs/remotes/origin")).unwrap();
+    std::fs::write(repo.dir.join(".git/refs/remotes/origin/main"), format!("{}\n", blob.trim())).unwrap();
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let head = head_info(&repo.open()).expect("a broken upstream must not fail the whole status");
+    assert_eq!(head.upstream, None);
+    assert_eq!(head.state, HeadState::Branch { name: "main".into() });
+}
+
+#[test]
 fn staging_an_executable_bit_change_is_a_modification() {
     let repo = Repo::new("mode-change");
     repo.write("script", b"echo test");

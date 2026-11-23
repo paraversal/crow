@@ -132,7 +132,9 @@ fn calculate_ahead_behind(
     let Some(upstream) = repo.branch_remote_tracking_ref_name(branch, gix::remote::Direction::Fetch) else {
         return Ok(None);
     };
-    let upstream = upstream?;
+    // A broken tracking setup (malformed remote, shallow clone, a ref that is not a
+    // commit) means "no upstream", not a failed status for the whole repository.
+    let Ok(upstream) = upstream else { return Ok(None) };
     let Some(upstream_id) = repo
         .find_reference(&upstream)
         .ok()
@@ -141,20 +143,28 @@ fn calculate_ahead_behind(
     else {
         return Ok(None);
     };
-    let Some(base) = repo.merge_base(head, upstream_id)?.map(|id| id.detach()) else { return Ok(None) };
-    let ahead = count_commits(repo, head, base)?;
-    let behind = count_commits(repo, upstream_id, base)?;
+    let Some(base) = repo.merge_base(head, upstream_id).ok().flatten().map(|id| id.detach()) else { return Ok(None) };
+    let (Some(ahead), Some(behind)) = (count_commits(repo, head, base), count_commits(repo, upstream_id, base)) else {
+        return Ok(None);
+    };
     Ok(Some(AheadBehind { ahead, behind }))
 }
 
-fn count_commits(repo: &gix::Repository, tip: gix::hash::ObjectId, base: gix::hash::ObjectId) -> gix::Result<u32> {
+/// A badge never needs more than this many commits: a branch that far from its
+/// upstream reads as "a lot", and the walk stays cheap on huge divergences.
+const MAX_COUNTED_COMMITS: u32 = 10_000;
+
+fn count_commits(repo: &gix::Repository, tip: gix::hash::ObjectId, base: gix::hash::ObjectId) -> Option<u32> {
     let mut count = 0u32;
-    for item in repo.rev_walk([tip]).with_hidden([base]).all()? {
+    for item in repo.rev_walk([tip]).with_hidden([base]).all().ok()? {
         if item.is_ok() {
-            count = count.saturating_add(1);
+            count += 1;
+            if count >= MAX_COUNTED_COMMITS {
+                break;
+            }
         }
     }
-    Ok(count)
+    Some(count)
 }
 
 /// Variants are ordered by display precedence, strongest first.

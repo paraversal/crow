@@ -11,6 +11,10 @@ pub struct Limits {
     /// Manifest + entry + declared assets.
     pub max_package_bytes: usize,
     pub max_registrations: usize,
+    /// Files a manifest may declare as assets.
+    pub max_assets: usize,
+    /// The longest `version` text, in bytes.
+    pub max_version_bytes: usize,
     pub max_entries_per_call: usize,
     /// One display field (title, label, text, spoken value).
     pub max_display_bytes: usize,
@@ -46,6 +50,8 @@ impl Default for Limits {
             max_file_bytes: 256 * 1024,
             max_package_bytes: 2 * 1024 * 1024,
             max_registrations: 64,
+            max_assets: 64,
+            max_version_bytes: 128,
             max_entries_per_call: 128,
             max_display_bytes: 4 * 1024,
             max_badge_bytes: 16,

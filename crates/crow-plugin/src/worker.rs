@@ -501,6 +501,9 @@ fn empty_input() -> RequestInput {
     }
 }
 
+/// How many script operations pass between cancellation and deadline checks.
+const PROGRESS_CHECK_EVERY: u64 = 64;
+
 fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<String, Arc<[u8]>>>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(limits.max_operations);
@@ -512,15 +515,27 @@ fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<Str
     engine.set_max_modules(0);
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
+    // `eval` compiles and runs source built at run time, past what review of the
+    // approved script shows and past the operation counter while it parses.
+    engine.disable_symbol("eval");
     let progress = runtime.clone();
-    engine.on_progress(move |_| {
+    engine.on_progress(move |operations| {
+        if progress.cancel.load(Ordering::Relaxed) {
+            progress.terminate.store(2, Ordering::Relaxed);
+            return Some(Dynamic::UNIT);
+        }
+        // The call token and the clock sit behind locks; look at them every 64th
+        // operation instead of every one (a call may run 100,000).
+        if operations % PROGRESS_CHECK_EVERY != 0 {
+            return None;
+        }
         let call_cancelled = progress
             .call_cancel
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .is_some_and(|token| token.load(Ordering::Relaxed));
-        if progress.cancel.load(Ordering::Relaxed) || call_cancelled {
+        if call_cancelled {
             progress.terminate.store(2, Ordering::Relaxed);
             return Some(Dynamic::UNIT);
         }
@@ -852,6 +867,15 @@ fn run(ctx) {{ {body} }}
         assert_eq!(mailbox.enqueue_command(Call::Register), Err(EnqueueError::Closed));
         assert!(matches!(mailbox.enqueue_refresh(Call::Register), RefreshEnqueue::Closed));
         assert!(mailbox.recv(&cancel).is_none());
+    }
+
+    #[test]
+    fn eval_is_not_available_to_scripts() {
+        let runtime = Arc::new(Runtime::new(Arc::new(AtomicBool::new(false))));
+        let engine = build_engine(&limits(), runtime, Arc::new(BTreeMap::new()));
+        let error = engine.compile(r#"fn register() { eval("40 + 2") }"#).expect_err("eval must not compile");
+        assert!(error.to_string().contains("eval"), "{error}");
+        assert!(engine.compile("fn register() { [] }").is_ok());
     }
 
     #[test]
