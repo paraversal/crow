@@ -69,6 +69,31 @@ enum BatchRenameActivation {
     Rename,
 }
 
+/// A group that appears (the new rule's sentence, the error strip) fades in; in
+/// Full it also rises 4 px, drawn only, so nothing around it moves. Off draws
+/// it at once. The animation restarts whenever `id` changes or the element is
+/// mounted again.
+fn enter<E: IntoElement + gpui::Styled + 'static>(
+    element: E,
+    id: impl Into<gpui::ElementId>,
+    mode: crow_core::motion::Effective,
+    ms: u64,
+) -> AnyElement {
+    use crow_core::motion::{Effective, ease_out};
+    use gpui::{Animation, AnimationExt as _};
+    if mode == Effective::Off {
+        return element.into_any_element();
+    }
+    element
+        .relative()
+        .with_animation(id, Animation::new(std::time::Duration::from_millis(ms)), move |el, t| {
+            let t = ease_out(t);
+            let el = el.opacity(t);
+            if mode == Effective::Full { el.top(px(4. * (1. - t))) } else { el }
+        })
+        .into_any_element()
+}
+
 fn field(value: String, placeholder: &'static str, aria: &'static str, cx: &mut App) -> Entity<TextInput> {
     cx.new(|cx| TextInput::new(value, placeholder, cx).bare().with_aria_label(aria))
 }
@@ -291,7 +316,17 @@ impl CrowWindow {
     pub(super) fn submit_batch_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Sheet::BatchRename(sheet)) = &self.sheet else { return };
         if !sheet.can_submit() {
-            crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
+            let field = sheet.preview.error_field.map(|field| match field {
+                FormField::Find => sheet.find.clone(),
+                FormField::Add => sheet.add.clone(),
+                FormField::Base => sheet.base.clone(),
+                FormField::Start => sheet.start.clone(),
+                FormField::Padding => sheet.padding.clone(),
+            });
+            match &field {
+                Some(field) => crate::feedback::refuse(crate::feedback::RefuseTarget::Field(field), window, cx),
+                None => crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx),
+            }
             return;
         }
         let Some(moves) = sheet.submit.clone() else { return };
@@ -442,9 +477,9 @@ impl CrowWindow {
         let segmented = || div().flex().flex_none().gap_1().p(px(2.)).rounded_md().bg(color(theme.role("bg-inset")));
         let word = |text: &'static str| div().flex_none().text_size(px(13.)).text_color(muted).child(text);
         let bad_field = sheet.preview.error_field;
-        let slot = |input: &Entity<TextInput>, id: &'static str, width: f32, field: FormField| {
+        let slot = |input: &Entity<TextInput>, id: &'static str, width: f32, field: Option<FormField>| {
             let focused = input.read(cx).focus_handle(cx).is_focused(window);
-            let edge = if bad_field == Some(field) {
+            let edge = if field.is_some() && bad_field == field {
                 danger
             } else if focused {
                 accent
@@ -510,11 +545,13 @@ impl CrowWindow {
             match sheet.kind {
                 RenameKind::Replace => sentence
                     .child(word("Replace"))
-                    .child(slot(&sheet.find, "batch-field-find", 130., FormField::Find))
+                    .child(slot(&sheet.find, "batch-field-find", 130., Some(FormField::Find)))
                     .child(word("with"))
-                    .child(slot(&sheet.replace, "batch-field-replace", 130., FormField::Find)),
-                RenameKind::AddText => {
-                    sentence.child(word("Add")).child(slot(&sheet.add, "batch-field-add", 160., FormField::Add)).child(
+                    .child(slot(&sheet.replace, "batch-field-replace", 130., None)),
+                RenameKind::AddText => sentence
+                    .child(word("Add"))
+                    .child(slot(&sheet.add, "batch-field-add", 160., Some(FormField::Add)))
+                    .child(
                         segmented()
                             .child(
                                 control(
@@ -538,18 +575,18 @@ impl CrowWindow {
                                     this.batch_rename_side(AddPosition::Before, window, cx)
                                 })),
                             ),
-                    )
-                }
+                    ),
                 RenameKind::Number => sentence
                     .child(word("Name them"))
-                    .child(slot(&sheet.base, "batch-field-base", 120., FormField::Base))
+                    .child(slot(&sheet.base, "batch-field-base", 120., Some(FormField::Base)))
                     .child(word("counting from"))
-                    .child(slot(&sheet.start, "batch-field-start", 52., FormField::Start))
+                    .child(slot(&sheet.start, "batch-field-start", 52., Some(FormField::Start)))
                     .child(word("with"))
-                    .child(slot(&sheet.padding, "batch-field-padding", 40., FormField::Padding))
+                    .child(slot(&sheet.padding, "batch-field-padding", 40., Some(FormField::Padding)))
                     .child(word("digits")),
-            }
-            .child(extension);
+            };
+        let mode = cx.global::<Ui>().feedback.mode;
+        let sentence = enter(sentence, ("batch-sentence", sheet.kind as usize), mode, crow_core::motion::ms::FIELD);
         let bar = div()
             .flex()
             .flex_col()
@@ -558,7 +595,7 @@ impl CrowWindow {
             .rounded_md()
             .border_1()
             .border_color(border)
-            .child(div().flex().child(rules))
+            .child(div().flex().items_center().justify_between().gap_2().child(rules).child(extension))
             .child(sentence);
         let header = div()
             .flex()
@@ -588,7 +625,7 @@ impl CrowWindow {
         let message: Option<SharedString> =
             sheet.validation_error.clone().or_else(|| sheet.preview.error.clone().map(Into::into));
         let strip = message.map(|message| {
-            div()
+            let strip = div()
                 .id("batch-error")
                 .debug_selector(|| "batch-error".into())
                 .flex()
@@ -601,7 +638,8 @@ impl CrowWindow {
                 .text_size(px(12.))
                 .text_color(danger)
                 .child(crate::icons::glyph(crate::icons::Glyph::AlertCircle, 13., "error", &theme))
-                .child(message)
+                .child(message);
+            enter(strip, "batch-error-in", mode, crow_core::motion::ms::FILTER_ROW)
         });
         let invalid = if sheet.preview.error.is_some() {
             0
@@ -793,7 +831,7 @@ impl CrowWindow {
                                 .when(!line.is_empty(), |destination| {
                                     destination.child(
                                         div()
-                                            .max_w(gpui::relative(0.5))
+                                            .max_w(gpui::relative(0.8))
                                             .flex_none()
                                             .overflow_hidden()
                                             .whitespace_nowrap()

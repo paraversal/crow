@@ -16954,6 +16954,114 @@ fn batch_rename_preview_names_align_with_the_heading(cx: &mut TestAppContext) {
     }
 }
 
+/// The rule bar wraps instead of overflowing: at the narrowest window every
+/// control of each mode sits inside the sheet and none overlaps another.
+#[gpui::test]
+fn batch_rename_rule_bar_fits_the_sheet_in_every_mode(cx: &mut TestAppContext) {
+    let root = fixture("batch-rule-bar");
+    for width in [640., 1080.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 600.);
+        cx.simulate_keystrokes("cmd-a f2");
+        settle(&view, &mut cx);
+        let modes: [(&str, &[&str]); 3] = [
+            ("batch-rule-replace", &["batch-field-find", "batch-field-replace"]),
+            ("batch-rule-add", &["batch-field-add", "batch-add-after", "batch-add-before"]),
+            ("batch-rule-number", &["batch-field-base", "batch-field-start", "batch-field-padding"]),
+        ];
+        for (rule, controls) in modes {
+            let rule_center = cx.debug_bounds(rule).expect("rule control").center();
+            cx.simulate_click(rule_center, Default::default());
+            pump_batch(&mut cx);
+            let panel = cx.debug_bounds("sheet-panel").expect("sheet panel");
+            let mut selectors =
+                vec!["batch-rule-replace", "batch-rule-add", "batch-rule-number", "batch-keep-extension"];
+            selectors.extend(controls);
+            let bounds: Vec<_> = selectors
+                .iter()
+                .map(|selector| {
+                    (*selector, cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} at {width}")))
+                })
+                .collect();
+            for (selector, bound) in &bounds {
+                assert!(
+                    bound.left() >= panel.left() && bound.right() <= panel.right(),
+                    "{selector} stays inside the sheet at {width}: {bound:?} in {panel:?}"
+                );
+            }
+            for (index, (first, a)) in bounds.iter().enumerate() {
+                for (second, b) in &bounds[index + 1..] {
+                    assert!(!a.intersects(b), "{first} and {second} overlap at {width} in {rule}");
+                }
+            }
+        }
+    }
+}
+
+/// A form error is shown once, above the table, and marks its own field.
+#[gpui::test]
+fn batch_rename_form_error_marks_the_field_and_clears(cx: &mut TestAppContext) {
+    let root = fixture("batch-form-error");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    let error_field = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+        view.read_with(cx, |w, _| match &w.sheet {
+            Some(Sheet::BatchRename(sheet)) => sheet.preview.error_field,
+            _ => panic!("batch sheet"),
+        })
+    };
+    assert_eq!(error_field(&view, &cx), Some(crow_core::batch_rename::FormField::Find), "blank Find is the error");
+    assert!(cx.debug_bounds("batch-error").is_some(), "the message strip is up");
+
+    let number = cx.debug_bounds("batch-rule-number").expect("Numbering rule").center();
+    cx.simulate_click(number, Default::default());
+    cx.simulate_input("Trip");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("one");
+    pump_batch(&mut cx);
+    assert_eq!(error_field(&view, &cx), Some(crow_core::batch_rename::FormField::Start));
+    assert!(cx.debug_bounds("batch-error").is_some());
+    cx.simulate_keystrokes("enter");
+    pump_batch(&mut cx);
+    assert!(sheet_open(&view, &cx), "Enter on a form error refuses (the bad field shakes) and keeps the sheet");
+
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("1");
+    pump_batch(&mut cx);
+    assert_eq!(error_field(&view, &cx), None, "a readable start clears the error");
+    assert!(cx.debug_bounds("batch-error").is_none(), "the strip is gone with the error");
+}
+
+/// A clash tints its row but never changes its height: the list is uniform.
+#[gpui::test]
+fn batch_rename_conflict_rows_keep_the_row_height(cx: &mut TestAppContext) {
+    let root = TestRoot::new("crow-app-batch-conflict-");
+    for name in ["a1.txt", "a2.txt", "b1.txt"] {
+        std::fs::write(root.join(name), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("b");
+    pump_batch(&mut cx);
+    let (blocked, can_submit) = view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => (sheet.row_state(0).cloned(), sheet.can_submit()),
+        _ => panic!("batch sheet"),
+    });
+    assert!(
+        matches!(blocked, Some(crow_fs::ops::BatchRowState::Invalid(_))),
+        "a1.txt would take the existing b1.txt: {blocked:?}"
+    );
+    assert!(!can_submit, "Rename stays off while a row is invalid");
+    let heights: Vec<_> = ["batch-preview-0", "batch-preview-1", "batch-preview-2"]
+        .into_iter()
+        .map(|selector| cx.debug_bounds(selector).expect("preview row").size.height)
+        .collect();
+    assert!(heights.iter().all(|height| *height == heights[0]), "rows share one height: {heights:?}");
+}
+
 #[gpui::test]
 fn batch_rename_sheet_previews_applies_one_activity_and_undo_selects(cx: &mut TestAppContext) {
     let root = fixture("batch-sheet-apply");
