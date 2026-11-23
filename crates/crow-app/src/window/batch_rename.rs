@@ -21,6 +21,14 @@ pub(crate) struct BatchRenameSheet {
     pub(crate) kind: RenameKind,
     /// Index of the tab the ink bar slides from after a mode change.
     tab_from: usize,
+    /// Longest original name in characters; the sheet widens for long names.
+    longest: usize,
+    /// Rows (first `ENTER_ROWS`) whose After text changed with the last mode
+    /// change or opening, and when that happened. Only these rows animate, and
+    /// only briefly, so scrolling a row back into view never replays it.
+    enter_rows: Vec<bool>,
+    enter_started: Option<std::time::Instant>,
+    mode_changed: bool,
     pub(crate) add_position: AddPosition,
     pub(crate) preserve_extension: bool,
     pub(crate) preview: Preview,
@@ -81,7 +89,7 @@ fn enter<E: IntoElement + gpui::Styled + 'static>(
     mode: crow_core::motion::Effective,
     ms: u64,
 ) -> AnyElement {
-    enter_after(element, id, mode, ms, 0)
+    enter_after(element, id, mode, ms, 0, (0., 4.))
 }
 
 /// `enter` that waits `delay` ms first (invisible meanwhile), so rows of a table
@@ -92,6 +100,7 @@ fn enter_after<E: IntoElement + gpui::Styled + 'static>(
     mode: crow_core::motion::Effective,
     ms: u64,
     delay: u64,
+    from: (f32, f32),
 ) -> AnyElement {
     use crow_core::motion::{Effective, ease_out};
     use gpui::{Animation, AnimationExt as _};
@@ -104,7 +113,7 @@ fn enter_after<E: IntoElement + gpui::Styled + 'static>(
         .with_animation(id, Animation::new(std::time::Duration::from_millis(ms + delay)), move |el, t| {
             let t = ease_out(((t * total - delay as f32) / ms as f32).clamp(0., 1.));
             let el = el.opacity(t);
-            if mode == Effective::Full { el.top(px(4. * (1. - t))) } else { el }
+            if mode == Effective::Full { el.left(px(from.0 * (1. - t))).top(px(from.1 * (1. - t))) } else { el }
         })
         .into_any_element()
 }
@@ -114,12 +123,40 @@ const TAB_WIDTH: f32 = 104.;
 /// Gap between rows' arrival when the mode changes, and how many rows stagger.
 const ROW_STAGGER_MS: u64 = 35;
 const ROW_STAGGER_ROWS: usize = 6;
+/// Rows tracked for the mode-change animation: more than fit on screen at once.
+const ENTER_ROWS: usize = 40;
+/// How long after a mode change a row may still start its entrance.
+const ENTER_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
 
 fn field(value: String, placeholder: &'static str, aria: &'static str, cx: &mut App) -> Entity<TextInput> {
     cx.new(|cx| TextInput::new(value, placeholder, cx).bare().with_aria_label(aria))
 }
 
+/// What the After column shows for a row, to tell whether a new preview changes it.
+fn after_key(preview: &Preview, index: usize) -> Option<&str> {
+    let row = preview.rows.get(index)?;
+    Some(if preview.error.is_some() {
+        "\u{2014}"
+    } else if row.state == RowState::Unchanged {
+        "unchanged"
+    } else {
+        row.destination_name.as_str()
+    })
+}
+
 impl BatchRenameSheet {
+    /// Installs a new preview. After a mode change it records which of the first
+    /// rows now show different text, so only those animate.
+    fn adopt(&mut self, built: Preview) {
+        if std::mem::take(&mut self.mode_changed) {
+            self.enter_rows = (0..ENTER_ROWS.min(built.rows.len()))
+                .map(|i| after_key(&self.preview, i) != after_key(&built, i))
+                .collect();
+            self.enter_started = Some(std::time::Instant::now());
+        }
+        self.preview = built;
+    }
+
     pub(crate) fn new(snapshot: Arc<[RenameInput]>, cx: &mut App) -> Self {
         let focus = cx.focus_handle();
         Self {
@@ -132,6 +169,10 @@ impl BatchRenameSheet {
             padding: field(String::new(), "0", "Zero padding", cx),
             kind: RenameKind::Replace,
             tab_from: 0,
+            longest: snapshot.iter().map(|input| input.name.chars().count()).max().unwrap_or(0),
+            enter_rows: vec![true; ENTER_ROWS.min(snapshot.len())],
+            enter_started: Some(std::time::Instant::now()),
+            mode_changed: false,
             add_position: AddPosition::After,
             preserve_extension: true,
             preview: preview(&snapshot, &RenameForm::default()),
@@ -276,7 +317,8 @@ impl CrowWindow {
         // thread after a short debounce; the rows on screen stay until it lands.
         let large = sheet.snapshot.len() > LARGE_SELECTION;
         if !large {
-            sheet.preview = preview(&sheet.snapshot, &form);
+            let built = preview(&sheet.snapshot, &form);
+            sheet.adopt(built);
             if !sheet.preview.complete() {
                 sheet.validating = false;
                 cx.notify();
@@ -315,7 +357,7 @@ impl CrowWindow {
                     return;
                 }
                 if let Some(built) = built {
-                    sheet.preview = built;
+                    sheet.adopt(built);
                 }
                 sheet.validating = false;
                 match checked {
@@ -373,6 +415,7 @@ impl CrowWindow {
             sheet.tab_from = sheet.kind as usize;
         }
         sheet.kind = kind;
+        sheet.mode_changed = true;
         let focus = match kind {
             RenameKind::Replace => sheet.find.read(cx).focus_handle(cx),
             RenameKind::AddText => sheet.add.read(cx).focus_handle(cx),
@@ -646,7 +689,17 @@ impl CrowWindow {
                     .child(slot(&sheet.padding, "batch-field-padding", 40., Some(FormField::Padding)))
                     .child(word("digits")),
             };
-        let sentence = enter(sentence, ("batch-sentence", sheet.kind as usize), mode, crow_core::motion::ms::FIELD);
+        // The new sentence slides in from the side of its tab: from the right when
+        // moving to a later tab, from the left when moving back.
+        let from_x = if sheet.kind as usize >= sheet.tab_from { 16. } else { -16. };
+        let sentence = enter_after(
+            sentence,
+            ("batch-sentence", sheet.kind as usize),
+            mode,
+            crow_core::motion::ms::FIELD,
+            0,
+            (from_x, 0.),
+        );
         let bar = div()
             .flex()
             .flex_col()
@@ -675,9 +728,17 @@ impl CrowWindow {
             .child(div().w(PREVIEW_ARROW_WIDTH).flex_none())
             .child(div().debug_selector(|| "batch-preview-new-name-heading".into()).flex_1().min_w_0().child("After"));
         let rows = sheet.preview.rows.len();
+        // The list grows with the selection and the window, down to a short
+        // minimum; beyond that it scrolls.
+        let viewport = window.viewport_size();
+        let room = (f32::from(viewport.height) - 330.).max(180.);
+        let list_height = (rows as f32 * 24.).clamp(96., room);
+        // Long names widen the sheet (about 7 px a character, two columns).
+        let sheet_width = ((sheet.longest as f32 * 7.5 * 2.) + 140.)
+            .clamp(620., (f32::from(viewport.width) - 48.).clamp(620., 1100.));
         let list = uniform_list("batch-preview", rows, cx.processor(Self::render_batch_preview_rows))
             .track_scroll(&sheet.preview_scroll)
-            .h(px(180.))
+            .h(px(list_height))
             .w_full();
         let table = div()
             .rounded_md()
@@ -774,7 +835,7 @@ impl CrowWindow {
             cx.stop_propagation();
         });
         chrome::sheet(
-            chrome::sheet_panel("sheet", SheetWidth::Wide, &theme)
+            chrome::sheet_panel("sheet", SheetWidth::Fit(sheet_width as u16), &theme)
                 .aria_label("Batch Rename")
                 .key_context("Sheet")
                 .track_focus(&sheet.focus)
@@ -818,6 +879,9 @@ impl CrowWindow {
         let form_error = sheet.preview.error.is_some();
         let motion = cx.global::<Ui>().feedback.mode;
         let kind = sheet.kind as usize;
+        // Rows only animate shortly after opening or a mode change, never when
+        // scrolled back into view.
+        let animate = sheet.enter_started.is_some_and(|at| at.elapsed() < ENTER_WINDOW);
         range
             .filter_map(|index| {
                 let row = sheet.preview.rows.get(index)?;
@@ -894,8 +958,18 @@ impl CrowWindow {
                 // A mode change brings the new names in one row after another; the
                 // keystroke-driven rebuilds keep the same id and do not replay it.
                 let delay = ROW_STAGGER_MS * index.min(ROW_STAGGER_ROWS) as u64;
-                let cell =
-                    enter_after(cell, ("batch-after", index * 3 + kind), motion, crow_core::motion::ms::FIELD, delay);
+                let cell = if animate && sheet.enter_rows.get(index).copied().unwrap_or(false) {
+                    enter_after(
+                        cell,
+                        ("batch-after", index * 3 + kind),
+                        motion,
+                        crow_core::motion::ms::FIELD,
+                        delay,
+                        (0., 4.),
+                    )
+                } else {
+                    cell.into_any_element()
+                };
                 Some(
                     div()
                         .id(("batch-preview-row", index))

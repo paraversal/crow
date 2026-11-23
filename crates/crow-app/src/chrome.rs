@@ -302,6 +302,8 @@ pub enum SheetWidth {
     Compact,
     Narrow,
     Wide,
+    /// A width in px chosen by the sheet from its content.
+    Fit(u16),
 }
 
 impl SheetWidth {
@@ -310,6 +312,7 @@ impl SheetWidth {
             SheetWidth::Compact => 360.,
             SheetWidth::Narrow => 520.,
             SheetWidth::Wide => 620.,
+            SheetWidth::Fit(width) => f32::from(width),
         }
     }
 }
