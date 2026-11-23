@@ -117,7 +117,7 @@ impl Theme {
     /// The color for a role. Roles missing from an older index fall back to the
     /// embedded theme, so this never fails.
     pub fn role(&self, role: &str) -> Rgb {
-        self.roles.get(role).copied().or_else(|| fallback().roles.get(role).copied()).unwrap_or(Rgb(0xff00ff))
+        self.roles.get(role).or_else(|| cached_fallback(self.variant).roles.get(role)).copied().unwrap_or(Rgb(0xff00ff))
     }
 
     /// A palette slot, for the many-hue cases (icons, syntax) the protocol allows.
@@ -383,6 +383,17 @@ pub fn fallback_for(appearance: Variant) -> Theme {
     .expect("Finder themes are built in")
 }
 
+/// The built-in theme of `variant`, parsed once. A role a theme lacks comes from
+/// the built-in of its own variant, so a light theme never shows a dark color.
+fn cached_fallback(variant: Variant) -> &'static Theme {
+    static DARK: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+    static LIGHT: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+    match variant {
+        Variant::Dark => DARK.get_or_init(|| fallback_for(Variant::Dark)),
+        Variant::Light => LIGHT.get_or_init(|| fallback_for(Variant::Light)),
+    }
+}
+
 /// The embedded fallback theme (Finder Dark).
 pub fn fallback() -> Theme {
     fallback_for(Variant::Dark)
@@ -437,9 +448,16 @@ pub fn set_global(theme: &Theme, state: &Path) -> std::io::Result<()> {
     let mut current: serde_json::Map<String, serde_json::Value> =
         fs::read_to_string(&target).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     current.insert(theme.variant.key().into(), theme.id.clone().into());
-    let tmp = state.join(format!("current.json.{}.tmp", std::process::id()));
-    fs::write(&tmp, serde_json::to_string_pretty(&current)? + "\n")?;
-    fs::rename(tmp, target)
+    // Unique per call: two saves from this process must not share a temp file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = state.join(format!("current.json.{}.{id}.tmp", std::process::id()));
+    let result =
+        fs::write(&tmp, serde_json::to_string_pretty(&current)? + "\n").and_then(|()| fs::rename(&tmp, target));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Directories to watch so that every change to the resolved theme fires an event: the
@@ -524,6 +542,15 @@ impl ThemeWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_light_theme_missing_a_role_falls_back_to_the_light_builtin() {
+        let mut light = fallback_for(Variant::Light);
+        let expected = light.role("fg");
+        light.roles.remove("fg");
+        assert_eq!(light.role("fg"), expected);
+        assert_ne!(expected, fallback_for(Variant::Dark).role("fg"), "light and dark text differ");
+    }
 
     const FIREBOX: &str = include_str!("../tests-data/firebox.json");
 

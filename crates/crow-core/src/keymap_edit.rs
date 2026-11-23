@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table};
 
 use crate::KeymapLayer;
 
@@ -73,10 +73,14 @@ pub fn normalize_keystroke(text: &str) -> Result<String, String> {
     // Peel "<modifier>-" prefixes; what is left is the key, which may itself be "-".
     'peel: loop {
         for name in ["ctrl", "control", "cmd", "command", "super", "alt", "option", "opt", "shift"] {
-            if let Some(tail) = rest.strip_prefix(name).and_then(|t| t.strip_prefix('-')) {
+            // Modifier names are matched in any case ("Cmd-Shift-G"); ASCII lowering
+            // keeps byte offsets, so the tail can be sliced from `rest`.
+            let lower = rest.to_ascii_lowercase();
+            if let Some(tail) = lower.strip_prefix(name).and_then(|t| t.strip_prefix('-')) {
                 if tail.is_empty() {
                     break;
                 }
+                let tail = &rest[rest.len() - tail.len()..];
                 let canon = canonical_modifier(name).expect("listed modifier");
                 let slot = MODIFIERS.iter().position(|m| *m == canon).expect("modifier slot");
                 if held[slot] {
@@ -89,7 +93,7 @@ pub fn normalize_keystroke(text: &str) -> Result<String, String> {
         }
         break;
     }
-    if canonical_modifier(rest).is_some() {
+    if canonical_modifier(&rest.to_ascii_lowercase()).is_some() {
         return Err(format!("`{text}` has only modifiers"));
     }
     let key = rest.to_lowercase();
@@ -222,7 +226,7 @@ pub fn set_keys(path: &Path, layer: KeymapLayer, command: &str, keys: &[String])
         for key in keys {
             array.push(key.as_str());
         }
-        table.insert(command, value(array));
+        crate::config::set_value(table, command, toml_edit::Value::Array(array));
         Ok(())
     })
 }
@@ -258,6 +262,24 @@ pub fn reset_all(path: &Path, layer: Option<KeymapLayer>) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_names_are_accepted_in_any_case() {
+        assert_eq!(normalize_keystroke("Cmd-Shift-G").unwrap(), "cmd-shift-g");
+        assert_eq!(normalize_keystroke("Shift-a").unwrap(), "shift-a");
+        assert_eq!(normalize_keystroke("CTRL-Option-X").unwrap(), "ctrl-alt-x");
+        assert!(normalize_keystroke("CMD").is_err(), "only modifiers");
+    }
+
+    #[test]
+    fn setting_keys_keeps_the_inline_comment_of_that_line() {
+        let dir = crate::test_support::TempDir::new("crow-keys-comment-");
+        let path = dir.join("keys.toml");
+        std::fs::write(&path, "[finder]\nrename = [\"enter\"] # my choice\n").unwrap();
+        set_keys(&path, KeymapLayer::Finder, "rename", &["f2".to_owned()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"f2\"") && text.contains("# my choice"), "{text}");
+    }
 
     #[test]
     fn keystrokes_normalise_order_case_and_aliases() {

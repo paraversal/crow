@@ -68,9 +68,18 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
         fs::create_dir_all(dir)?;
     }
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    fs::write(&tmp, text)?;
-    fs::rename(tmp, path)
+    // Unique per call: two saves of one file from this process must not share a temp.
+    let tmp = path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), next_temp_id()));
+    let result = fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn next_temp_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A TOML error with the line it points at: "line 12: unknown field `sortt`".
@@ -123,6 +132,28 @@ pub fn edit_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_saves_of_one_file_never_share_a_temp_file() {
+        let dir = crate::test_support::TempDir::new("crow-atomic-");
+        let path = dir.join("recent.json");
+        let threads: Vec<_> = (0..8)
+            .map(|n| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for round in 0..50 {
+                        write_atomic(&path, &format!("{n}-{round}")).expect("every save succeeds");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(std::fs::read_to_string(&path).unwrap().contains('-'));
+        let leftovers = std::fs::read_dir(&*dir).unwrap().count();
+        assert_eq!(leftovers, 1, "no temp files are left behind");
+    }
 
     #[test]
     fn home_paths_round_trip() {

@@ -533,7 +533,7 @@ pub fn load_settings(dir: &Path) -> Result<Settings, SettingsError> {
     let path = dir.join("settings.toml");
     if !path.exists() {
         fs::create_dir_all(dir).map_err(|e| SettingsError::Io(dir.to_path_buf(), e))?;
-        fs::write(&path, DEFAULT_SETTINGS).map_err(|e| SettingsError::Io(path.clone(), e))?;
+        crate::config::write_atomic(&path, DEFAULT_SETTINGS).map_err(|e| SettingsError::Io(path.clone(), e))?;
     }
     let text = fs::read_to_string(&path).map_err(|e| SettingsError::Io(path.clone(), e))?;
     toml::from_str(&text)

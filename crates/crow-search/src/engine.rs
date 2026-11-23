@@ -841,6 +841,22 @@ impl ContentSearch {
     }
 }
 
+/// The longest excerpt a content hit carries, and the most highlighted ranges in it.
+const MAX_EXCERPT_BYTES: usize = 4096;
+const MAX_EXCERPT_RANGES: usize = 256;
+
+/// `text` cut to `MAX_EXCERPT_BYTES` at a character boundary.
+fn truncate_excerpt(text: &str) -> &str {
+    if text.len() <= MAX_EXCERPT_BYTES {
+        return text;
+    }
+    let mut end = MAX_EXCERPT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 struct ContentSink<'a> {
     matcher: &'a RegexMatcher,
     path: &'a Path,
@@ -860,21 +876,30 @@ impl Sink for ContentSink<'_> {
         if self.control.is_cancelled() || self.control.contents_stopped() {
             return Ok(false);
         }
+        let raw = mat.bytes();
+        let text = String::from_utf8_lossy(raw);
+        let text = text.trim_end_matches(['\n', '\r']);
+        // An empty line (`^$`, `^`) is not an excerpt; it must not hide the lines
+        // after it, so it is not counted either.
+        if text.is_empty() {
+            return Ok(true);
+        }
         self.matches += 1;
         // The first line is the excerpt the UI shows; the rest are only counted.
         if self.matches > 1 {
             return Ok(true);
         }
-        let raw = mat.bytes();
-        let text = String::from_utf8_lossy(raw);
-        let text = text.trim_end_matches(['\n', '\r']);
-        if text.is_empty() {
-            return Ok(true);
-        }
+        // One minified line can be megabytes: show a bounded window of it.
+        let text = truncate_excerpt(text);
         let mut ranges = Vec::new();
         self.matcher
             .find_iter(text.as_bytes(), |m| {
-                if m.end() > m.start() {
+                // `(?-u)` patterns can match half a character; only whole ones are shown.
+                if m.end() > m.start()
+                    && text.is_char_boundary(m.start())
+                    && text.is_char_boundary(m.end())
+                    && ranges.len() < MAX_EXCERPT_RANGES
+                {
                     ranges.push(m.start()..m.end());
                 }
                 true
@@ -1507,6 +1532,34 @@ mod tests {
         // One excerpt per file: its first matching line, plus the count of the rest.
         assert_eq!(content(&hits), [(2, "NEEDLE here".to_owned(), ranges(0, 6))]);
         assert_eq!(extra_matches(&hits), 1, "the third line is counted, not carried");
+    }
+
+    #[test]
+    fn an_empty_first_matching_line_does_not_hide_the_file() {
+        let root = root("content-empty-first");
+        write(&root, "blank.txt", b"\nfoo\nbar\n");
+        let (hits, summary) = run(&root, None, Some("/^.*$/"), false, true);
+        assert_eq!(summary.error, None);
+        assert_eq!(content(&hits)[0].0, 2, "the first non-empty matching line is the excerpt");
+        assert_eq!(extra_matches(&hits), 1);
+    }
+
+    #[test]
+    fn excerpts_are_bounded_and_ranges_stay_on_characters() {
+        let root = root("content-bounds");
+        let long = format!("{}needle{}", "x".repeat(10_000), "y".repeat(10_000));
+        write(&root, "min.js", long.as_bytes());
+        write(&root, "accent.txt", "caf\u{e9}\n".as_bytes());
+        let (hits, _) = run(&root, None, Some("/x{3,}/"), false, true);
+        for (_, text, ranges) in content(&hits) {
+            assert!(text.len() <= MAX_EXCERPT_BYTES);
+            assert!(ranges.len() <= MAX_EXCERPT_RANGES);
+            assert!(ranges.iter().all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)));
+        }
+        let (hits, _) = run(&root, None, Some(r"/(?-u:\xC3)/"), false, true);
+        for (_, text, ranges) in content(&hits) {
+            assert!(ranges.iter().all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)));
+        }
     }
 
     fn hit(path: &str) -> Hit {
