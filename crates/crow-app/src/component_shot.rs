@@ -30,8 +30,10 @@ use image::{Rgba, RgbaImage};
 use crate::window::CrowWindow;
 use crate::{effects, extensions, icons, operations, plugins, ui};
 
-/// The render scale of GPUI's headless test window.
-const SCALE: f32 = 2.0;
+/// The default render scale; `--scale 1|2|3` (a Crow patch to GPUI's test platform makes it settable).
+const SCALE: u32 = 2;
+/// The scale is a process-wide setting of GPUI's test platform: one render at a time.
+static RENDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Padding around a crop, in points.
 const PAD: f32 = 20.0;
 /// The component names, in the order the script renders them.
@@ -570,11 +572,21 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
 
 /// Render `name` in `theme`: the component at 2x, padded.
 pub fn render(name: &str, theme: &str) -> Result<RgbaImage, String> {
-    render_with(name, theme, false)
+    render_with(name, theme, false, SCALE)
 }
 
 /// `render`, or with `whole_window` the full window the component is cut from (to see why a selector is missing).
-pub fn render_with(name: &str, theme: &str, whole_window: bool) -> Result<RgbaImage, String> {
+pub fn render_with(name: &str, theme: &str, whole_window: bool, scale: u32) -> Result<RgbaImage, String> {
+    let _one_at_a_time = RENDER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The scale is global to every test-platform window in the process: put it back after.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            gpui::set_test_window_scale_factor(SCALE as f32);
+        }
+    }
+    let _restore = Restore;
+    gpui::set_test_window_scale_factor(scale as f32);
     let scratch = Scratch::new()?;
     let plan = plan(name, &scratch)?;
     let mut session = Session::open(theme, &plan, &scratch)?;
@@ -599,12 +611,12 @@ pub fn render_with(name: &str, theme: &str, whole_window: bool) -> Result<RgbaIm
         }
     }
     let bounds = union.ok_or("nothing to crop: no element with the wanted selector (is this a debug build?)")?;
-    Ok(cut(&window_image, bounds, plan.grow))
+    Ok(cut(&window_image, bounds, plan.grow, scale))
 }
 
 /// `bounds` (points) cut out of `window` and padded with the colour at the crop's corner.
-fn cut(window: &RgbaImage, bounds: Bounds<Pixels>, grow: [f32; 4]) -> RgbaImage {
-    let px = |v: f32| (v * SCALE).round() as i64;
+fn cut(window: &RgbaImage, bounds: Bounds<Pixels>, grow: [f32; 4], scale: u32) -> RgbaImage {
+    let px = |v: f32| (v * scale as f32).round() as i64;
     let [top, right, bottom, left] = grow;
     let x0 = (px(f32::from(bounds.left())) - px(left)).clamp(0, window.width() as i64) as u32;
     let y0 = (px(f32::from(bounds.top())) - px(top)).clamp(0, window.height() as i64) as u32;
@@ -630,21 +642,27 @@ pub fn run(args: &[String]) -> ExitCode {
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let (Some(name), Some(out)) = (value("--component-shot"), value("--out")) else {
         eprintln!(
-            "usage: crow --component-shot NAME [--theme ID] [--scale 2] --out FILE.png\nNAME: {}",
+            "usage: crow --component-shot NAME [--theme ID] [--scale 1|2|3] --out FILE.png\nNAME: {}",
             COMPONENTS.join(", ")
         );
         return ExitCode::FAILURE;
     };
-    if value("--scale").is_some_and(|scale| scale != "2") {
-        eprintln!("crow --component-shot: only --scale 2 (GPUI's headless window is fixed at 2x)");
-        return ExitCode::FAILURE;
-    }
+    let scale = match value("--scale").as_deref() {
+        None => SCALE,
+        Some("1") => 1,
+        Some("2") => 2,
+        Some("3") => 3,
+        Some(other) => {
+            eprintln!("crow --component-shot: --scale is 1, 2 or 3, not \"{other}\"");
+            return ExitCode::FAILURE;
+        }
+    };
     let theme = value("--theme").unwrap_or_else(|| "finder-light".to_owned());
     let whole = args.iter().any(|a| a == "--whole-window");
     // Off the main thread, like the tests: there the Mac calls that need the main run loop
     // (Quick Look thumbnails) degrade at once to decoding the file, so every run draws the same.
     let result = std::thread::spawn(move || {
-        render_with(&name, &theme, whole).and_then(|image| image.save(&out).map_err(|e| e.to_string()))
+        render_with(&name, &theme, whole, scale).and_then(|image| image.save(&out).map_err(|e| e.to_string()))
     })
     .join()
     .unwrap_or_else(|_| Err("the render panicked".to_owned()));
@@ -694,7 +712,7 @@ mod tests {
                     image.height()
                 );
                 assert!(distinct_colours(&image) > 16, "{name} in {theme} looks blank");
-                let pad = (PAD * SCALE) as u32;
+                let pad = (PAD * SCALE as f32) as u32;
                 let corner = *image.get_pixel(0, 0);
                 assert!(
                     (0..pad).all(|i| *image.get_pixel(i, i) == corner),
@@ -722,6 +740,27 @@ mod tests {
         assert_eq!((light.width(), light.height()), (dark.width(), dark.height()));
         assert_ne!(light.as_raw(), dark.as_raw());
         assert_eq!(light.as_raw(), render("git-rows", "finder-light").unwrap().as_raw(), "deterministic");
+    }
+
+    /// Ignored: while it runs, every other test's window would also draw at 3x. Run it alone:
+    /// `cargo test -p crow-app scale_3 -- --ignored`.
+    #[test]
+    #[ignore = "changes GPUI's process-wide test scale factor; run alone"]
+    fn scale_3_makes_a_crisper_image_of_the_same_component() {
+        let two = render_with("git-rows", "finder-light", false, 2).unwrap();
+        let three = render_with("git-rows", "finder-light", false, 3).unwrap();
+        let expect = |px: u32| (px as f32 * 1.5) as i64;
+        assert!(
+            (three.width() as i64 - expect(two.width())).abs() <= 4,
+            "{}x{} vs {}x{}",
+            three.width(),
+            three.height(),
+            two.width(),
+            two.height()
+        );
+        assert!((three.height() as i64 - expect(two.height())).abs() <= 4);
+        // The scale does not leak into the next render.
+        assert_eq!(render("git-rows", "finder-light").unwrap().width(), two.width());
     }
 
     #[test]

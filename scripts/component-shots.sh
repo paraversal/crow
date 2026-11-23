@@ -8,6 +8,7 @@
 #   scripts/component-shots.sh git-rows         only those
 #
 # Components: git-rows git-sidebar git-diff compare-gallery plugin-surfaces
+# Scale: 3x by default (CROW_SHOT_SCALE=1, 2 or 3); the page shows each image at a third of its pixels.
 # Themes: finder-light and finder-dark (built in), like scripts/shots/site.sh.
 # Needs cwebp (brew install webp). PNGs stay in target/component-shots for a look.
 # The binary is a debug build with the `component-shots` feature (only debug builds
@@ -28,7 +29,7 @@ for name in "${names[@]}"; do
   for variant in light dark; do
     png="target/component-shots/$name-$variant.png"
     # crow-macos says once per call that it runs off the main thread; that is expected here.
-    "$bin" --component-shot "$name" --theme "finder-$variant" --scale 2 --out "$png" 2> >(grep -v 'off the main thread' >&2 || true)
+    "$bin" --component-shot "$name" --theme "finder-$variant" --scale "${CROW_SHOT_SCALE:-3}" --out "$png" 2> >(grep -v 'off the main thread' >&2 || true)
     cwebp -quiet -q 86 -alpha_q 100 "$png" -o "docs/media/$name-$variant.webp"
     echo "docs/media/$name-$variant.webp"
   done

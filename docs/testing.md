@@ -418,11 +418,14 @@ cargo run -p crow-app --features component-shots -- --component-shot git-rows --
 context (no window, the Metal headless renderer, the Mac text system, the built-in Finder themes,
 the Lucide pack from `docs/examples/icon-pack`), on fixture folders and throwaway Git repositories
 with fixed dates under a scratch folder, drives it to the wanted state and crops the elements
-(found by `debug_selector`, so it needs a debug build) with 20 pt of padding at 2x (GPUI's headless window is
-fixed at 2x). Nothing reads or writes your own config, home or Git settings. The feature `component-shots`
+(found by `debug_selector`, so it needs a debug build) with 20 pt of padding. `--scale 1|2|3` sets the pixel
+density; the script uses 3 (`CROW_SHOT_SCALE=2` for 2x) and the page shows each image at a third of its pixels.
+GPUI's headless test window is fixed at 2x, so `patches/gpui-test-window-scale-factor.patch` (applied by
+`scripts/fetch-gpui.sh` like the others; its header says why) adds `gpui::set_test_window_scale_factor`. It and the
+test window's use of it are behind `test-support`, so a normal build compiles none of it. The scale is process-wide, so the 3x test is ignored in the normal run (`cargo test -p crow-app scale_3 -- --ignored`). Nothing reads or writes your own config, home or Git settings. The feature `component-shots`
 is never in the bundle. Each component has a test that it renders in both themes, is padded and not blank,
 and that a render repeats byte for byte. `--whole-window` writes the full window instead, to see why a crop is missing.
-Look at every new or changed shot at 100% and 2x before committing it.
+Look at every new or changed shot at 100% and at full size before committing it.
 
 The bundled Git package runs only with a grant for its exact digest. Isolated runs (the shot scripts,
 the component shots, tests) need that grant without the Settings approval: `crow --grant-bundled git
