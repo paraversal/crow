@@ -796,8 +796,9 @@ impl SettingsWindow {
                     let toggle =
                         callback(cx, |this, window, cx| this.toggle_menu(ControlId::PreviewRuleSelect, window, cx));
                     let rule_options = self.preview_rule_options_cache.clone();
-                    let pick = select_callback(cx, move |this, index, _, cx| {
-                        this.choose_preview_rule_at(&rule_options, index, cx)
+                    let pick = select_callback(cx, move |this, index, window, cx| {
+                        this.choose_preview_rule_at(&rule_options, index, cx);
+                        this.close_menu(window, cx);
                     });
                     let labels = self.preview_rule_labels.clone();
                     let row = controls::dropdown(
@@ -979,8 +980,10 @@ impl SettingsWindow {
             });
             let add_toggle = callback(cx, |this, window, cx| this.toggle_menu(ControlId::PreviewAdd, window, cx));
             let add_ids = self.preview_add_ids.clone();
-            let add_pick =
-                select_callback(cx, move |this, index, _, cx| this.preview_add_provider_at(&add_ids, index, cx));
+            let add_pick = select_callback(cx, move |this, index, window, cx| {
+                this.preview_add_provider_at(&add_ids, index, cx);
+                this.close_menu(window, cx);
+            });
             let add = controls::menu_button(
                 ControlMeta {
                     id: ControlId::PreviewAdd.key(),

@@ -987,6 +987,7 @@ impl SettingsWindow {
             ControlId::Terminal,
             ControlId::WindowWidth,
             ControlId::WindowHeight,
+            ControlId::KeyboardList,
         ] {
             let handle = handles[&id].clone();
             let entity = entity.clone();
@@ -1462,6 +1463,7 @@ impl SettingsWindow {
                 self.commit_stepper(id, window, cx);
             }
             ControlId::Terminal => self.commit_terminal(window, cx),
+            ControlId::KeyboardList => self.cancel_capture(cx),
             _ => {}
         }
     }
@@ -1506,6 +1508,7 @@ impl SettingsWindow {
                 if text != self.query {
                     let was_searching = !self.query.is_empty();
                     self.close_menu(window, cx);
+                    self.cancel_capture(cx);
                     self.query = text;
                     if was_searching != !self.query.is_empty() {
                         self.start_content_motion(cx);
@@ -2340,6 +2343,7 @@ impl SettingsWindow {
     /// listeners cover a click elsewhere.
     fn commit_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
+        self.cancel_capture(cx);
         match self.focused_control(window) {
             Some(ControlId::FontSize) => self.commit_stepper(ControlId::FontSize, window, cx),
             Some(ControlId::Terminal) => self.commit_terminal(window, cx),
@@ -4706,11 +4710,13 @@ preview_providers = ["example.two.preview", "example.three.preview"]
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).0), PreviewScope::Rule);
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).2), Some(0), "first rule");
 
-        // Select the second rule; its own ordered list is shown.
+        // Select the second rule with the mouse; its own ordered list is shown.
         focus_control(&view, &mut vcx, ControlId::PreviewRuleSelect);
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("down");
-        vcx.simulate_keystrokes("enter");
+        let option = vcx.debug_bounds("settings-preview-rule-option-1").unwrap().center();
+        vcx.simulate_click(option, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert!(view.read_with(&vcx, |view, _| view.menu.is_none()));
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).2), Some(1));
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).4),
@@ -4791,7 +4797,17 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings_after(cx, |cx| {
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/p1b-fixture");
-            copy_dir(&source, &config.join("plugins/p1b-fixture"));
+            let bundle = config.join("plugins/p1b-fixture");
+            copy_dir(&source, &bundle);
+            let script_path = bundle.join("main.rhai");
+            let script = std::fs::read_to_string(&script_path).unwrap();
+            let second = r#"#{ kind: "preview", id: "second-preview", title: "Second preview",
+                extensions: ["txt"], function: "sample_preview" },"#;
+            std::fs::write(
+                &script_path,
+                script.replacen("#{ kind: \"hook\"", &format!("{second}\n#{{ kind: \"hook\""), 1),
+            )
+            .unwrap();
             cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_state(&mut vcx, "example.p1b-fixture", PluginState::PendingApproval);
@@ -4806,12 +4822,15 @@ preview_providers = ["example.one.preview"]
         assert!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).3), "no rules: a new one");
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_available_for_tests(cx)),
-            ["example.p1b-fixture.sample-preview"]
+            ["example.p1b-fixture.sample-preview", "example.p1b-fixture.second-preview"]
         );
 
         focus_control(&view, &mut vcx, ControlId::PreviewAdd);
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("enter");
+        let option = vcx.debug_bounds("settings-preview-add-option-0").unwrap().center();
+        vcx.simulate_click(option, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert!(view.read_with(&vcx, |view, _| view.menu.is_none()));
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).4),
             ["example.p1b-fixture.sample-preview"],
@@ -5961,6 +5980,107 @@ permissions = { fs = "none" }
         vcx.simulate_keystrokes("left enter");
         settle_writes(&mut vcx);
         assert_eq!(keys_of(&vcx, "view-as-columns"), None, "Reset all clears the layer");
+    }
+
+    #[gpui::test]
+    fn clicking_shortcut_reset_does_not_start_capture(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let path = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+            std::fs::write(path, "[finder]\nview-as-columns = [\"cmd-shift-9\"]\n").unwrap();
+            cx.update(ui::reload_config);
+        });
+        show_category(&view, &mut vcx, Category::Keyboard);
+        view.update(&mut vcx, |view, cx| {
+            view.keyboard.query = "view as columns".into();
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let reset = vcx.debug_bounds("settings-keyboard-reset-view-as-columns").unwrap().center();
+        vcx.simulate_click(reset, gpui::Modifiers::default());
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None);
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+    }
+
+    #[gpui::test]
+    fn shortcut_reset_preserves_broken_key_files(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let path = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+            std::fs::write(path, "[finder]\nview-as-columns = [\"cmd-shift-9\"]\n").unwrap();
+            cx.update(ui::reload_config);
+        });
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        view.update(&mut vcx, |view, cx| {
+            view.keyboard.query = "view as columns".into();
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let path = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+        for broken in [
+            "[finder\nview-as-columns = [\"cmd-shift-9\"]\n",
+            "[finder]\nview-as-columns = [\"cmd-shift-9\"]\nview-as-list = 42\n",
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            vcx.update(|_, cx| ui::reload_config(cx));
+            draw(&mut vcx);
+            assert!(vcx.read_global::<Ui, _>(|ui, _| ui.file_error("keys.toml").is_some()));
+            vcx.simulate_keystrokes("delete");
+            settle_writes(&mut vcx);
+            let reset = vcx.debug_bounds("settings-keyboard-reset-view-as-columns").unwrap().center();
+            vcx.simulate_click(reset, gpui::Modifiers::default());
+            settle_writes(&mut vcx);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+            assert!(vcx.read_global::<Ui, _>(|ui, _| ui.file_error("keys.toml").is_some()));
+        }
+    }
+
+    #[gpui::test]
+    fn leaving_the_keyboard_list_releases_shortcut_capture(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_some()));
+        let previews = vcx.debug_bounds("settings-category-views-preview").unwrap().center();
+        vcx.simulate_click(previews, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::ViewsPreview);
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        let search = vcx.debug_bounds("settings-search-row").unwrap().center();
+        vcx.simulate_click(search, gpui::Modifiers::default());
+        vcx.simulate_input("motion");
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+        assert_eq!(view.read_with(&vcx, |view, _| view.query.clone()), "motion");
+        vcx.simulate_keystrokes("cmd-w");
+        assert!(!vcx.cx.read(|cx| cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some())));
+    }
+
+    #[gpui::test]
+    fn keyboard_scrolling_accounts_for_group_headings(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        for query in ["", "c"] {
+            view.update(&mut vcx, |view, cx| {
+                view.keyboard.cursor = 0;
+                view.keyboard.query = query.into();
+                view.keyboard.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                cx.notify();
+            });
+            draw(&mut vcx);
+            let rows = view.read_with(&vcx, |view, cx| view.keyboard_rows(cx));
+            let steps = vec!["down"; rows.len() - 1].join(" ");
+            vcx.simulate_keystrokes(&steps);
+            draw(&mut vcx);
+            let selector = format!("settings-keyboard-row-{}", rows.last().unwrap().id.key());
+            let row = vcx.debug_bounds(selector.leak()).expect("last shortcut row");
+            let viewport = vcx.debug_bounds("settings-keyboard-list").expect("shortcut list");
+            assert!(
+                row.top() >= viewport.top() && row.bottom() <= viewport.bottom(),
+                "query {query:?}, row {row:?}, viewport {viewport:?}"
+            );
+        }
     }
 
     #[gpui::test]
