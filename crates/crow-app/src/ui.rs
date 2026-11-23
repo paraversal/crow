@@ -142,6 +142,9 @@ pub struct Ui {
     /// preview editor's Use Current Folder action.
     pub settings_folder: Option<PathBuf>,
     settings_category_write: Option<Shared<Task<Result<(), String>>>>,
+    /// The last queued write of each config or state file, so the next write to the
+    /// same file waits for it instead of racing it.
+    file_writes: HashMap<&'static str, Shared<Task<Result<(), String>>>>,
     /// One message per config file that doesn't load; shown in the status line until fixed.
     errors: [Option<SharedString>; 6],
 }
@@ -250,6 +253,7 @@ impl Ui {
             settings_category,
             settings_folder: None,
             settings_category_write: None,
+            file_writes: HashMap::new(),
             saved_queries: SavedQueries::default(),
             saved_queries_generation: 0,
             saved_query_counts: SavedQueryCounts::default(),
@@ -598,17 +602,53 @@ struct TestRoots(Vec<tempfile::TempDir>);
 #[cfg(test)]
 impl gpui::Global for TestRoots {}
 
+/// Run `work` (file I/O) on the background pool after every earlier write queued
+/// under `key` has finished. Rapid edits of one file apply in the order made.
+pub fn queue_file_write(
+    key: &'static str,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+    cx: &mut App,
+) -> Shared<Task<Result<(), String>>> {
+    let previous = cx.global_mut::<Ui>().file_writes.remove(key);
+    let task = cx
+        .background_spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            work()
+        })
+        .shared();
+    cx.global_mut::<Ui>().file_writes.insert(key, task.clone());
+    task
+}
+
+/// Like [`queue_file_write`] for saves nobody waits for; a failure is logged.
+fn queue_state_save(
+    key: &'static str,
+    file: PathBuf,
+    save: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+    cx: &mut App,
+) {
+    let task = queue_file_write(key, move || save(&file), cx);
+    cx.spawn(async move |_| {
+        if let Err(error) = task.await {
+            tracing::warn!("{key}: {error}");
+        }
+    })
+    .detach();
+}
+
 /// Change the shelf and save it to the state folder in the background.
 pub fn edit_shelf(cx: &mut App, edit: impl FnOnce(&mut crow_core::Shelf)) {
     let ui = cx.global_mut::<Ui>();
     edit(&mut ui.shelf);
     let (shelf, file) = (ui.shelf.clone(), ui.state_dir.join("shelf.json"));
-    cx.background_spawn(async move {
-        if let Err(e) = shelf.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
-    })
-    .detach();
+    queue_state_save(
+        "shelf.json",
+        file,
+        move |file| shelf.save(file).map_err(|e| format!("{}: {e}", file.display())),
+        cx,
+    );
     cx.refresh_windows();
 }
 
@@ -882,7 +922,8 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         SettingChange::Motion(_) | SettingChange::Sound(_) => refresh_feedback(cx),
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
         SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
-        SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
+        // The View menu's checkmarks read both.
+        SettingChange::ShowPreview(_) | SettingChange::FolderSizes(_) => crate::menus::refresh(cx),
         SettingChange::TranslucentSidebar(_) => refresh_translucency(cx),
         _ => {}
     }
@@ -1295,12 +1336,12 @@ pub fn record_command(id: crate::palette::CommandId, cx: &mut App) {
     recent.push(id.key(), crate::palette::RECENT_COMMANDS);
     let file = ui.state_dir.join("palette-commands.json");
     cx.global_mut::<Ui>().recent_commands = recent.clone();
-    let task = cx.background_spawn(async move {
-        if let Err(e) = recent.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
-    });
-    task.detach();
+    queue_state_save(
+        "palette-commands.json",
+        file,
+        move |file| recent.save(file).map_err(|e| format!("{}: {e}", file.display())),
+        cx,
+    );
     cx.refresh_windows();
 }
 
@@ -1339,10 +1380,16 @@ pub fn refresh_recent(cx: &mut App) {
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
     let alias_candidates = favorites;
+    {
+        let (saved, file) = (recent.clone(), file.clone());
+        queue_state_save(
+            "recent.json",
+            file,
+            move |file| saved.save(file).map_err(|e| format!("{}: {e}", file.display())),
+            cx,
+        );
+    }
     let task = cx.background_spawn(async move {
-        if let Err(e) = recent.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         // io-ok: inside background_spawn
         let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
@@ -1642,6 +1689,74 @@ mod tests {
         theme.id = "other".into();
         theme.palette.insert("accent".into(), Rgb(0x123456));
         theme
+    }
+
+    #[gpui::test]
+    fn the_folder_sizes_setting_refreshes_the_view_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_for_tests(cx);
+            crate::menus::init_for_tests(cx);
+            let calculate_disabled = |cx: &App| {
+                let menus = cx.get_menus().expect("menus are set");
+                menus
+                    .iter()
+                    .flat_map(|menu| menu.items.iter())
+                    .find_map(|item| match item {
+                        gpui::OwnedMenuItem::Action { name, disabled, .. } if name == "Calculate Folder Sizes" => {
+                            Some(*disabled)
+                        }
+                        _ => None,
+                    })
+                    .expect("the View menu lists Calculate Folder Sizes")
+            };
+            assert!(!calculate_disabled(cx));
+            set_setting(SettingChange::FolderSizes(FolderSizesMode::Visible), cx);
+            assert!(calculate_disabled(cx), "the menu follows the setting at once");
+        });
+    }
+
+    #[gpui::test]
+    fn writes_to_one_file_run_in_the_order_they_were_queued(cx: &mut gpui::TestAppContext) {
+        cx.update(init_for_tests);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (first, second) = (log.clone(), log.clone());
+        let last = cx.update(|cx| {
+            let _earlier = queue_file_write(
+                "probe.toml",
+                move || {
+                    std::thread::sleep(Duration::from_millis(60));
+                    first.lock().unwrap().push(1);
+                    Ok(())
+                },
+                cx,
+            );
+            queue_file_write(
+                "probe.toml",
+                move || {
+                    second.lock().unwrap().push(2);
+                    Ok(())
+                },
+                cx,
+            )
+        });
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        cx.update(|cx| {
+            cx.spawn(async move |_| {
+                last.await.expect("the write succeeded");
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .detach();
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if finished.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst), "the queued writes finished");
+        assert_eq!(*log.lock().unwrap(), vec![1, 2], "the later write waited for the earlier one");
     }
 
     #[test]

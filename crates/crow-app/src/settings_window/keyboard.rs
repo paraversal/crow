@@ -373,12 +373,8 @@ impl SettingsWindow {
         self.keyboard.notice = None;
         self.write_key_edits(
             command,
-            move |path| {
-                for (id, keys) in &writes {
-                    keymap_edit::set_keys(path, layer, id, keys)?;
-                }
-                Ok(())
-            },
+            // One file rewrite for the conflict removals and the new keys together.
+            move |path| keymap_edit::set_many(path, layer, &writes),
             path,
             cx,
         );
@@ -413,7 +409,9 @@ impl SettingsWindow {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let task = cx.background_spawn(async move { edit(&path) });
+        // Behind any earlier edit of keys.toml: rapid resets must not read the file
+        // while the previous one is still writing it.
+        let task = ui::queue_file_write("keys.toml", move || edit(&path), cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {

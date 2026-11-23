@@ -231,6 +231,22 @@ pub fn set_keys(path: &Path, layer: KeymapLayer, command: &str, keys: &[String])
     })
 }
 
+/// Set several commands' keys in one read-modify-write, so an interrupted batch
+/// never leaves the file with only some of the changes.
+pub fn set_many(path: &Path, layer: KeymapLayer, edits: &[(String, Vec<String>)]) -> Result<(), String> {
+    crate::edit_toml(path, DEFAULT_KEYS, |doc| {
+        let table = layer_table(doc, layer)?;
+        for (command, keys) in edits {
+            let mut array = Array::new();
+            for key in keys {
+                array.push(key.as_str());
+            }
+            crate::config::set_value(table, command, toml_edit::Value::Array(array));
+        }
+        Ok(())
+    })
+}
+
 /// Drop a command's override so it returns to its defaults.
 pub fn reset_command(path: &Path, layer: KeymapLayer, command: &str) -> Result<(), String> {
     crate::edit_toml(path, DEFAULT_KEYS, |doc| {
@@ -262,6 +278,17 @@ pub fn reset_all(path: &Path, layer: Option<KeymapLayer>) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_many_writes_every_edit_in_one_pass() {
+        let dir = crate::test_support::TempDir::new("crow-keys-many-");
+        let path = dir.join("keys.toml");
+        std::fs::write(&path, "# mine\n[finder]\nrename = [\"enter\"]\n").unwrap();
+        let edits = vec![("rename".to_owned(), vec![]), ("new-folder".to_owned(), vec!["cmd-n".to_owned()])];
+        set_many(&path, KeymapLayer::Finder, &edits).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("rename = []") && text.contains("new-folder"), "{text}");
+    }
 
     #[test]
     fn modifier_names_are_accepted_in_any_case() {
