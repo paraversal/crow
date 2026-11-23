@@ -451,7 +451,12 @@ impl SavedQueryForm {
         let toggle = |id, label, selected, action| control(toggle(id, label, selected), action);
         let button = |id, label, primary, action| control(button(id, label, primary), action);
         let option_row = |title, choices: Vec<gpui::Stateful<gpui::Div>>| {
-            div().flex().items_center().gap_3().child(label(title)).child(div().flex().gap_1().children(choices))
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(label(title))
+                .child(div().id(title).role(Role::RadioGroup).aria_label(title).flex().gap_1().children(choices))
         };
         div()
             .id("saved-query-form")
@@ -559,7 +564,16 @@ impl SavedQueryForm {
                 ],
             ))
             .when_some(form.error.clone(), |form, error| {
-                form.child(div().text_size(px(12.)).text_color(color(theme.role("error"))).child(error))
+                form.child(
+                    div()
+                        .id("saved-error")
+                        .debug_selector(|| "saved-error".into())
+                        .role(Role::Status)
+                        .aria_label(error.clone())
+                        .text_size(px(12.))
+                        .text_color(color(theme.role("error")))
+                        .child(error),
+                )
             })
             .child(
                 div()

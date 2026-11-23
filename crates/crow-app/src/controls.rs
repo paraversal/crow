@@ -336,56 +336,67 @@ pub fn dropdown_valued(
             .hover(|style| style.bg(color(theme.role("surface-raised"))))
             .on_click(move |_, window, cx| toggle(window, cx));
     }
-    let popup = menu.filter(|_| meta.enabled).map(|menu| {
-        let Menu { cursor, scroll, dismiss } = menu;
-        let list = div()
-            .id((control_id, u64::MAX))
-            .debug_selector(move || format!("{control_id}-menu"))
-            .role(Role::ListBox)
-            .aria_label(meta.label)
-            .occlude()
-            .track_scroll(scroll)
-            .overflow_y_scroll()
-            .w(px(DROPDOWN_WIDTH))
-            .max_h(px(280.))
-            .mt(px(4.))
-            .p(px(4.))
-            .flex()
-            .flex_col()
-            .rounded(px(6.))
-            .bg(color(theme.role("surface-raised")))
-            .shadow_lg()
-            .on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
-            .children(options.iter().enumerate().map(|(index, label)| {
-                let select = select.clone();
-                div()
-                    .id((control_id, index))
-                    .debug_selector(move || format!("{control_id}-option-{index}"))
-                    .role(Role::ListBoxOption)
-                    .aria_label(label.clone())
-                    .aria_selected(index == cursor)
-                    .aria_position_in_set(index + 1)
-                    .aria_size_of_set(options.len())
-                    // `truncate` drops the row's minimum height; without
-                    // `flex_none` a long menu squashes its rows instead of scrolling.
-                    .flex_none()
-                    .px_2()
-                    .py(px(3.))
-                    .rounded(px(4.))
-                    .text_size(px(12.))
-                    .text_color(color(theme.role("fg")))
-                    .truncate()
-                    .cursor_pointer()
-                    .when(index == cursor, |option| option.bg(active_selection(theme)))
-                    .when(index != cursor, |option| option.hover(|style| style.bg(inactive_selection(theme))))
-                    .on_click(move |_, window, cx| select(index, window, cx))
-                    .child(label.clone())
-            }));
-        // An absolute element sits at its parent's origin, so the anchor is an
-        // empty in-flow div right under the button.
-        div().h_0().child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
-    });
+    let popup =
+        menu.filter(|_| meta.enabled).map(|menu| options_popup(control_id, meta.label, options, menu, theme, select));
     row(meta, theme, div().flex().flex_col().child(button).children(popup))
+}
+
+/// The anchored list of choices under a drop-down or menu button.
+fn options_popup(
+    control_id: &'static str,
+    label: &'static str,
+    options: &[String],
+    menu: Menu,
+    theme: &crow_theme::Theme,
+    select: Select,
+) -> Div {
+    let Menu { cursor, scroll, dismiss } = menu;
+    let list = div()
+        .id((control_id, u64::MAX))
+        .debug_selector(move || format!("{control_id}-menu"))
+        .role(Role::ListBox)
+        .aria_label(label)
+        .occlude()
+        .track_scroll(scroll)
+        .overflow_y_scroll()
+        .w(px(DROPDOWN_WIDTH))
+        .max_h(px(280.))
+        .mt(px(4.))
+        .p(px(4.))
+        .flex()
+        .flex_col()
+        .rounded(px(6.))
+        .bg(color(theme.role("surface-raised")))
+        .shadow_lg()
+        .on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
+        .children(options.iter().enumerate().map(|(index, label)| {
+            let select = select.clone();
+            div()
+                .id((control_id, index))
+                .debug_selector(move || format!("{control_id}-option-{index}"))
+                .role(Role::ListBoxOption)
+                .aria_label(label.clone())
+                .aria_selected(index == cursor)
+                .aria_position_in_set(index + 1)
+                .aria_size_of_set(options.len())
+                // `truncate` drops the row's minimum height; without
+                // `flex_none` a long menu squashes its rows instead of scrolling.
+                .flex_none()
+                .px_2()
+                .py(px(3.))
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(color(theme.role("fg")))
+                .truncate()
+                .cursor_pointer()
+                .when(index == cursor, |option| option.bg(active_selection(theme)))
+                .when(index != cursor, |option| option.hover(|style| style.bg(inactive_selection(theme))))
+                .on_click(move |_, window, cx| select(index, window, cx))
+                .child(label.clone())
+        }));
+    // An absolute element sits at its parent's origin, so the anchor is an
+    // empty in-flow div right under the button.
+    div().h_0().child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
 }
 
 const DROPDOWN_WIDTH: f32 = 260.;
@@ -437,50 +448,8 @@ pub fn menu_button(
             .hover(|style| style.bg(color(theme.role("surface-raised"))))
             .on_click(move |_, window, cx| toggle(window, cx));
     }
-    let popup = menu.map(|Menu { cursor, scroll, dismiss }| {
-        let list = div()
-            .id((control_id, u64::MAX))
-            .debug_selector(move || format!("{control_id}-menu"))
-            .role(Role::ListBox)
-            .aria_label(meta.label)
-            .occlude()
-            .track_scroll(scroll)
-            .overflow_y_scroll()
-            .w(px(DROPDOWN_WIDTH))
-            .max_h(px(280.))
-            .mt(px(4.))
-            .p(px(4.))
-            .flex()
-            .flex_col()
-            .rounded(px(6.))
-            .bg(color(theme.role("surface-raised")))
-            .shadow_lg()
-            .on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
-            .children(options.iter().enumerate().map(|(index, label)| {
-                let select = select.clone();
-                div()
-                    .id((control_id, index))
-                    .debug_selector(move || format!("{control_id}-option-{index}"))
-                    .role(Role::ListBoxOption)
-                    .aria_label(label.clone())
-                    .aria_selected(index == cursor)
-                    .aria_position_in_set(index + 1)
-                    .aria_size_of_set(options.len())
-                    .flex_none()
-                    .px_2()
-                    .py(px(3.))
-                    .rounded(px(4.))
-                    .text_size(px(12.))
-                    .text_color(color(theme.role("fg")))
-                    .truncate()
-                    .cursor_pointer()
-                    .when(index == cursor, |option| option.bg(active_selection(theme)))
-                    .when(index != cursor, |option| option.hover(|style| style.bg(inactive_selection(theme))))
-                    .on_click(move |_, window, cx| select(index, window, cx))
-                    .child(label.clone())
-            }));
-        div().h_0().child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
-    });
+    let popup =
+        menu.filter(|_| meta.enabled).map(|menu| options_popup(control_id, meta.label, options, menu, theme, select));
     row(meta, theme, div().flex().flex_col().child(button).children(popup))
 }
 
@@ -556,4 +525,49 @@ pub fn link_button(
             .on_click(move |_, window, cx| activate(window, cx));
     }
     button
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext, VisualTestContext};
+
+    struct Probe {
+        enabled: bool,
+        focus: FocusHandle,
+        scroll: ScrollHandle,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = cx.global::<crate::ui::Ui>().theme.clone();
+            let style = ControlStyle { focus: &self.focus, focused: false, theme: &theme, mode: Effective::Full };
+            let meta = ControlMeta { id: "probe", label: "Probe", description: None, enabled: self.enabled };
+            let options = vec!["One".to_owned(), "Two".to_owned()];
+            let menu = Menu { cursor: 0, scroll: &self.scroll, dismiss: Rc::new(|_, _| {}) };
+            menu_button(meta, "Add", &options, Some(menu), style, Rc::new(|_, _| {}), Rc::new(|_, _, _| {}))
+        }
+    }
+
+    fn probe(cx: &mut TestAppContext, enabled: bool) -> VisualTestContext {
+        cx.update(crate::ui::init_for_tests);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    cx.new(|cx| Probe { enabled, focus: cx.focus_handle(), scroll: ScrollHandle::new() })
+                })
+            })
+            .expect("open a test window");
+        let cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx
+    }
+
+    #[gpui::test]
+    fn a_disabled_menu_button_shows_no_popup(cx: &mut TestAppContext) {
+        let mut disabled = probe(cx, false);
+        assert!(disabled.debug_bounds("probe-menu").is_none(), "no popup for a disabled button");
+        let mut enabled = probe(cx, true);
+        assert!(enabled.debug_bounds("probe-menu").is_some(), "an enabled button shows its list");
+    }
 }

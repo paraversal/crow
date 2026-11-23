@@ -4096,7 +4096,7 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(window, cx));
         let why = lend!(why, self.render_why(window, cx));
         let picker = lend!(picker, self.render_picker(cx));
-        let git_review = lend!(git_review, self.render_git_review(cx));
+        let git_review = lend!(git_review, self.render_git_review(window, cx));
         let column_picker = lend!(column_picker, self.render_column_picker(window, cx));
         let tag_picker = lend!(tag_picker, self.render_tag_picker(cx));
         let palette = lend!(palette, self.render_palette(window, cx));

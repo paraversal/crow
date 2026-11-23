@@ -19657,3 +19657,40 @@ fn a_context_menu_that_cannot_open_leaves_no_menu_state(cx: &mut TestAppContext)
     assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.context_menu().is_none()), "no menu is open");
     cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").refuse_context_menu(false));
 }
+
+#[gpui::test]
+fn the_git_review_groups_its_scope_tabs(cx: &mut TestAppContext) {
+    // The debug recorder lists only elements with handlers, so the tab list's role is
+    // read from the source; this pins that the group exists around both tabs.
+    let root = fixture("git-review-tablist");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    settle(&view, &mut cx);
+    let group = cx.debug_bounds("git-review-scopes").expect("the tab group is drawn");
+    for tab in ["git-review-scope-0", "git-review-scope-1"] {
+        let bounds = cx.debug_bounds(tab).expect("a scope tab");
+        assert!(group.contains(&bounds.center()), "{tab} sits in the group");
+    }
+}
+
+#[gpui::test]
+fn turning_git_off_under_the_review_returns_focus_to_the_listing(cx: &mut TestAppContext) {
+    let root = fixture("git-review-focus");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    settle(&view, &mut cx);
+    cx.update(|_, cx| crate::git::set_enabled_for_test(cx, false));
+    view.update_in(&mut cx, |_, _, cx| cx.notify());
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |this, _| this.git_review.is_none()), "the review closes");
+    let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
+    assert!(cx.update(|window, cx| pane_focus.contains_focused(window, cx)), "focus is back on the listing");
+}

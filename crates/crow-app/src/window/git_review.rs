@@ -170,9 +170,19 @@ impl CrowWindow {
         self.pane().update(cx, |pane, cx| pane.reveal(change.path.clone(), cx));
     }
 
-    pub(super) fn render_git_review(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    pub(super) fn render_git_review(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         if self.git_review.is_some() && !crate::git::provider_enabled(cx) {
+            // Git was switched off under the sheet: give focus back to the listing
+            // instead of leaving it on a handle that no longer exists.
+            let had_focus = self.git_review.as_ref().is_some_and(|review| review.focus.contains_focused(window, cx));
             retire!(self, cx, git_review);
+            if had_focus {
+                cx.defer_in(window, |this, window, cx| this.focus_center(window, cx));
+            }
         }
         let review = self.git_review.as_ref()?;
         let (folder, pinned) = (review.folder.clone(), review.pinned);
@@ -194,29 +204,36 @@ impl CrowWindow {
         let accent = color(theme.role("accent"));
         let muted = color(theme.role("fg-muted"));
         let title = "Review Git Changes";
-        let scope = div().flex().gap_2().children([false, true].map(|all| {
-            let label = if all { "Pinned Repositories" } else { "This Folder" };
-            div()
-                .id(("git-review-scope", usize::from(all)))
-                .debug_selector(move || format!("git-review-scope-{}", usize::from(all)))
-                .role(Role::Tab)
-                .aria_label(label)
-                .aria_selected(all == pinned)
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .when(all == pinned, |tab| tab.bg(accent.opacity(0.15)))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(review) = &mut this.git_review {
-                        review.pinned = all;
-                        review.cursor = 0;
-                        review.selection = None;
-                        review.scroll.set_offset(gpui::point(px(0.), px(0.)));
-                        cx.notify();
-                    }
-                }))
-        }));
+        let scope = div()
+            .id("git-review-scopes")
+            .debug_selector(|| "git-review-scopes".into())
+            .role(Role::TabList)
+            .aria_label("Scope")
+            .flex()
+            .gap_2()
+            .children([false, true].map(|all| {
+                let label = if all { "Pinned Repositories" } else { "This Folder" };
+                div()
+                    .id(("git-review-scope", usize::from(all)))
+                    .debug_selector(move || format!("git-review-scope-{}", usize::from(all)))
+                    .role(Role::Tab)
+                    .aria_label(label)
+                    .aria_selected(all == pinned)
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(all == pinned, |tab| tab.bg(accent.opacity(0.15)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(review) = &mut this.git_review {
+                            review.pinned = all;
+                            review.cursor = 0;
+                            review.selection = None;
+                            review.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                            cx.notify();
+                        }
+                    }))
+            }));
         let rows = changes
             .into_iter()
             .enumerate()
@@ -228,6 +245,9 @@ impl CrowWindow {
                     .role(Role::ListBoxOption)
                     .aria_label(label)
                     .aria_selected(index == cursor)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(count)
+                    .when(index == cursor, |row| row.aria_active_descendant())
                     .flex()
                     .gap_2()
                     .items_center()
