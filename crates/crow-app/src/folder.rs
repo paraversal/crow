@@ -2411,11 +2411,11 @@ impl Folder {
             let entries = this.update(cx, |this, _| this.entries.clone()).ok();
             let Some(entries) = entries else { return };
             let snapshot = entries.clone();
-            let (stats, updated) = cx
+            let (paths, stats, updated) = cx
                 .background_spawn(async move {
                     let stats = crow_fs::stat_changes(&dir, &paths, hidden);
                     let updated = crow_fs::apply_stats(&snapshot, &stats, &sort, &kind);
-                    (stats, updated)
+                    (paths, stats, updated)
                 })
                 .await;
             #[cfg(test)]
@@ -2424,7 +2424,9 @@ impl Folder {
             }
             this.update(cx, |this, cx| {
                 this.applying = false;
-                if this.generation == generation && this.sort == sort {
+                if this.generation == generation && this.sort != sort {
+                    this.pending.extend(paths);
+                } else if this.generation == generation {
                     // The paths this batch added: the reconcile re-stats only those.
                     // One pass over the listing, not one per changed path: a burst
                     // of 500 adds in a 100k folder took ~800 ms on the main thread.
@@ -2511,13 +2513,10 @@ impl Folder {
                     return;
                 }
                 this.reconciling = false;
-                if this.sort != sort {
-                    return;
-                }
                 // One apply at a time: a watcher batch or a load may be in
                 // flight, and a second 100k apply in the same frame was 38+38 ms.
-                // Re-stat these paths in the next batch.
-                if this.applying || this.loading {
+                // Re-stat in the next batch if another apply or sort superseded this one.
+                if this.applying || this.loading || this.sort != sort {
                     this.pending.extend(pending_paths);
                     return;
                 }
@@ -2733,6 +2732,13 @@ impl Folder {
     /// Bench helper: jump the view without touching the selection.
     pub fn scroll_strict(&self, ix: usize) {
         self.scroll.scroll_to_item_strict(ix, ScrollStrategy::Top);
+    }
+
+    /// Use only injected events in deterministic watcher-race tests.
+    #[cfg(test)]
+    pub(crate) fn stop_watcher_for_test(&mut self) {
+        self._watcher = None;
+        for _ in self.changes_rx.try_iter() {}
     }
 
     /// Feed a watcher batch without touching the disk (tests).

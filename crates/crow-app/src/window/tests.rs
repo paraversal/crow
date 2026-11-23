@@ -10567,6 +10567,73 @@ fn a_late_change_batch_does_not_bring_back_a_deleted_file(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn watcher_add_and_delete_are_retried_after_a_sort_change(cx: &mut TestAppContext) {
+    let root = fixture("sort-during-apply");
+    std::fs::write(root.join("a.txt"), b"keep").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |p, _| p.test_folder());
+    folder.update(&mut cx, |f, _| f.stop_watcher_for_test());
+    let added = root.join("z.txt");
+    let deleted = root.join("notes.txt");
+    std::fs::write(&added, b"new").unwrap();
+    std::fs::remove_file(&deleted).unwrap();
+    folder.update(&mut cx, |f, _| {
+        f.set_apply_delay(Duration::from_millis(300));
+        f.queue_changes(vec![added, deleted]);
+    });
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(folder.read_with(&cx, |f, _| f.apply_batches()), 1);
+    folder.update(&mut cx, |f, cx| {
+        f.set_sort(crow_fs::Sort { ascending: false, ..Default::default() }, cx);
+    });
+    let mut names = Vec::new();
+    for _ in 0..100 {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        names = folder.read_with(&cx, |f, _| f.names());
+        if names == ["beta", "alpha", "z.txt", "a.txt"] {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(names, ["beta", "alpha", "z.txt", "a.txt"]);
+}
+
+#[gpui::test]
+fn reconcile_after_a_sort_change_removes_a_deleted_addition(cx: &mut TestAppContext) {
+    let root = fixture("sort-during-reconcile");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |p, _| p.test_folder());
+    folder.update(&mut cx, |f, _| f.stop_watcher_for_test());
+    let transient = root.join("transient.txt");
+    std::fs::write(&transient, b"new").unwrap();
+    folder.update(&mut cx, |f, _| f.queue_changes(vec![transient.clone()]));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)));
+    std::fs::remove_file(&transient).unwrap();
+    folder.update(&mut cx, |f, cx| {
+        f.set_sort(crow_fs::Sort { ascending: false, ..Default::default() }, cx);
+    });
+    for _ in 0..100 {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        if !folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)));
+}
+
+#[gpui::test]
 fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     let root = fixture("preview-toggle");
     let (view, mut cx) = open(cx, &root);
@@ -11755,6 +11822,39 @@ fn a_paused_head_keeps_the_queue_and_activity_actions_follow_it(cx: &mut TestApp
         2,
         "the queued and active cancellations are both logged"
     );
+}
+
+#[gpui::test]
+fn activity_resume_and_cancel_respond_to_keyboard_presses(cx: &mut TestAppContext) {
+    use crate::operations::JobPhase;
+
+    let root = fixture("activity-keyboard");
+    let (view, mut cx) = open(cx, &root);
+    let (id, _) = cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            JobPhase::Paused,
+            crow_fs::ops::Progress::default(),
+        )
+    });
+    let press = |key: &str, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes(key);
+        let keystroke = cx.read(|cx| gpui::Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    };
+    cx.simulate_keystrokes("cmd-alt-l tab");
+    let resume = view.read_with(&cx, |w, _| w.activity_controls[&("activity-pause-resume", id.0)].clone());
+    assert!(cx.update(|window, _| resume.is_focused(window)));
+    press("space", &mut cx);
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|job| job.phase)), Some(JobPhase::Running));
+
+    cx.simulate_keystrokes("tab");
+    let cancel = view.read_with(&cx, |w, _| w.activity_controls[&("activity-cancel", id.0)].clone());
+    assert!(cx.update(|window, _| cancel.is_focused(window)));
+    press("enter", &mut cx);
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
 }
 
 #[gpui::test]
@@ -18749,6 +18849,38 @@ fn keys_toml_moves_a_command_to_a_new_key_live(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-3");
     settle(&view, &mut cx);
     assert_eq!(mode(&cx), ViewMode::Columns, "defaults are back");
+}
+
+#[gpui::test]
+fn keys_toml_keeps_copy_in_list_and_search_results(cx: &mut TestAppContext) {
+    let root = fixture("keys-copy-context");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\ncopy = [\"cmd-shift-c\"]\n");
+    let clipboard =
+        |cx: &VisualTestContext| cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|c| c.paths.to_vec()));
+
+    cx.simulate_keystrokes("cmd-c");
+    assert_eq!(clipboard(&cx), None);
+    cx.simulate_keystrokes("cmd-shift-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("alpha")]));
+
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("tab cmd-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("alpha")]));
+    cx.simulate_keystrokes("cmd-shift-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("notes.txt")]));
+}
+
+#[gpui::test]
+fn override_conflicts_include_the_search_results_context(cx: &mut TestAppContext) {
+    let root = fixture("keys-search-conflict");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\ncopy = [\"cmd-shift-c\"]\n");
+    let conflicts =
+        cx.read(|cx| crate::keymap::conflicts(crow_core::KeymapLayer::Finder, CommandId::Copy, "cmd-r", cx));
+    assert!(conflicts.iter().any(|conflict| conflict.command == Some(CommandId::SearchReveal)), "{conflicts:?}");
 }
 
 #[gpui::test]

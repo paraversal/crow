@@ -1,7 +1,7 @@
 //! The effective keymap: Crow's defaults (`actions.rs`) with the user's
 //! `keys.toml` overrides laid over them. A command with an override loses all
 //! of its default bindings in that layer and gets the user's keys in the
-//! context its first default binding had.
+//! contexts its default bindings had.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -28,6 +28,23 @@ fn default_context(scope: KeyScope, layer: KeymapLayer) -> &'static str {
     }
 }
 
+fn command_predicates(
+    bindings: &[KeyBinding],
+    command: &crate::palette::Command,
+    layer: KeymapLayer,
+) -> Vec<Option<Rc<KeyBindingContextPredicate>>> {
+    let mut predicates = Vec::new();
+    for predicate in bindings.iter().filter(|b| b.action().partial_eq(command.action)).map(KeyBinding::predicate) {
+        if !predicates.contains(&predicate) {
+            predicates.push(predicate);
+        }
+    }
+    if predicates.is_empty() {
+        predicates.push(KeyBindingContextPredicate::parse(default_context(command.scope, layer)).ok().map(Rc::new));
+    }
+    predicates
+}
+
 /// The bindings of `base` with `overrides` applied. Returns the bindings and a
 /// message for each key GPUI would not parse.
 pub fn apply_layer(
@@ -43,24 +60,11 @@ pub fn apply_layer(
         let Some(command) = CommandId::from_key(id).and_then(|cid| COMMANDS.iter().find(|c| c.id == cid)) else {
             continue;
         };
-        let mut predicate: Option<Rc<KeyBindingContextPredicate>> = None;
-        let mut found = false;
-        let mut nulled_in_sheet = false;
+        let predicates = command_predicates(&bindings, command, layer);
         let defaults: Vec<String> =
             bindings.iter().filter(|b| b.action().partial_eq(command.action)).map(key_text).collect();
-        bindings.retain(|b| {
-            if !b.action().partial_eq(command.action) {
-                return true;
-            }
-            if !found {
-                predicate = b.predicate();
-                found = true;
-            }
-            false
-        });
-        if !found {
-            predicate = KeyBindingContextPredicate::parse(default_context(command.scope, layer)).ok().map(Rc::new);
-        }
+        bindings.retain(|b| !b.action().partial_eq(command.action));
+        let mut nulled_in_sheet = false;
         // A modal sheet nulls the window keys behind it; follow a moved key there.
         for binding in &bindings {
             let is_null = binding.action().partial_eq(&NoAction {})
@@ -69,9 +73,14 @@ pub fn apply_layer(
             nulled_in_sheet |= is_null;
         }
         for key in keys {
-            match KeyBinding::load(key, command.action.boxed_clone(), predicate.clone(), false, None, cx) {
-                Ok(binding) => bindings.push(binding),
-                Err(error) => problems.push(format!("keys.toml: {id}: {error}")),
+            for predicate in &predicates {
+                match KeyBinding::load(key, command.action.boxed_clone(), predicate.clone(), false, None, cx) {
+                    Ok(binding) => bindings.push(binding),
+                    Err(error) => {
+                        problems.push(format!("keys.toml: {id}: {error}"));
+                        break;
+                    }
+                }
             }
             if nulled_in_sheet
                 && let Ok(null) = KeyBinding::load(key, Box::new(NoAction {}), sheet_predicate(), false, None, cx)
@@ -207,12 +216,12 @@ fn overlap(a: Option<&Rc<KeyBindingContextPredicate>>, b: Option<&Rc<KeyBindingC
 /// The bindings that `sequence` would collide with if given to `command` in `layer`.
 pub fn conflicts(layer: KeymapLayer, command: CommandId, sequence: &str, cx: &App) -> Vec<Conflict> {
     let Some(this) = COMMANDS.iter().find(|c| c.id == command) else { return Vec::new() };
-    let mine = effective(layer, cx);
-    let predicate = mine
-        .iter()
-        .find(|b| b.action().partial_eq(this.action))
-        .and_then(|b| b.predicate())
-        .or_else(|| KeyBindingContextPredicate::parse(default_context(this.scope, layer)).ok().map(Rc::new));
+    // Use the default contexts even if the current override unbound the command.
+    let defaults = match layer {
+        KeymapLayer::Finder => crate::actions::finder_keymap(),
+        KeymapLayer::Vim => crate::actions::vim_keymap(),
+    };
+    let predicates = command_predicates(&defaults, this, layer);
     let mut out: Vec<Conflict> = Vec::new();
     for l in [KeymapLayer::Finder, KeymapLayer::Vim] {
         for binding in effective(l, cx) {
@@ -221,7 +230,7 @@ pub fn conflicts(layer: KeymapLayer, command: CommandId, sequence: &str, cx: &Ap
             }
             let key = key_text(&binding);
             if !crow_core::keymap_edit::sequences_conflict(sequence, &key)
-                || !overlap(predicate.as_ref(), binding.predicate().as_ref())
+                || !predicates.iter().any(|predicate| overlap(predicate.as_ref(), binding.predicate().as_ref()))
             {
                 continue;
             }
