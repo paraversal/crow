@@ -152,7 +152,7 @@ impl BatchRenameSheet {
             self.enter_rows = (0..ENTER_ROWS.min(built.rows.len()))
                 .map(|i| after_key(&self.preview, i) != after_key(&built, i))
                 .collect();
-            self.enter_started = Some(std::time::Instant::now());
+            self.enter_started = Some(crate::clock::now());
         }
         self.preview = built;
     }
@@ -171,7 +171,7 @@ impl BatchRenameSheet {
             tab_from: 0,
             longest: snapshot.iter().map(|input| input.name.chars().count()).max().unwrap_or(0),
             enter_rows: vec![true; ENTER_ROWS.min(snapshot.len())],
-            enter_started: Some(std::time::Instant::now()),
+            enter_started: Some(crate::clock::now()),
             mode_changed: false,
             add_position: AddPosition::After,
             preserve_extension: true,
@@ -881,7 +881,7 @@ impl CrowWindow {
         let kind = sheet.kind as usize;
         // Rows only animate shortly after opening or a mode change, never when
         // scrolled back into view.
-        let animate = sheet.enter_started.is_some_and(|at| at.elapsed() < ENTER_WINDOW);
+        let animate = sheet.enter_started.is_some_and(|at| crate::clock::elapsed(at) < ENTER_WINDOW);
         range
             .filter_map(|index| {
                 let row = sheet.preview.rows.get(index)?;

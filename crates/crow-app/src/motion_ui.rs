@@ -81,7 +81,7 @@ pub fn retire<T>(
     low_ms: u64,
 ) -> bool {
     let Some(value) = slot.take() else { return false };
-    *exit = (mode != Effective::Off).then(|| Leaving::new(value, Instant::now(), full_ms, low_ms));
+    *exit = (mode != Effective::Off).then(|| Leaving::new(value, crate::clock::now(), full_ms, low_ms));
     true
 }
 

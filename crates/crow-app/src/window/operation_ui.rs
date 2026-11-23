@@ -1036,7 +1036,7 @@ impl CrowWindow {
             })
             .collect();
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         // A job that just finished leaves a picture of its row that shrinks and fades
         // (Full); Low and Off drop it at once.
         let still_running = running_label.is_some();

@@ -446,7 +446,7 @@ impl InfoPane {
 
     pub fn set_tab(&mut self, tab: InfoTab, cx: &mut Context<Self>) {
         if self.tab != tab {
-            let now = Instant::now();
+            let now = crate::clock::now();
             let mode = cx.global::<Ui>().feedback.mode;
             self.tab_motion = (self.tab_strip_drawn.get() && mode != Effective::Off).then(|| {
                 let from = self.tab as u8 as f32;
@@ -646,7 +646,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
     pane.tab_strip_drawn.set(true);
     let selected = pane.tab;
     let mode = cx.global::<Ui>().feedback.mode;
-    let active = pane.tab_motion.and_then(|motion| motion.progress(mode, Instant::now()).map(|t| (motion, t)));
+    let active = pane.tab_motion.and_then(|motion| motion.progress(mode, crate::clock::now()).map(|t| (motion, t)));
     let underline = active.filter(|_| mode == Effective::Full);
     let tab = |id: &'static str, label: &'static str, value: InfoTab| {
         let info = info.clone();
@@ -745,7 +745,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
 pub fn tab_body(info: &Entity<InfoPane>, body: AnyElement, cx: &App) -> gpui::Stateful<Div> {
     let mode = cx.global::<Ui>().feedback.mode;
     let motion = info.read(cx).tab_motion;
-    let motion = motion.and_then(|motion| motion.progress(mode, Instant::now()).map(|t| (motion, t)));
+    let motion = motion.and_then(|motion| motion.progress(mode, crate::clock::now()).map(|t| (motion, t)));
     let body = if let Some((motion, t)) = motion {
         div()
             .relative()

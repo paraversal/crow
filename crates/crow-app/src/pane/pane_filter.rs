@@ -30,7 +30,7 @@ pub(super) struct FilterMotion {
 impl FilterMotion {
     pub(super) fn opening(cx: &App) -> Option<Self> {
         (cx.global::<Ui>().feedback.mode != Effective::Off).then(|| FilterMotion {
-            started: Instant::now(),
+            started: crate::clock::now(),
             opening: true,
             ghost: None,
         })
@@ -38,7 +38,7 @@ impl FilterMotion {
 
     fn closing(query: String, count: String, cx: &App) -> Option<Self> {
         (cx.global::<Ui>().feedback.mode == Effective::Full).then(|| FilterMotion {
-            started: Instant::now(),
+            started: crate::clock::now(),
             opening: false,
             ghost: Some((query, count)),
         })
@@ -82,7 +82,7 @@ impl Pane {
         let mode = cx.global::<Ui>().feedback.mode;
         let full_height = if place == FilterPlace::List { 36. } else { 32. };
         let progress = self.filter_motion.as_ref().and_then(|m| {
-            motion::progress(mode, m.started, Instant::now(), motion::ms::FILTER_ROW, motion::ms::LOW_IN)
+            motion::progress(mode, m.started, crate::clock::now(), motion::ms::FILTER_ROW, motion::ms::LOW_IN)
         });
         if progress.is_some() {
             window.request_animation_frame();

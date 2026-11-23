@@ -755,10 +755,16 @@ fn open_with_before(
 }
 
 /// Folders load on real threads; wait until every tab has finished.
-/// Let a motion that runs on the real clock (a sliding column, a fading sheet)
-/// run out, so geometry assertions see the end state.
+/// Let a motion (a sliding column, a fading sheet) run out, so geometry assertions see
+/// the end state. Steps the motion clock; nothing sleeps.
 fn finish_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
-    std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+    step_motion(view, cx, crow_core::motion::ms::PANE_SLIDE + 40);
+}
+
+/// Move the motion clock (`crate::clock`, the test executor's clock) forward `ms` and
+/// redraw, so a test samples an animation at an exact point instead of sleeping.
+fn step_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, ms: u64) {
+    cx.executor().advance_clock(std::time::Duration::from_millis(ms));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
 }
@@ -2644,6 +2650,7 @@ fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestApp
     let (view, mut cx) = open_sized(cx, &root, 600., 500.);
     cx.simulate_keystrokes("cmd-1 cmd-shift-p");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let viewport = cx.debug_bounds("file-list").expect("icon viewport");
     cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
@@ -2709,7 +2716,7 @@ fn icon_presets_glide_tiles_in_full_motion_and_snap_otherwise(cx: &mut TestAppCo
         settle(&view, &mut cx);
         let pane = pane(&view, &cx);
         // Let the view-change glide finish so the capture is the settled grid.
-        std::thread::sleep(Duration::from_millis(300));
+        step_motion(&view, &mut cx, 300);
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let before = cx.debug_bounds("tile-f05.txt").expect("a visible tile");
@@ -2735,7 +2742,7 @@ fn a_resize_that_changes_the_column_count_glides_the_tiles(cx: &mut TestAppConte
     set_motion(&mut cx, "full");
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
-    std::thread::sleep(Duration::from_millis(300));
+    step_motion(&view, &mut cx, 300);
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     let pane = pane(&view, &cx);
@@ -3067,8 +3074,8 @@ fn the_chevrons_hide_the_left_and_right_sidebars(cx: &mut TestAppContext) {
     cx.simulate_click(show_right.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
     assert!(right_visible(&cx), "the toolbar button shows the right sidebar");
-    // The slides run on the wall clock: let both finish so the bounds are the resting ones.
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    // Let both slides finish so the bounds are the resting ones.
+    step_motion(&view, &mut cx, 600);
     cx.update(|window, _| window.refresh());
     settle(&view, &mut cx);
     let show_left = cx.debug_bounds("show-left-sidebar").expect("a button in the toolbar brings the left sidebar back");
@@ -3990,12 +3997,8 @@ fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     assert!(!cut && !marked, "a copy is not marked");
     assert!(cx.debug_bounds("flash-alpha").is_some(), "the copied row flashes");
     let first = flash.expect("flash");
-    // Age the flash past COPY_FADE (the clock is the real one, not the test clock).
-    cx.update(|_, cx| {
-        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
-            clipboard.flash = Some(Instant::now() - Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
-        }
-    });
+    // Step the motion clock past COPY_FADE.
+    cx.executor().advance_clock(Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
     pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
@@ -4008,7 +4011,7 @@ fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     assert!(flash.is_none() && cut && marked, "a cut is marked without a flash");
     assert!(cx.debug_bounds("cut-outline-alpha").is_some(), "the cut row is outlined");
     assert!(cx.debug_bounds("cut-outline-beta").is_none(), "an uncut row is not");
-    std::thread::sleep(Duration::from_millis(2));
+    cx.executor().advance_clock(Duration::from_millis(2));
     cx.simulate_keystrokes("cmd-c");
     let (flash, cut, marked) = cx.read(|cx| {
         let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
@@ -9127,7 +9130,7 @@ fn click_in_a_scrolled_filter_field_lands_on_the_visible_text(cx: &mut TestAppCo
     // Far wider than the column, so the field scrolls to keep the caret at the end.
     let long = "abcdefghij".repeat(12);
     cx.simulate_input(&long);
-    cx.run_until_parked();
+    finish_motion(&view, &mut cx);
     let field = cx.debug_bounds("filter-field").expect("field on screen");
     // Just right of the accent `/`: the start of the visible text, not of the query.
     cx.simulate_click(gpui::point(field.left() + px(30.), field.center().y), gpui::Modifiers::default());
@@ -9246,6 +9249,7 @@ fn filter_with_no_matches_offers_search(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("zzz");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     assert!(cx.debug_bounds("filter-no-matches").is_some(), "D replaces the list");
     assert!(cx.debug_bounds("filter-search-footer").is_none(), "there is no footer in D");
 
@@ -16064,8 +16068,8 @@ fn a_reorder_starts_no_leaving_effect(cx: &mut TestAppContext) {
     // A watcher batch with no removals (a sort's apply).
     cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), Some(&[]), cx)));
     assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reorder");
-    let shift =
-        folder.read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, Instant::now(), crate::pane::ROW_HEIGHT));
+    let shift = folder
+        .read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, crate::clock::now(), crate::pane::ROW_HEIGHT));
     assert_eq!(shift, 0.0, "no gap to close");
     // A full reload with the same entries.
     cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
@@ -18824,9 +18828,7 @@ fn a_closed_palette_fades_out_in_full_and_is_gone_at_once_in_off(cx: &mut TestAp
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: still closed");
         // After the fade the picture is dropped.
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SHEET_OUT + 40));
-        view.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        step_motion(&view, &mut cx, crow_core::motion::ms::SHEET_OUT + 40);
         assert!(cx.debug_bounds("sheet-panel").is_none(), "{mode:?}: gone after the fade");
         assert!(view.read_with(&cx, |w, _| w.exits.palette.is_none()), "{mode:?}: the holder is dropped");
     }
@@ -18894,9 +18896,7 @@ fn toggling_the_right_column_slides_in_full_and_is_instant_in_off(cx: &mut TestA
         if !now_visible && slides {
             assert!(cx.debug_bounds("preview").is_some(), "{mode:?}: the hiding column is still drawn");
         }
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
-        view.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        finish_motion(&view, &mut cx);
         assert!(view.read_with(&cx, |w, _| w.pane_slide.is_none()), "{mode:?}: the slide ends");
         assert_eq!(cx.debug_bounds("preview").is_some(), now_visible, "{mode:?}: the end state");
     }
@@ -18961,9 +18961,7 @@ fn a_collapsing_sidebar_section_leaves_fading_rows_only_in_full(cx: &mut TestApp
             sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken.contains("Recent section, collapsed")),
             "{mode:?}: the logical state changes at once"
         );
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SECTION + 40));
-        sidebar.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        step_motion(&view, &mut cx, crow_core::motion::ms::SECTION + 40);
         assert!(cx.debug_bounds("sidebar-section-ghost").is_none(), "{mode:?}: gone after the motion");
     }
 }

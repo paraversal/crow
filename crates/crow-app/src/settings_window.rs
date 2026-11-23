@@ -1227,7 +1227,7 @@ impl SettingsWindow {
 
     fn start_content_motion(&mut self, cx: &App) {
         let mode = cx.global::<Ui>().feedback.mode;
-        self.content_motion = (mode != Effective::Off).then(|| ContentMotion { started: Instant::now(), mode });
+        self.content_motion = (mode != Effective::Off).then(|| ContentMotion { started: crate::clock::now(), mode });
     }
 
     /// Open a category from the sidebar (or a click). Search ends, transient
@@ -3034,8 +3034,9 @@ impl Render for SettingsWindow {
             .child(glyph(Glyph::Search, 13., "fg-muted", &theme))
             .child(div().flex_1().min_w_0().child(self.search.clone()));
 
-        let content_progress =
-            self.content_motion.and_then(|motion| motion.progress(cx.global::<Ui>().feedback.mode, Instant::now()));
+        let content_progress = self
+            .content_motion
+            .and_then(|motion| motion.progress(cx.global::<Ui>().feedback.mode, crate::clock::now()));
         if content_progress.is_some() {
             window.request_animation_frame();
         }
@@ -4416,13 +4417,13 @@ mod tests {
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Full), cx));
         // Asked at a moment before the change: a slow runner can spend longer than PANEL_TAB inside
         // `show_category`, and the check must not depend on that.
-        let before = Instant::now();
+        let before = crate::clock::now();
         show_category(&view, &mut vcx, Category::Behaviour);
         assert!(
             view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, before)).is_some(),
             "a category change starts a content transition"
         );
-        let later = Instant::now() + Duration::from_millis(300);
+        let later = crate::clock::now() + Duration::from_millis(300);
         assert!(
             view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, later)).is_none(),
             "the transition ends after PANEL_TAB"
@@ -4431,7 +4432,8 @@ mod tests {
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Off), cx));
         show_category(&view, &mut vcx, Category::Search);
         assert!(
-            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Off, Instant::now())).is_none(),
+            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Off, crate::clock::now()))
+                .is_none(),
             "motion off switches content in one frame"
         );
     }

@@ -668,6 +668,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
     // No theme index unless a test installs one: never the developer's own `~/.config/themes`.
     let (themes_dir, themes_state_dir) = (root.path().join("no-themes"), root.path().join("no-themes-state"));
+    crate::clock::install_for_tests(cx.background_executor().clone());
     let mut ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
     ui.themes_dir = themes_dir;
     ui.themes_state_dir = themes_state_dir;
@@ -1181,7 +1182,7 @@ pub fn set_theme(theme: Theme, cx: &mut App) {
         && !theme.same_colors(&ui.theme)
     {
         // A change mid-fade starts from the colors on screen, not the old theme.
-        ui.fade = Some((ui.theme.clone(), Instant::now(), duration));
+        ui.fade = Some((ui.theme.clone(), crate::clock::now(), duration));
         ui.target = theme;
         if !fading {
             run_fade(cx);
@@ -1200,7 +1201,7 @@ fn run_fade(cx: &mut App) {
             let done = cx.update(|cx| {
                 let ui = cx.global_mut::<Ui>();
                 let Some((from, start, duration)) = &ui.fade else { return true };
-                let t = (start.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+                let t = (crate::clock::elapsed(*start).as_secs_f32() / duration.as_secs_f32()).min(1.0);
                 // Ease-out cubic: quick to start, gentle to land.
                 let eased = 1.0 - (1.0 - t).powi(3);
                 ui.theme = from.mix(&ui.target, eased);

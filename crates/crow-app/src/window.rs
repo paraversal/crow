@@ -765,7 +765,7 @@ impl CrowWindow {
         if hide && self.sidebar.read(cx).focus_handle(cx).contains_focused(window, cx) {
             self.focus_center(window, cx);
         }
-        self.left_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: !hide });
+        self.left_slide = Some(PaneSlide { started: crate::clock::now(), opening: !hide });
         crate::menus::refresh(cx);
         cx.refresh_windows();
     }
@@ -783,7 +783,7 @@ impl CrowWindow {
         crow_core::motion::progress(
             mode,
             slide.started,
-            std::time::Instant::now(),
+            crate::clock::now(),
             crow_core::motion::ms::PANE_SLIDE,
             crow_core::motion::ms::LOW_IN,
         )
@@ -808,7 +808,7 @@ impl CrowWindow {
     fn begin_pane_slide(&mut self, was_visible: bool, cx: &mut Context<Self>) {
         let visible = self.info.read(cx).visible();
         if visible != was_visible {
-            self.pane_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: visible });
+            self.pane_slide = Some(PaneSlide { started: crate::clock::now(), opening: visible });
         }
     }
 
@@ -1104,7 +1104,7 @@ impl CrowWindow {
 
     fn set_title_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let (from, _) = self.title_slide(mode, now);
         self.title_hover = Some((from, f32::from(hovered), now));
         cx.notify();
@@ -1203,7 +1203,7 @@ impl CrowWindow {
         // was; only the text moves, so nothing else in the toolbar shifts.
         let title_content = {
             let mode = cx.global::<Ui>().feedback.mode;
-            let (slide, _) = self.title_slide(mode, std::time::Instant::now());
+            let (slide, _) = self.title_slide(mode, crate::clock::now());
             let folder = {
                 let pane = self.pane().read(cx);
                 pane.folder().is_some().then(|| pane.current_dir(cx))
@@ -1471,7 +1471,7 @@ impl CrowWindow {
             crow_core::motion::progress(
                 band_mode,
                 started,
-                std::time::Instant::now(),
+                crate::clock::now(),
                 crow_core::motion::ms::SEARCH_BAND,
                 crow_core::motion::ms::LOW_IN,
             )
@@ -1605,7 +1605,7 @@ impl CrowWindow {
         let active = self.tabs.active_index();
         let count = self.tabs.len();
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let progress = |motion: &TabMotion| {
             crow_core::motion::progress(
                 mode,
@@ -3858,12 +3858,12 @@ impl Render for CrowWindow {
         if search_open != self.last_search_open {
             self.last_search_open = search_open;
             self.search_motion =
-                (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, std::time::Instant::now()));
+                (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, crate::clock::now()));
         }
-        if self.search_motion.is_some() || self.title_slide(band_mode, std::time::Instant::now()).1 {
+        if self.search_motion.is_some() || self.title_slide(band_mode, crate::clock::now()).1 {
             window.request_animation_frame();
         }
-        let tab_now = std::time::Instant::now();
+        let tab_now = crate::clock::now();
         self.track_tabs(cx.global::<Ui>().feedback.mode, tab_now, cx);
         if !self.tab_motions.is_empty() {
             window.request_animation_frame();
@@ -4002,7 +4002,7 @@ impl Render for CrowWindow {
             crow_core::motion::progress(
                 mode_now,
                 slide.started,
-                std::time::Instant::now(),
+                crate::clock::now(),
                 crow_core::motion::ms::PANE_SLIDE,
                 crow_core::motion::ms::LOW_IN,
             )
@@ -4081,7 +4081,7 @@ impl Render for CrowWindow {
         };
         // A closed overlay's last picture is lent back to its slot for this render
         // (`motion_ui::lend`) and fades out; it takes no input.
-        let (mode, now) = (cx.global::<Ui>().feedback.mode, std::time::Instant::now());
+        let (mode, now) = (cx.global::<Ui>().feedback.mode, crate::clock::now());
         // Leaving pictures are drawn under the live overlays, so a new sheet's
         // buttons are never covered by an old panel that is still fading.
         let mut behind: Vec<gpui::AnyElement> = Vec::new();

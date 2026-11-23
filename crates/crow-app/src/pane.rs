@@ -1075,7 +1075,7 @@ impl Pane {
     /// Whether the focused folder has motion running, for tests.
     #[cfg(test)]
     pub fn animating(&self, cx: &gpui::App) -> bool {
-        self.focused_folder().read(cx).animating(Instant::now())
+        self.focused_folder().read(cx).animating(crate::clock::now())
     }
 
     /// Where the last icon reflow found `path`, even after its glide expired.
@@ -1825,7 +1825,7 @@ impl Pane {
     }
 
     pub fn begin_list_fade(&mut self) {
-        self.list_fade = Some(Instant::now());
+        self.list_fade = Some(crate::clock::now());
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -1842,7 +1842,7 @@ impl Pane {
         }
         // Visible rows glide to their new places and rows that come into view fade in
         // (Low fades the list). A grid of more than ~200 visible tiles just snaps.
-        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, crate::clock::now(), cx)
             .filter(|motion| motion.captured_rows() <= REORDER_MAX_ROWS)
             .map(ViewMotion::for_reorder);
         if self.apply_sort(sort, cx) {
@@ -1948,7 +1948,7 @@ impl Pane {
             return;
         }
         self.cancel_marquee(cx);
-        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx);
+        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, crate::clock::now(), cx);
         self.apply_mode(mode, cx);
         self.view_motion = motion;
         self.child_reveal = None;
@@ -1966,7 +1966,7 @@ impl Pane {
             self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
         }
         if mode == ViewMode::Gallery {
-            self.gallery.reveal = Some(Instant::now());
+            self.gallery.reveal = Some(crate::clock::now());
             if let Some(ix) = self.focused_folder().read(cx).cursor_ix() {
                 self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
             }
@@ -2354,7 +2354,7 @@ impl Pane {
                 self.truncate(k + 1, cx);
                 self.push_folder(path, false, cx);
                 if opens_child {
-                    self.child_reveal = Some((self.folders[k + 1].entity_id(), Instant::now()));
+                    self.child_reveal = Some((self.folders[k + 1].entity_id(), crate::clock::now()));
                 }
             }
             None => self.truncate(k + 1, cx),
@@ -4086,7 +4086,7 @@ impl Pane {
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
         let mode = ui.feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = self.icon_resolver(0, cx);
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
@@ -4486,7 +4486,8 @@ impl Pane {
                     || before.tile_height != after.tile_height
                     || before.icon_size != after.icon_size;
                 if reflowed
-                    && let Some(motion) = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+                    && let Some(motion) =
+                        ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, crate::clock::now(), cx)
                 {
                     #[cfg(test)]
                     {
@@ -4667,7 +4668,7 @@ impl Pane {
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
         let mode = ui.feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = self.icon_resolver(0, cx);
         let active = self.focus.is_focused(window);
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
@@ -5157,7 +5158,7 @@ impl Pane {
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
         let mode = ui.feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && self.focus.is_focused(window);
         let glide = mode == Effective::Full && self.view_motion.is_none() && active;
@@ -5472,7 +5473,7 @@ impl Pane {
             let ui = cx.global::<Ui>();
             (ui.feedback.mode, px(ui.settings.font_size))
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
         // Keep widths independent of selection depth and the Info toggle.
@@ -6156,7 +6157,7 @@ impl Render for Pane {
         self.bench_step(window, cx);
         // Row effects and disclosures are drawn from the clock: keep frames coming
         // while one runs (GPUI only redraws on its own for its animation elements).
-        let frame_now = Instant::now();
+        let frame_now = crate::clock::now();
         if self.folders.iter().any(|folder| folder.read(cx).animating(frame_now)) {
             window.request_animation_frame();
         }
@@ -6203,7 +6204,7 @@ impl Render for Pane {
             let ui = cx.global::<Ui>();
             (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let focused_id = self.focused_folder().entity_id();
         if self.view_motion.as_ref().is_some_and(|motion| {
             motion.folder == focused_id

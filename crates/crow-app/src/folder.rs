@@ -115,7 +115,7 @@ impl RowEffect {
             fx,
             phases: motion::phases(mode, fx),
             row_index,
-            started: Instant::now(),
+            started: crate::clock::now(),
             entry,
             removed: false,
             removed_at: None,
@@ -1314,7 +1314,7 @@ impl Folder {
     /// Clear the effects once the longest one has finished (plus the watcher
     /// grace). A later, shorter effect must not cut an earlier, longer one.
     fn schedule_effect_clear(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let wait = self
             .effects
             .iter()
@@ -1449,7 +1449,7 @@ impl Folder {
     /// A closing's rows leave now; an opening's arrive with the child listing.
     fn record_disclosure(&mut self, path: PathBuf, opening: bool, cx: &gpui::App) {
         let mode = cx.try_global::<crate::ui::Ui>().map_or(Effective::Off, |ui| ui.feedback.mode);
-        let now = Instant::now();
+        let now = crate::clock::now();
         self.disclosures.retain(|d| {
             d.path != path
                 && (d.running(now) || d.started.is_none() && now.saturating_duration_since(d.toggled) < DISCLOSE_WAIT)
@@ -1464,7 +1464,7 @@ impl Folder {
 
     /// Start the openings whose child rows have just appeared.
     fn start_disclosures(&mut self) {
-        let now = Instant::now();
+        let now = crate::clock::now();
         for ix in 0..self.disclosures.len() {
             let d = &self.disclosures[ix];
             if !d.opening || d.started.is_some() || now.saturating_duration_since(d.toggled) >= DISCLOSE_WAIT {
@@ -2023,7 +2023,7 @@ impl Folder {
                 } else {
                     if !effect.removed {
                         effect.removed = true;
-                        effect.removed_at = Some(Instant::now());
+                        effect.removed_at = Some(crate::clock::now());
                     }
                 }
             }

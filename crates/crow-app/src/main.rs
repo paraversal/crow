@@ -25,6 +25,7 @@
 mod actions;
 mod bottom_bar;
 mod chrome;
+mod clock;
 mod cloud_status;
 mod context_menu;
 mod controls;

@@ -562,7 +562,7 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
         })
         .children(footer);
 
-    let now = Instant::now();
+    let now = crate::clock::now();
     let mode = cx.global::<crate::ui::Ui>().feedback.mode;
     let reveal = pane
         .gallery
@@ -614,7 +614,7 @@ fn render_rows(
     let cursor = folder.cursor_ix();
     let multi = folder.selected_count() > 1;
     let motion = pane.view_motion.as_ref().and_then(|motion| {
-        motion.progress(cx.global::<crate::ui::Ui>().feedback.mode, Instant::now()).map(|t| (motion, t))
+        motion.progress(cx.global::<crate::ui::Ui>().feedback.mode, crate::clock::now()).map(|t| (motion, t))
     });
     let rows: Vec<(usize, Entry, bool, Option<std::ops::Range<usize>>)> = range
         .clone()

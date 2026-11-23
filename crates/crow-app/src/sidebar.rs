@@ -967,7 +967,7 @@ impl Sidebar {
         if total.is_zero() {
             return;
         }
-        self.receive = Some((path, Instant::now()));
+        self.receive = Some((path, crate::clock::now()));
         self.receive_generation += 1;
         let generation = self.receive_generation;
         cx.notify();
@@ -1998,7 +1998,7 @@ impl Sidebar {
 
     fn set_header_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<Self>) {
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let target = f32::from(hovered);
         let from = self.header_amount(id, mode, now);
         self.header_hover.retain(|h| h.id != id);
@@ -2017,7 +2017,7 @@ impl Render for Sidebar {
         self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
         self.refresh_names(&rows, cx);
-        let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
+        let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, crate::clock::now());
         self.track_sections(&rows, motion_mode, motion_now);
         self.header_hover.retain(|h| h.amount(motion_mode, motion_now).1 || h.target > 0.0);
         let hovering_moves = self.header_hover.iter().any(|h| h.amount(motion_mode, motion_now).1);
@@ -2041,7 +2041,7 @@ impl Render for Sidebar {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let mode = ui.feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = crate::icon_packs::Resolver::for_source(cx, &ui.settings.icon_pack);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);

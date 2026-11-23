@@ -214,7 +214,7 @@ impl TextInput {
             blink_loop: false,
             refuse: None,
             refuse_generation: 0,
-            shown_at: Instant::now(),
+            shown_at: crate::clock::now(),
         }
     }
 
@@ -265,7 +265,7 @@ impl TextInput {
         }
         self.refuse_generation += 1;
         let generation = self.refuse_generation;
-        self.refuse = Some((generation, Instant::now()));
+        self.refuse = Some((generation, crate::clock::now()));
         cx.notify();
         let total: Duration = crow_core::motion::phases(mode, crow_core::motion::Fx::Refuse).iter().sum();
         cx.spawn(async move |this, cx| {
@@ -1171,7 +1171,7 @@ impl Render for TextInput {
         let chrome = self.chrome;
         let numeric = self.numeric;
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let refuse_look = self.refuse.and_then(|(_, started)| {
             if mode == Effective::Off {
                 return None;
