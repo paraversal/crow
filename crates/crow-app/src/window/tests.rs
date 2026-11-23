@@ -16924,6 +16924,37 @@ fn pump_batch(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn batch_rename_preview_names_align_with_the_heading(cx: &mut TestAppContext) {
+    let root = fixture("batch-preview-columns");
+    std::fs::write(root.join("notes with a substantially longer name.txt"), "").unwrap();
+    for width in [640., 1080.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 600.);
+        cx.simulate_keystrokes("cmd-a f2");
+        settle(&view, &mut cx);
+
+        for filled in [false, true] {
+            if filled {
+                cx.simulate_input("notes");
+                cx.simulate_keystrokes("tab");
+                cx.simulate_input("revised");
+                pump_batch(&mut cx);
+            }
+            let heading = cx.debug_bounds("batch-preview-new-name-heading").expect("New name heading");
+            for selector in [
+                "batch-preview-new-name-0",
+                "batch-preview-new-name-1",
+                "batch-preview-new-name-2",
+                "batch-preview-new-name-3",
+            ] {
+                let name = cx.debug_bounds(selector).expect("preview name");
+                assert_eq!(name.left(), heading.left(), "width {width}, filled {filled}, {selector}");
+                assert!(name.right() <= heading.right());
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn batch_rename_sheet_previews_applies_one_activity_and_undo_selects(cx: &mut TestAppContext) {
     let root = fixture("batch-sheet-apply");
     let (view, mut cx) = open(cx, &root);

@@ -6,7 +6,7 @@
 use super::*;
 use crow_core::batch_rename::{AddPosition, Preview, RenameForm, RenameInput, RenameKind, RowState, preview};
 use crow_fs::ops::{BatchRenameEntry, BatchRenameInput, BatchRowState, BatchValidation, validate_batch_rename};
-use gpui::{AnyElement, UniformListScrollHandle, uniform_list};
+use gpui::{AnyElement, Pixels, UniformListScrollHandle, uniform_list};
 
 pub(crate) struct BatchRenameSheet {
     pub(crate) focus: FocusHandle,
@@ -44,6 +44,7 @@ static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 const LARGE_SELECTION: usize = 500;
 /// Keystrokes within this window share one preview rebuild on a large selection.
 const PREVIEW_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
+const PREVIEW_ARROW_WIDTH: Pixels = px(16.);
 
 fn batch_inputs(preview: &Preview) -> Vec<BatchRenameInput> {
     preview
@@ -546,8 +547,11 @@ impl CrowWindow {
             .gap_2()
             .text_size(px(11.))
             .text_color(muted)
-            .child(div().flex_1().child("Original"))
-            .child(div().flex_1().child("New name"));
+            .child(div().flex_1().min_w_0().child("Original"))
+            .child(div().w(PREVIEW_ARROW_WIDTH).flex_none())
+            .child(
+                div().debug_selector(|| "batch-preview-new-name-heading".into()).flex_1().min_w_0().child("New name"),
+            );
         let rows = sheet.preview.rows.len();
         let list = uniform_list("batch-preview", rows, cx.processor(Self::render_batch_preview_rows))
             .track_scroll(&sheet.preview_scroll)
@@ -678,6 +682,7 @@ impl CrowWindow {
                         .role(Role::ListItem)
                         .aria_label(format!("{} becomes {}{detail}", row.original_name, row.destination_name))
                         .h(px(24.))
+                        .w_full()
                         .flex()
                         .items_center()
                         .gap_2()
@@ -691,20 +696,38 @@ impl CrowWindow {
                                 .text_ellipsis()
                                 .child(row.original_name.clone()),
                         )
-                        .child(div().text_color(muted).child("→"))
+                        .child(div().w(PREVIEW_ARROW_WIDTH).flex_none().text_center().text_color(muted).child("→"))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_color(if line.is_empty() { color(theme.role("fg")) } else { color_ })
-                                .child(row.destination_name.clone()),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .debug_selector(move || format!("batch-preview-new-name-{index}"))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_color(if line.is_empty() { color(theme.role("fg")) } else { color_ })
+                                        .child(row.destination_name.clone()),
+                                )
+                                .when(!line.is_empty(), |destination| {
+                                    destination.child(
+                                        div()
+                                            .max_w(gpui::relative(0.5))
+                                            .flex_none()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_size(px(11.))
+                                            .text_color(color_)
+                                            .child(line.to_owned()),
+                                    )
+                                }),
                         )
-                        .when(!line.is_empty(), |row| {
-                            row.child(div().text_size(px(11.)).text_color(color_).child(line.to_owned()))
-                        })
                         .into_any_element(),
                 )
             })
