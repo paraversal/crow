@@ -7225,6 +7225,8 @@ fn palette_twins_get_distinct_labels(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-k");
     cx.simulate_input("twin");
     settle(&view, &mut cx);
+    wait_for_palette_files(&view, &mut cx);
+    settle_palette(&view, &mut cx);
     let rows = view.read_with(&cx, |w, _| w.palette_rows());
     assert_eq!(rows.len(), 2, "two folders named twin: {rows:?}");
     assert!(rows[0].ends_with("/a/twin") && rows[1].ends_with("/b/twin"), "the paths tell them apart: {rows:?}");
