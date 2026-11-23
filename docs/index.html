@@ -140,10 +140,8 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .split .sub { margin: -16px 0 28px; }
 .list { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 48px; }
 .list li { padding: 14px 0; border-bottom: 1px solid var(--line); }
-.note { margin: 28px 0 0; color: var(--muted); }
 .example { margin-top: 72px; }
-.example h3 { margin: 0 0 6px; font-size: 22px; font-weight: 600; }
-.example .sub { margin: 0 0 28px; }
+.example h3 { margin: 0 0 24px; font-size: 22px; font-weight: 600; }
 .crops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0; padding: 0; list-style: none; }
 .crops figure { margin: 0; }
 .crops figcaption { margin-top: 12px; color: var(--muted); font-size: 15px; }
@@ -353,11 +351,9 @@ footer nav { gap: 22px; }
         <li>A value in the bottom bar</li>
         <li>File and folder icon packs</li>
       </ul>
-      <p class="note">They can also react when the folder, the selection or the files change. Approve each one once, then turn it on or off in Settings ▸ Plugins.</p>
 
       <div class="example" id="git" role="group" aria-labelledby="git-h">
-        <h3 id="git-h">Example: Git</h3>
-        <p class="sub">A bundled plugin. Turn it on in Settings ▸ Plugins, or leave it off</p>
+        <h3 id="git-h">Git, included</h3>
         <ul class="crops">
           <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><span class="crop shot" style="--x:480;--y:95;--cw:480;--ch:360"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Badges in the listing</figcaption></figure></li>
           <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git projects in the sidebar"><span class="crop shot" style="--x:0;--y:772;--cw:470;--ch:352"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Branch and changes per project</figcaption></figure></li>
