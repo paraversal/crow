@@ -1171,12 +1171,20 @@ async fn wait_quiet(handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) {
 
 fn check_windows(tree: &Path, cx: &mut AsyncApp) -> Option<Violation> {
     for handle in cx.update(|cx| cx.windows()) {
-        let Some(handle) = handle.downcast::<CrowWindow>() else { continue };
-        if let Ok(found) = handle.update(cx, |view, window, cx| {
-            view.check_invariants_with_focus(window, cx, false, Some(tree), window.is_window_active())
-        }) && let Some(violation) = found.into_iter().next()
-        {
-            return Some(violation);
+        if let Some(handle) = handle.downcast::<CrowWindow>() {
+            if let Ok(found) = handle.update(cx, |view, window, cx| {
+                view.check_invariants_with_focus(window, cx, false, Some(tree), window.is_window_active())
+            }) && let Some(violation) = found.into_iter().next()
+            {
+                return Some(violation);
+            }
+        } else if let Some(handle) = handle.downcast::<crate::settings_window::SettingsWindow>() {
+            // A Settings window the run opened (cmd-,) is checked like a browser window.
+            if let Ok(found) = handle.update(cx, |view, window, cx| view.check_invariants(window, cx))
+                && let Some(violation) = found.into_iter().next()
+            {
+                return Some(violation);
+            }
         }
     }
     None

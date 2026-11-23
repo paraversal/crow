@@ -15489,6 +15489,69 @@ fn fuzz_run_and_replay_start_from_the_same_seeded_surfaces(cx: &mut TestAppConte
     assert_eq!((run.tabs, run.windows, run.text_focused), (replay.tabs, replay.windows, replay.text_focused));
 }
 
+/// A run that drives every open browser window, not only the first. Opens a second
+/// window with the first step, then each step goes to a window picked from the
+/// seed; the invariants already cover every window. TST-6: the second window used
+/// to be passive.
+fn fuzz_run_two_windows(
+    seed: u64,
+    steps: usize,
+    tree: &Path,
+    options: &FuzzOptions,
+    cx: &mut TestAppContext,
+) -> Result<(), Box<crate::fuzz::Violation>> {
+    use crate::fuzz::{Step, StepGen, state};
+    let (first, mut first_cx) = fuzz_setup(tree, seed, options, cx);
+    apply_and_check(&first, &Step::Keys("cmd-n".into()), tree, None, &mut first_cx).map_err(Box::new)?;
+    settle(&first, &mut first_cx);
+    let mut generator = StepGen::new(seed);
+    for index in 0..steps {
+        let windows: Vec<WindowHandle<CrowWindow>> =
+            cx.read(|cx| cx.windows().into_iter().filter_map(|window| window.downcast::<CrowWindow>()).collect());
+        assert!(!windows.is_empty(), "seed {seed} step {index}: every browser window closed");
+        let chosen = windows[(seed as usize).wrapping_add(index * 7) % windows.len()];
+        let mut window_cx = VisualTestContext::from_window(chosen.into(), cx);
+        let view = chosen.root(&mut window_cx).expect("root view");
+        let current = state(&view, &mut window_cx);
+        let step = generator.next(&current);
+        println!("seed {seed} step {index} ({} windows): {step:?}", windows.len());
+        apply_and_check(&view, &step, tree, None, &mut window_cx).map_err(Box::new)?;
+    }
+    Ok(())
+}
+
+#[gpui::test]
+fn fuzz_two_windows_smoke(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-two-windows", 40);
+    let options = FuzzOptions::new(40, EdgeTree::default(), false);
+    for seed in [1, 2] {
+        if let Err(violation) = fuzz_run_two_windows(seed, 30, &tree, &options, cx) {
+            panic!("two windows, seed {seed}: {} — {}", violation.check, violation.detail);
+        }
+    }
+}
+
+/// The second-window shakeout: `CROW_FUZZ_MINUTES=2 CROW_FUZZ_SHRINK_SECS=0 cargo test -p crow-app
+/// fuzz_two_windows_long -- --ignored --nocapture`. Seeds count up from `CROW_FUZZ_SEED` (default 1).
+#[gpui::test]
+#[ignore]
+fn fuzz_two_windows_long(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-two-windows-long", 200);
+    let options = FuzzOptions::new(200, EdgeTree::small(), false);
+    let minutes = std::env::var("CROW_FUZZ_MINUTES").ok().and_then(|value| value.parse::<f64>().ok()).unwrap_or(2.0);
+    let first = std::env::var("CROW_FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1);
+    let deadline = Instant::now() + Duration::from_secs_f64(minutes * 60.);
+    let mut seed = first;
+    while Instant::now() < deadline {
+        println!("two windows, seed {seed}");
+        if let Err(violation) = fuzz_run_two_windows(seed, 300, &tree, &options, cx) {
+            panic!("two windows, seed {seed}: {} — {}", violation.check, violation.detail);
+        }
+        seed += 1;
+    }
+    println!("two windows: seeds {first}..{seed} clean in {minutes} minutes");
+}
+
 #[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
