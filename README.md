@@ -21,7 +21,7 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 </tr>
 <tr>
 <td><picture><source srcset="docs/media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/view-gallery-light.webp" alt="Gallery view"></picture><br><b>Four views, remembered per folder.</b> Icons, list, columns and gallery, with Preview and Info beside them.</td>
-<td><picture><source srcset="docs/media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/git-list-light.webp" alt="A list with Git badges"></picture><br><b>Git, in the listing.</b> Badges, lines changed and a diff beside the file, from an optional bundled plugin.</td>
+<td><picture><source srcset="docs/media/git-rows-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/git-rows-light.webp" alt="Three files in a list: a ? badge on a new file, an ignored file tinted, an M badge and the lines changed on a modified one"></picture><br><b>Git, in the listing.</b> Badges, lines changed and a diff beside the file, from an optional bundled plugin.</td>
 </tr>
 <tr>
 <td><picture><source srcset="docs/media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img src="docs/media/persona-developer-light.webp" alt="Crow set up for a developer"></picture><br><b>Make it yours.</b> Themes, icon packs, five sidebar styles, a Vim layer, rebindable keys.</td>

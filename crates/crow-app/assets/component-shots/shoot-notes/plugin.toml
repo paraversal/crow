@@ -1,0 +1,7 @@
+id = "example.shoot-notes"
+name = "Shoot Notes"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["column", "decoration", "sidebar"]
+permissions = { fs = "none" }

@@ -1,0 +1,45 @@
+Crow patch: let the headless test platform render at a chosen scale factor.
+
+`TestWindow` is fixed at 2x, so `Window::render_to_image` (used by
+`crow --component-shot`, which needs gpui's `test-support`) can only produce 2x
+pixels. `gpui::set_test_window_scale_factor(f)` sets the scale factor of test
+windows created afterwards (default 2.0, so nothing changes unless it is
+called). Both items are behind `any(test, feature = "test-support")`: a normal
+build compiles none of this.
+
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1675,6 +1675,18 @@
+         (false, false) => display_bounds.origin,
+     };
+     window_bounds_ctor(Bounds::new(final_origin, base_size))
++}
++
++/// The scale factor of windows the test platform creates next (bits of an `f32`; 2.0 by default).
++#[cfg(any(test, feature = "test-support"))]
++pub(crate) static TEST_WINDOW_SCALE_FACTOR: std::sync::atomic::AtomicU32 =
++    std::sync::atomic::AtomicU32::new(0x4000_0000);
++
++/// Sets the scale factor of test-platform windows created from now on, so a headless
++/// `render_to_image` can produce 1x, 2x or 3x pixels.
++#[cfg(any(test, feature = "test-support"))]
++pub fn set_test_window_scale_factor(scale_factor: f32) {
++    TEST_WINDOW_SCALE_FACTOR.store(scale_factor.to_bits(), std::sync::atomic::Ordering::Relaxed);
+ }
+ 
+ impl Window {
+--- a/crates/gpui/src/platform/test/window.rs
++++ b/crates/gpui/src/platform/test/window.rs
+@@ -131,8 +131,10 @@
+             text_input_configurations: Vec::new(),
+             text_input_state_changes: Vec::new(),
+             is_fullscreen: false,
+-            // Preserve the test platform's historical 2x default.
+-            scale_factor: 2.0,
++            // The test platform's historical 2x default, unless `set_test_window_scale_factor` changed it.
++            scale_factor: f32::from_bits(
++                crate::window::TEST_WINDOW_SCALE_FACTOR.load(std::sync::atomic::Ordering::Relaxed),
++            ),
+             appearance: WindowAppearance::Light,
+             decorations: Decorations::default(),
+             external_drag_files: Vec::new(),
