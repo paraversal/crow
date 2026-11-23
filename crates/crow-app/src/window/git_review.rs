@@ -143,7 +143,7 @@ impl CrowWindow {
     }
 
     pub(super) fn open_git_review(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if !crate::git::provider_enabled(cx) {
+        if !crate::git::provider_enabled(cx) || self.overlay_open() {
             return;
         }
         let focus = cx.focus_handle();

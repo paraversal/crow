@@ -46,7 +46,7 @@ fn available(cx: &gpui::App) -> Vec<(String, String)> {
 
 impl CrowWindow {
     pub(super) fn choose_list_columns(&mut self, _: &ChooseListColumns, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some() || self.pane().read(cx).mode() != crow_core::ViewMode::List {
+        if self.search.is_some() || self.overlay_open() || self.pane().read(cx).mode() != crow_core::ViewMode::List {
             return;
         }
         let Some(folder) = self.pane().read(cx).focused_path(cx) else { return };

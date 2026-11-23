@@ -27,13 +27,7 @@ pub(super) struct TagPicker {
 
 impl CrowWindow {
     pub(super) fn open_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some()
-            || self.tag_picker.is_some()
-            || self.sheet.is_some()
-            || self.palette.is_some()
-            || self.picker.is_some()
-            || self.why.is_some()
-        {
+        if self.search.is_some() || self.overlay_open() {
             return;
         }
         crate::tags::refresh_if_stale(cx);

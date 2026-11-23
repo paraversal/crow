@@ -349,7 +349,7 @@ impl CrowWindow {
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                if this.sheet.is_some() {
+                if this.overlay_open() {
                     return;
                 }
                 // A Trash macOS will not let Crow list is unknown, never empty.

@@ -777,13 +777,8 @@ fn single_body(
     let added = entry.added.or_else(|| fresh.and_then(|e| e.added));
     let folder = entry.is_dir && !entry.is_package() && !entry.is_symlink;
     let (size, size_stale) = if entry.is_dir && !entry.is_symlink {
-        if cx.global::<crate::ui::Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
-            ("--".to_owned(), false)
-        } else {
-            cx.try_global::<SizeService>()
-                .and_then(|service| service.0.read(cx).size(&entry.path))
-                .map_or_else(|| ("--".to_owned(), false), |size| (crow_fs::human_size(size.bytes), size.stale))
-        }
+        crate::folder_sizes::visible_size(&entry.path, cx)
+            .map_or_else(|| ("--".to_owned(), false), |size| (crow_fs::human_size(size.bytes), size.stale))
     } else if entry.is_dir {
         ("--".to_owned(), false)
     } else {

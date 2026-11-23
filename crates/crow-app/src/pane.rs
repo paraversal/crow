@@ -1225,11 +1225,7 @@ impl Pane {
     /// The preview column's aria label: a folder's summary or a file's preview.
     pub fn preview_label(&self, cx: &gpui::App) -> Option<String> {
         let (entry, items) = self.preview_parts(cx)?;
-        let size = if entry.is_dir && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible {
-            cx.try_global::<SizeService>().and_then(|service| service.0.read(cx).size(&entry.path)).map(Into::into)
-        } else {
-            None
-        };
+        let size = if entry.is_dir { crate::folder_sizes::visible_size(&entry.path, cx).map(Into::into) } else { None };
         if entry.is_dir && !entry.is_package() {
             Some(preview::folder_spoken(&entry.name, items, size))
         } else {
@@ -3253,6 +3249,9 @@ impl Pane {
                 sender.send(chosen).ok();
             }),
         ) {
+            // No menu opened: nothing will call back, so nothing stays "open".
+            self.context_menu = None;
+            self.context_menu_plugins.clear();
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -5678,12 +5677,8 @@ impl Pane {
             let body = match tab {
                 InfoTab::Preview => {
                     let folder = entry.is_dir && !entry.is_package();
-                    let size = if entry.is_dir
-                        && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible
-                    {
-                        cx.try_global::<SizeService>()
-                            .and_then(|service| service.0.read(cx).size(&entry.path))
-                            .map(Into::into)
+                    let size = if entry.is_dir {
+                        crate::folder_sizes::visible_size(&entry.path, cx).map(Into::into)
                     } else {
                         None
                     };

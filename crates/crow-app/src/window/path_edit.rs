@@ -32,12 +32,7 @@ impl CrowWindow {
             window.focus(&focus, cx);
             return;
         }
-        if self.sheet.is_some()
-            || self.why.is_some()
-            || self.picker.is_some()
-            || self.palette.is_some()
-            || self.pane().read(cx).is_renaming()
-        {
+        if self.overlay_open() || self.pane().read(cx).is_renaming() {
             return;
         }
         let typed = {

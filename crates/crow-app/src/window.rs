@@ -529,6 +529,18 @@ impl CrowWindow {
         window.focus(&handle, cx);
     }
 
+    /// Whether any modal surface (sheet, palette, pickers, review) is open. Every
+    /// way of opening one checks this, so two never stack and none steals focus.
+    pub(crate) fn overlay_open(&self) -> bool {
+        self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some()
+            || self.git_review.is_some()
+            || self.column_picker.is_some()
+            || self.tag_picker.is_some()
+    }
+
     /// The focus surfaces the topmost overlay owns, in the precedence the fuzzer's
     /// focus invariant uses. Empty when no overlay is open: the pane, the sidebar
     /// and their text fields own focus then.
@@ -1727,12 +1739,10 @@ impl CrowWindow {
     ) -> gpui::Stateful<gpui::Div> {
         let tab = self.info.read(cx).tab();
         let folder_size = entry.and_then(|entry| {
-            if !entry.is_dir || cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+            if !entry.is_dir {
                 return None;
             }
-            cx.try_global::<crate::folder_sizes::SizeService>()
-                .and_then(|service| service.0.read(cx).size(&entry.path))
-                .map(Into::into)
+            crate::folder_sizes::visible_size(&entry.path, cx).map(Into::into)
         });
         let cloud = entry.and_then(|entry| {
             cx.try_global::<crate::cloud_status::CloudStatusService>()
@@ -3115,6 +3125,10 @@ impl CrowWindow {
     }
 
     fn open_picker(&mut self, infos: Vec<crow_theme::ThemeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        // The list loads in the background; something else may have opened meanwhile.
+        if self.overlay_open() {
+            return;
+        }
         let current = cx.global::<Ui>().settings.theme.clone();
         let choice = crate::theme_choice::ThemeChoice::new(infos, &current);
         let focus = cx.focus_handle();
@@ -3391,10 +3405,10 @@ impl CrowWindow {
         {
             return;
         }
-        if !crate::plugins::begin_command_preparation(cx) {
+        let Some(preparation) = crate::plugins::begin_command_preparation(cx) else {
             operations::message("A plugin command is already being prepared; try again.", true, cx);
             return;
-        }
+        };
         let capture = crate::plugins::CommandCapture {
             surface: context.surface,
             scope: context.scope.clone(),
@@ -3422,7 +3436,8 @@ impl CrowWindow {
         let this_capture = capture.clone();
         cx.spawn_in(window, async move |this, cx| {
             let prepared = task.await;
-            cx.update(|_, cx| crate::plugins::end_command_preparation(cx)).ok();
+            // Also released if the window closes before this point and the task is dropped.
+            drop(preparation);
             this.update_in(cx, |_, window, cx| {
                 if !crate::plugins::command_available(&action, window, cx)
                     || !crate::plugins::capture_current(&this_capture, window, cx)

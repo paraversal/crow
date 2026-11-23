@@ -216,6 +216,15 @@ pub fn collapse_chevron(
         .on_click(move |_, window, cx| window.dispatch_action(dispatch.boxed_clone(), cx))
 }
 
+/// Tooltip text is often a file name; control characters in it must not reach text
+/// shaping, which rejects newlines.
+fn tooltip_label(label: SharedString) -> SharedString {
+    match crate::style::display_text(&label) {
+        std::borrow::Cow::Borrowed(_) => label,
+        std::borrow::Cow::Owned(clean) => clean.into(),
+    }
+}
+
 /// Attach a tooltip with an optional displayed key. The element keeps its aria
 /// label; the tooltip's own label is `label` plus the key.
 pub fn with_tooltip<E: StatefulInteractiveElement>(
@@ -223,7 +232,7 @@ pub fn with_tooltip<E: StatefulInteractiveElement>(
     label: impl Into<SharedString>,
     keys: Option<SharedString>,
 ) -> E {
-    let label = label.into();
+    let label = tooltip_label(label.into());
     let spoken = tooltip_text(&label, keys.as_deref());
     tooltip(element, label, keys, spoken)
 }
@@ -237,7 +246,7 @@ pub fn with_action_tooltip<E: StatefulInteractiveElement>(
     scope: KeyScope,
     cx: &App,
 ) -> E {
-    let label = label.into();
+    let label = tooltip_label(label.into());
     let keys = keys::text(action, scope, cx);
     let spoken = match keys::spoken_for(action, scope, cx) {
         Some(spoken) => tooltip_text(&label, Some(&spoken)),
@@ -251,6 +260,12 @@ mod tests {
     use super::*;
     use crate::actions::MoveUp;
     use gpui::{TestAppContext, VisualTestContext, point, size};
+
+    #[test]
+    fn tooltip_labels_lose_control_characters() {
+        assert_eq!(tooltip_label("a\nb".into()), "a b");
+        assert_eq!(tooltip_label("plain".into()), "plain");
+    }
 
     #[test]
     fn tooltip_text_joins_label_and_key() {

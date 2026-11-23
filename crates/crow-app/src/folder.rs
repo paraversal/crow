@@ -2424,7 +2424,10 @@ impl Folder {
             }
             this.update(cx, |this, cx| {
                 this.applying = false;
-                if this.generation == generation && this.sort != sort {
+                if this.generation == generation && (this.sort != sort || !Arc::ptr_eq(&this.entries, &entries)) {
+                    // A re-sort or load replaced the listing while this merge ran. The
+                    // merge was against the old one; re-stat these paths in the next
+                    // batch rather than redo a 100k merge on the main thread.
                     this.pending.extend(paths);
                 } else if this.generation == generation {
                     // The paths this batch added: the reconcile re-stats only those.
@@ -2438,13 +2441,6 @@ impl Folder {
                         }
                     }
                     let added: Vec<PathBuf> = added.into_iter().collect();
-                    // A load or re-sort may have replaced the listing while the
-                    // background merge ran; merge into the current one then.
-                    let updated = if Arc::ptr_eq(&this.entries, &entries) {
-                        updated
-                    } else {
-                        crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
-                    };
                     this.replace_entries_after(updated, Some(&stats), cx);
                     cx.emit(FolderEvent::WatcherApplied {
                         paths: stats.iter().map(|(path, _)| path.clone()).collect(),
@@ -2520,14 +2516,16 @@ impl Folder {
                     this.pending.extend(pending_paths);
                     return;
                 }
+                // The listing was replaced while the merge ran: it was merged against
+                // the old one. Re-stat in the next batch, off the main thread.
+                if !Arc::ptr_eq(&this.entries, &entries) {
+                    this.pending.extend(pending_paths);
+                    this.apply_folder_changes(cx);
+                    return;
+                }
                 // Every added path still exists: the listing already has them, so
                 // skip the rebuild (a second 100k-row apply per create).
                 let Some(updated) = updated else { return };
-                let updated = if Arc::ptr_eq(&this.entries, &entries) {
-                    updated
-                } else {
-                    crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
-                };
                 this.replace_entries_after(updated, Some(&stats), cx);
                 cx.emit(FolderEvent::WatcherApplied { paths: stats.iter().map(|(path, _)| path.clone()).collect() });
             })

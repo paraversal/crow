@@ -19592,3 +19592,68 @@ fn a_tag_destination_may_own_focus(cx: &mut TestAppContext) {
     );
     assert!(found.is_empty(), "{found:?}");
 }
+
+#[gpui::test]
+fn no_overlay_opens_over_another(cx: &mut TestAppContext) {
+    let root = fixture("overlay-exclusion");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+        assert!(this.overlay_open());
+        // Each opener refuses while the review is up.
+        this.edit_path(&crate::actions::EditPath, window, cx);
+        assert!(this.path_edit.is_none(), "Edit Path stays closed behind the review");
+        this.open_tag_picker(window, cx);
+        assert!(this.tag_picker.is_none());
+        this.choose_list_columns(&crate::actions::ChooseListColumns, window, cx);
+        assert!(this.column_picker.is_none());
+    });
+    cx.simulate_keystrokes("escape");
+    view.update_in(&mut cx, |this, window, cx| {
+        assert!(!this.overlay_open());
+        this.open_tag_picker(window, cx);
+        assert!(this.tag_picker.is_some() && this.overlay_open());
+        this.open_git_review(root.to_path_buf(), window, cx);
+        assert!(this.git_review.is_none(), "a review does not open over the tag picker");
+        this.edit_path(&crate::actions::EditPath, window, cx);
+        assert!(this.path_edit.is_none(), "Edit Path stays closed behind the tag picker");
+        this.open_picker(Vec::new(), window, cx);
+        assert!(this.picker.is_none(), "a late theme list does not open over another overlay");
+    });
+}
+
+#[gpui::test]
+fn a_size_calculated_once_is_visible_to_every_view(cx: &mut TestAppContext) {
+    // Gallery, Preview and Info read `visible_size`; with sizes Off it must still
+    // answer for a folder View > Calculate Folder Sizes measured, and only for it.
+    let root = fixture("manual-size-everywhere");
+    let (_view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(FixedSizer)));
+    let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+    cx.update(|_, cx| {
+        assert_eq!(cx.global::<crate::ui::Ui>().settings.folder_sizes, crow_core::FolderSizesMode::Off);
+        assert!(crate::folder_sizes::visible_size(&alpha, cx).is_none());
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| {
+            service.measure_once(std::slice::from_ref(&alpha), cx);
+            service.measure_now(cx);
+        });
+        assert!(crate::folder_sizes::visible_size(&alpha, cx).is_some(), "the calculated folder shows its size");
+        assert!(crate::folder_sizes::visible_size(&beta, cx).is_none(), "others stay unmeasured");
+    });
+}
+
+#[gpui::test]
+fn a_context_menu_that_cannot_open_leaves_no_menu_state(cx: &mut TestAppContext) {
+    let root = fixture("menu-refused");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").refuse_context_menu(true));
+    let at = row_center(&mut cx, "row-notes.txt");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.context_menu().is_none()), "no menu is open");
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").refuse_context_menu(false));
+}

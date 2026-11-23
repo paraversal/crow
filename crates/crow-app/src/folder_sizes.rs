@@ -59,6 +59,16 @@ struct Outcome {
     path: PathBuf,
     generation: u64,
     measured: Option<Measured>,
+    /// A change was seen while the walk ran: the bytes may already be out of date.
+    stale: bool,
+}
+
+/// The size to show for a folder: measured automatically when the setting is on,
+/// or measured once by View ▸ Calculate Folder Sizes. One rule for every view.
+pub fn visible_size(path: &Path, cx: &gpui::App) -> Option<SizeView> {
+    let service = cx.try_global::<SizeService>()?.0.read(cx);
+    let automatic = cx.global::<Ui>().settings.folder_sizes == FolderSizesMode::Visible;
+    (automatic || service.manual(path)).then(|| service.size(path)).flatten()
 }
 
 pub(crate) trait Sizer: Send + Sync {
@@ -94,10 +104,15 @@ struct Scheduler {
 }
 
 impl Scheduler {
+    /// Show what the cache holds. A size measured in this session before the saved
+    /// cache finished loading stays: the loaded file is older.
     fn seed(&mut self, cache: &Cache) {
-        self.sizes.clear();
         for (path, entry) in cache.entries() {
-            self.sizes.insert(path.to_path_buf(), SizeView { bytes: entry.bytes, stale: entry.stale, version: 0 });
+            self.sizes.entry(path.to_path_buf()).or_insert(SizeView {
+                bytes: entry.bytes,
+                stale: entry.stale,
+                version: 0,
+            });
         }
     }
 
@@ -168,8 +183,10 @@ impl Scheduler {
             Some(measured) => {
                 self.failed.remove(&outcome.path);
                 self.version += 1;
-                self.sizes
-                    .insert(outcome.path, SizeView { bytes: measured.bytes, stale: false, version: self.version });
+                self.sizes.insert(
+                    outcome.path,
+                    SizeView { bytes: measured.bytes, stale: outcome.stale, version: self.version },
+                );
                 true
             }
             None => {
@@ -183,13 +200,14 @@ impl Scheduler {
 
     /// The cache already marked the event's folder and ancestors; sync the views
     /// and let the next `observe` re-request the visible stale rows.
-    fn mark_stale(&mut self, path: &Path, cache: &Cache) {
+    /// One pass over the views for a whole batch of event paths, not one per event.
+    fn mark_stale(&mut self, paths: &[PathBuf], cache: &Cache) {
         for (entry_path, size) in &mut self.sizes {
             if let Some(entry) = cache.get(entry_path) {
                 size.stale = entry.stale;
             }
         }
-        self.failed.retain(|failed| !failed.starts_with(path) && !path.starts_with(failed));
+        self.failed.retain(|failed| !paths.iter().any(|path| failed.starts_with(path) || path.starts_with(failed)));
     }
 
     fn clear(&mut self) {
@@ -409,7 +427,7 @@ impl FolderSizes {
                 continue;
             }
             let measured = sizer.measure(&request.path, &request.cancel);
-            let outcome = Outcome { path: request.path, generation: request.generation, measured };
+            let outcome = Outcome { path: request.path, generation: request.generation, measured, stale: false };
             if self.scheduler.complete(outcome) {
                 changed = true;
             }
@@ -468,7 +486,8 @@ impl FolderSizes {
                 }
                 {
                     let mut cache = service.cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    *cache = loaded;
+                    // Measurements finished while the file was loading are newer.
+                    cache.absorb_loaded(loaded);
                     service.scheduler.seed(&cache);
                 }
                 service.loaded = true;
@@ -514,6 +533,7 @@ impl FolderSizes {
     fn on_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         let mut changed = false;
         let mut restart = false;
+        let mut touched = Vec::new();
         {
             let mut cache = self.cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
             for event in events {
@@ -545,9 +565,10 @@ impl FolderSizes {
                     cache.mark_stale(&event.path);
                 }
                 cache.set_last_event_id(event.id);
-                self.scheduler.mark_stale(&event.path, &cache);
+                touched.push(event.path);
                 changed = true;
             }
+            self.scheduler.mark_stale(&touched, &cache);
         }
         if restart {
             self.fsevents = None;
@@ -589,13 +610,21 @@ fn spawn_workers(
 fn worker(rx: Receiver<Request>, cache: Arc<RwLock<Cache>>, results: UnboundedSender<Outcome>, sizer: Arc<dyn Sizer>) {
     while let Ok(request) = rx.recv() {
         if request.cancel.is_cancelled() {
-            results.unbounded_send(Outcome { path: request.path, generation: request.generation, measured: None }).ok();
+            results
+                .unbounded_send(Outcome {
+                    path: request.path,
+                    generation: request.generation,
+                    measured: None,
+                    stale: false,
+                })
+                .ok();
             continue;
         }
         let start_event = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).last_event_id();
         // io-ok: size worker thread
         let inode = std::fs::metadata(&request.path).map(|meta| inode(&meta)).unwrap_or(0);
         let measured = sizer.measure(&request.path, &request.cancel);
+        let mut stale = false;
         if let Some(measured) = &measured {
             let mut cache = cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
             let current_event = cache.last_event_id();
@@ -604,10 +633,11 @@ fn worker(rx: Receiver<Request>, cache: Arc<RwLock<Cache>>, results: UnboundedSe
                 // FSEvents saw a change while the walk ran; the walk may have
                 // passed that folder before the change, so the bytes are stale.
                 cache.mark_stale(&request.path);
+                stale = true;
             }
             cache.prune(MAX_ENTRIES);
         }
-        results.unbounded_send(Outcome { path: request.path, generation: request.generation, measured }).ok();
+        results.unbounded_send(Outcome { path: request.path, generation: request.generation, measured, stale }).ok();
     }
 }
 
@@ -753,6 +783,7 @@ mod tests {
             path: PathBuf::from("/a"),
             generation: a.generation,
             measured: Some(Measured { bytes: 10, ..Default::default() }),
+            stale: false,
         }));
         assert_eq!(scheduler.size(Path::new("/a")), None);
     }
@@ -770,8 +801,39 @@ mod tests {
             path: PathBuf::from("/a"),
             generation: requests[0].generation,
             measured: Some(Measured { bytes: 50, ..Default::default() }),
+            stale: false,
         }));
         assert_eq!(scheduler.size(Path::new("/a")), Some(SizeView { bytes: 50, stale: false, version: 1 }));
+    }
+
+    #[test]
+    fn a_walk_that_saw_a_change_stays_stale_and_seeding_keeps_newer_sizes() {
+        let mut scheduler = Scheduler::default();
+        let cache = Cache::default();
+        let requests = scheduler.observe((0, 0), &paths(&["/a"]), &cache);
+        assert!(scheduler.complete(Outcome {
+            path: PathBuf::from("/a"),
+            generation: requests[0].generation,
+            measured: Some(Measured { bytes: 7, ..Default::default() }),
+            stale: true,
+        }));
+        assert_eq!(scheduler.size(Path::new("/a")).map(|size| (size.bytes, size.stale)), Some((7, true)));
+        // The saved cache finishes loading after the measurement: it must not erase it.
+        scheduler.seed(&cache_with("/a", 1, false));
+        scheduler.seed(&cache_with("/b", 2, false));
+        assert_eq!(scheduler.size(Path::new("/a")).map(|size| size.bytes), Some(7));
+        assert_eq!(scheduler.size(Path::new("/b")).map(|size| size.bytes), Some(2));
+    }
+
+    #[test]
+    fn one_batch_of_events_clears_every_failed_path_it_touches() {
+        let mut scheduler = Scheduler::default();
+        scheduler.failed.insert(PathBuf::from("/x/a"));
+        scheduler.failed.insert(PathBuf::from("/y/b"));
+        scheduler.failed.insert(PathBuf::from("/z/c"));
+        scheduler.mark_stale(&[PathBuf::from("/x"), PathBuf::from("/y/b/deep")], &Cache::default());
+        assert_eq!(scheduler.failed.len(), 1);
+        assert!(scheduler.failed.contains(Path::new("/z/c")));
     }
 
     #[test]
@@ -784,6 +846,7 @@ mod tests {
             path: PathBuf::from("/locked"),
             generation: requests[0].generation,
             measured: None,
+            stale: false,
         }));
         assert!(scheduler.observe((0, 0), &paths(&["/locked"]), &cache).is_empty());
         scheduler.observe((0, 0), &[], &cache);

@@ -44,7 +44,7 @@ pub struct Plugins {
     pub handle: Option<PluginHandle>,
     pub surfaces: PluginSurfaces,
     pub command_context: Option<FileCommandContext>,
-    command_preparations: usize,
+    command_preparations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     events: Option<Receiver<HostEvent>>,
     _service: Option<PluginService>,
 }
@@ -134,7 +134,7 @@ fn start_inner(cx: &mut App, config_dir: PathBuf, with_bundled: bool) {
                 handle: Some(handle),
                 surfaces: PluginSurfaces::default(),
                 command_context: None,
-                command_preparations: 0,
+                command_preparations: Default::default(),
                 events: Some(events),
                 _service: Some(service),
             });
@@ -146,7 +146,7 @@ fn start_inner(cx: &mut App, config_dir: PathBuf, with_bundled: bool) {
                 handle: None,
                 surfaces: PluginSurfaces::default(),
                 command_context: None,
-                command_preparations: 0,
+                command_preparations: Default::default(),
                 events: None,
                 _service: None,
             });
@@ -336,20 +336,27 @@ pub fn capture_revision(capture: &CommandCapture) -> u64 {
     std::hash::Hasher::finish(&hasher)
 }
 
-pub fn begin_command_preparation(cx: &mut App) -> bool {
-    let Some(plugins) = cx.try_global::<Plugins>() else { return false };
-    if plugins.command_preparations >= 16 {
-        return false;
+/// One plugin command being prepared. The slot is returned when this is dropped,
+/// including when the window that started it closes and its task is cancelled.
+pub struct CommandPreparation(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for CommandPreparation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
-    cx.global_mut::<Plugins>().command_preparations += 1;
-    true
 }
 
-pub fn end_command_preparation(cx: &mut App) {
-    if let Some(plugins) = cx.try_global::<Plugins>() {
-        let remaining = plugins.command_preparations.saturating_sub(1);
-        cx.global_mut::<Plugins>().command_preparations = remaining;
+const MAX_COMMAND_PREPARATIONS: usize = 16;
+
+/// Claim a preparation slot, or `None` when all of them are taken.
+pub fn begin_command_preparation(cx: &App) -> Option<CommandPreparation> {
+    use std::sync::atomic::Ordering;
+    let counter = &cx.try_global::<Plugins>()?.command_preparations;
+    if counter.fetch_add(1, Ordering::Relaxed) >= MAX_COMMAND_PREPARATIONS {
+        counter.fetch_sub(1, Ordering::Relaxed);
+        return None;
     }
+    Some(CommandPreparation(counter.clone()))
 }
 
 pub fn plugin_name(extension: &crow_core::ExtensionId, cx: &App) -> String {
@@ -780,6 +787,19 @@ mod tests {
         descriptor.extensions = extensions;
         let _ = selection;
         descriptor
+    }
+
+    #[gpui::test]
+    fn a_dropped_preparation_returns_its_slot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_empty(cx);
+            let held: Vec<_> =
+                (0..MAX_COMMAND_PREPARATIONS).map(|_| begin_command_preparation(cx).expect("slot")).collect();
+            assert!(begin_command_preparation(cx).is_none(), "all slots are taken");
+            // A window that closes mid-preparation drops its future, and with it the guard.
+            drop(held);
+            assert!(begin_command_preparation(cx).is_some());
+        });
     }
 
     #[test]
