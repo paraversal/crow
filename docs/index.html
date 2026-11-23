@@ -17,6 +17,7 @@
   --muted: #6a6a72;
   --line: #e4e4e8;
   --eye: #e8a23c;
+  --folder: #2f7de1;
   --shadow: rgba(16, 16, 24, .14);
   color-scheme: light;
 }
@@ -28,6 +29,7 @@
     --muted: #9898a1;
     --line: #26262b;
     --eye: #eaa847;
+    --folder: #5aa5ff;
     --shadow: rgba(0, 0, 0, .55);
     color-scheme: dark;
   }
@@ -136,6 +138,21 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .split .rows { grid-template-columns: 1fr; }
 .sub { margin: -24px 0 40px; color: var(--muted); }
 .split .sub { margin: -16px 0 28px; }
+.list { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 48px; }
+.list li { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.note { margin: 28px 0 0; color: var(--muted); }
+.example { margin-top: 72px; }
+.example h3 { margin: 0 0 6px; font-size: 22px; font-weight: 600; }
+.example .sub { margin: 0 0 28px; }
+.crops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0; padding: 0; list-style: none; }
+.crops figure { margin: 0; }
+.crops figcaption { margin-top: 12px; color: var(--muted); font-size: 15px; }
+/* A crop-in on a full shot: the box is 4:3, the image is scaled and shifted by its pixel box (--x --y --cw --ch of a 2000 px wide shot). */
+.crop { position: relative; display: block; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 12px; border: 1px solid var(--line); background: var(--raised); filter: drop-shadow(0 8px 16px var(--shadow)); }
+.crop img { position: absolute; max-width: none; width: calc(2000 / var(--cw) * 100%); left: calc(var(--x) / var(--cw) * -100%); top: calc(var(--y) / var(--ch) * -100%); }
+.fold { width: 1.05em; height: 1.05em; fill: none; stroke: var(--folder); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -.17em; margin-right: .3em; }
+#keys .rows .k { width: 11em; }
+.rows .k.stack { flex-direction: column; flex-wrap: nowrap; gap: 2px; }
 
 /* Themes */
 .themes-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 18px 32px; margin-bottom: 40px; }
@@ -218,7 +235,8 @@ footer nav { gap: 22px; }
   .clips { grid-template-columns: 1fr; }
   nav a:not(.button) { display: none; }
   .hero { padding-top: 32px; }
-  .pair, .split, .install, .rows { grid-template-columns: 1fr; }
+  .pair, .split, .install, .rows, .list { grid-template-columns: 1fr; }
+  .crops { grid-template-columns: 1fr; }
   .views { grid-template-columns: 1fr 1fr; }
   .numbers { grid-template-columns: 1fr; gap: 28px; }
   section.block { padding-top: 88px; }
@@ -283,7 +301,7 @@ footer nav { gap: 22px; }
       <ul class="rows">
         <li><span class="k"><kbd>/</kbd></span><span>Filter this folder</span></li>
         <li><span class="k"><kbd>⌘L</kbd></span><span>Type a path; Tab completes it</span></li>
-        <li><span class="k"><code>📁 node_modules</code> <code>📁 target</code> <code>📁 .git</code></span><span>skipped in search by default, with a count of what was left out</span></li>
+        <li><span class="k stack"><code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> node_modules</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> target</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> .git</code></span><span>skipped in search by default, with a count of what was left out</span></li>
         <li><span class="k"><kbd>⇧⌘A</kbd></span><span>Search everything, skip nothing</span></li>
         <li><span class="k"><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span>Vim motions and marks, if you want them</span></li>
       </ul>
@@ -295,7 +313,7 @@ footer nav { gap: 22px; }
       <h2 id="fixes-h">The things you stopped asking Finder for.</h2>
       <ul class="rows">
         <li><span class="k">New File</span><span>right in the context menu</span></li>
-        <li><span class="k">Copies</span><span>Pause one. A name conflict waits and the rest keeps going.</span></li>
+        <li><span class="k">Copies</span><span>Pause one. A name conflict waits and the rest keeps going</span></li>
         <li><span class="k">Replace</span><span>the old file goes to the Trash, so ⌘Z brings it back</span></li>
         <li><span class="k">Undo</span><span>an older step from Activity, not just the last one</span></li>
         <li><span class="k">Folder views</span><span>Set per folder, or use the same view everywhere</span></li>
@@ -325,35 +343,27 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="plugins-h">Add what’s missing.</h2>
       <p class="sub">Plugins are small Rhai scripts. You approve what each one may touch.</p>
-      <ul class="rows">
-        <li><span class="k">Sidebar</span><span>A section of folders in the left sidebar</span></li>
-        <li><span class="k">Columns</span><span>Extra columns in List and Columns views</span></li>
-        <li><span class="k">Badges</span><span>Badges and tints on files and folders</span></li>
-        <li><span class="k">Commands</span><span>In the File menu, the palette and the context menu</span></li>
-        <li><span class="k">Preview</span><span>Your own preview for a kind of file</span></li>
-        <li><span class="k">Info</span><span>More fields in the Info tab</span></li>
-        <li><span class="k">Status</span><span>A value in the bottom bar</span></li>
-        <li><span class="k">Hooks</span><span>React when the folder, the selection or the files change</span></li>
-        <li><span class="k">Icon packs</span><span>File and folder icons</span></li>
-        <li><span class="k">Permissions</span><span>Approved once; a changed plugin asks again</span></li>
-        <li><span class="k">Settings</span><span>Turn each plugin on or off in Settings ▸ Plugins</span></li>
-        <li><span class="k">Git</span><span>The first one shipped</span></li>
+      <ul class="list">
+        <li>A section of folders in the left sidebar</li>
+        <li>Extra columns in List and Columns views</li>
+        <li>Badges and tints on files and folders</li>
+        <li>Commands in the File menu, the palette and the context menu</li>
+        <li>A preview for a kind of file</li>
+        <li>More fields in the Info tab</li>
+        <li>A value in the bottom bar</li>
+        <li>File and folder icon packs</li>
       </ul>
-    </div>
-  </section>
+      <p class="note">They can also react when the folder, the selection or the files change. Approve each one once, then turn it on or off in Settings ▸ Plugins.</p>
 
-  <section class="block" id="git" aria-labelledby="git-h">
-    <div class="wrap split">
-      <div>
-        <h2 id="git-h">Your repos, right in the listing.</h2>
-        <p class="sub">A bundled plugin. Turn it on in Settings ▸ Plugins, or leave it off.</p>
-        <ul class="rows">
-          <li><span class="k">M&ensp;?</span><span>Modified and untracked files get a badge in the listing</span></li>
-          <li><span class="k">main&ensp;2</span><span>The sidebar shows each project’s branch and number of changed files</span></li>
-          <li><span class="k">Git Diff</span><span>Staged and unstaged changes, in the right sidebar.</span></li>
+      <div class="example" id="git" role="group" aria-labelledby="git-h">
+        <h3 id="git-h">Example: Git</h3>
+        <p class="sub">A bundled plugin. Turn it on in Settings ▸ Plugins, or leave it off</p>
+        <ul class="crops">
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><span class="crop shot" style="--x:480;--y:95;--cw:480;--ch:360"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Badges in the listing</figcaption></figure></li>
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git projects in the sidebar"><span class="crop shot" style="--x:0;--y:772;--cw:470;--ch:352"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Branch and changes per project</figcaption></figure></li>
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git Diff tab"><span class="crop shot" style="--x:1535;--y:82;--cw:465;--ch:349"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Git Diff beside the file</figcaption></figure></li>
         </ul>
       </div>
-      <button class="zoom" type="button" aria-label="Enlarge the Git list shot"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch."></picture></button>
     </div>
   </section>
 
