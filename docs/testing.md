@@ -702,6 +702,18 @@ fade the trash tail.
 
 ## Motion and sound (U10)
 
+### Testing motion without sleeping
+
+Motion reads one clock, `crate::clock::now()` (`crates/crow-app/src/clock.rs`): `Instant::now()` in the
+app, and in tests (after `ui::init_for_tests`) the GPUI test executor's clock, which stands still until
+the test moves it and is the same clock GPUI's own `with_animation` and springs read. Every animation
+start stamp and every progress sample uses it; throttles, caches and performance timers keep the real
+clock. A window test steps motion with `executor.advance_clock(..)`, or the helpers in
+`window/tests.rs`: `step_motion(view, cx, ms)` (advance, redraw) and `finish_motion(view, cx)` (run a
+slide out). Never `thread::sleep` for motion: a mid-animation assertion samples the frame at exactly
+t = 0, and a finished one steps past the duration. A new animation start or sample takes
+`crate::clock::now()`, not `Instant::now()`.
+
 `crow --motion-lab` (built with `--features motion-lab`, never in the bundle) opens a fake folder where every feedback event (trash, move, undo, new
 folder, refuse, copy, tip, sheet) can be fired in Off, Low and Full and in the three sound
 sets, with slow motion ×5 and the cursor glide. The lab and the app share
