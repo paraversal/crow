@@ -702,7 +702,7 @@ fade the trash tail.
 
 ## Motion and sound (U10)
 
-`crow --motion-lab` opens a fake folder where every feedback event (trash, move, undo, new
+`crow --motion-lab` (built with `--features motion-lab`, never in the bundle) opens a fake folder where every feedback event (trash, move, undo, new
 folder, refuse, copy, tip, sheet) can be fired in Off, Low and Full and in the three sound
 sets, with slow motion ×5 and the cursor glide. The lab and the app share
 `crow_core::motion`, so a duration or look changed there changes both. `p` opens the mock
@@ -728,7 +728,7 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Expand and collapse | List view, a folder with a few items: → or the triangle. Full: the triangle turns, the rows below slide down and the new rows show from the top as the gap opens; ← slides the rows below back up. Low: the new rows fade in, nothing moves. Off: one frame. A folder with hundreds of items opens without a long slide. |
 | Hidden items | A folder with dotfiles (Home): hidden files and folders show dimmed (icon, name and every column) in list and column view, in light and dark themes; selected, the fill stays full and the name stays readable; renaming one shows the field at full contrast. |
 | Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |
-| Lab | `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |
+| Lab | A `--features motion-lab` build of `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |
 
 ## Selection and motion (F1)
 

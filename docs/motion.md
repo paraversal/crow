@@ -109,7 +109,8 @@ hover fills, column resize, divider drags, search results streaming in, context 
 
 ## Measuring
 
-`crow --motion-lab` fires every row effect in the three modes at ×5 slow motion. For frame
+`crow --motion-lab` (a build with `cargo run -p crow-app --features motion-lab -- --motion-lab`; the bundle
+has no lab) fires every row effect in the three modes at ×5 slow motion. For frame
 times use `CROW_BENCH_TRASH=N target/release/crow --bench target/fixture-100k`: it reports
 frames over 1.5× the idle median as hitches. Compare against `main` before calling a
 change a regression.

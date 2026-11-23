@@ -15,6 +15,7 @@
 //! crow --search-trace DIR QUERY [--target PATH] [--names|--contents] [--hidden|--no-hidden] [--everything]
 //!                                  run the real engine and print each batch, the totals and one verdict
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
+//!                                  (only in a build with `--features motion-lab`)
 //! ```
 
 // The `fuzz` feature builds the generator and invariants into the binary for
@@ -49,6 +50,7 @@ mod keymap;
 mod keys;
 mod logging;
 mod menus;
+#[cfg(feature = "motion-lab")]
 mod motion_lab;
 mod motion_ui;
 mod onboarding;
@@ -545,6 +547,7 @@ fn main() -> ExitCode {
         };
     }
 
+    #[cfg(feature = "motion-lab")]
     if args.first().map(String::as_str) == Some("--motion-lab") {
         gpui_platform::application().with_assets(icons::Assets).run(|cx: &mut App| {
             effects::install(cx, Arc::new(effects::SystemEffects));
