@@ -152,8 +152,6 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .comp { display: block; max-width: 100%; height: auto; border-radius: 14px; filter: drop-shadow(0 8px 16px var(--shadow)); }
 .split .list { grid-template-columns: 1fr; }
 .split.wide { grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); gap: 48px; }
-.plug { margin: 0; }
-.plug .comp { margin-left: auto; }
 .rows li.shotrow { grid-column: 1 / -1; align-items: flex-start; }
 .rows .shotrow .k { padding-top: 4px; }
 .rows .shotrow > span:last-child { min-width: 0; }
@@ -327,10 +325,7 @@ footer nav { gap: 22px; }
         <li><span class="k">Folder views</span><span>Set per folder, or use the same view everywhere</span></li>
         <li><span class="k">Terminal</span><span>Open the terminal you choose in the focused folder</span></li>
         <li><span class="k">Customisable</span><span>Keys, themes, icon packs, and sidebar groups with icons of your own</span></li>
-        <!-- Trial: the shot replaces this text row. To revert, delete the shotrow below and uncomment this.
-        <li><span class="k">Compare</span><span>View two photos side by side in the Gallery view</span></li>
-        -->
-        <li class="shotrow"><span class="k">Compare</span><span><button class="zoom" type="button" aria-label="Enlarge the Compare shot: two photos side by side in the Gallery view"><picture><source srcset="media/compare-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/compare-gallery-light.webp" width="680" height="290" alt="Compare two photos in the Gallery view: Reine at dawn and Reine at dusk, side by side, each with its name and size."></picture></button></span></li>
+        <li><span class="k">Compare</span><span>View two images side by side in Gallery view</span></li>
       </ul>
     </div>
   </section>
@@ -368,7 +363,6 @@ footer nav { gap: 22px; }
           </ul>
 
         </div>
-        <figure class="plug"><button class="zoom" type="button" aria-label="Enlarge the plugin shot"><picture><source srcset="media/plugin-surfaces-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/plugin-surfaces-light.webp" width="784" height="264" alt="A plugin at work: a Shoot stages section in the sidebar, a Rating column, RAW badges with a blue tint and a dimmed rejected shot."></picture></button></figure>
       </div>
 
       <div class="example" id="git" role="group" aria-labelledby="git-h">
