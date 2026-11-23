@@ -464,12 +464,29 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     let name = name.to_string_lossy();
                     let hidden = is_hidden(name.as_ref(), metadata.as_ref());
                     let path = entry.path();
+                    // These folders can match themselves, but a predicate miss
+                    // must still prune their descendants.
+                    let skip_reason = if is_dir && !enter_hidden && name.starts_with('.') {
+                        Some(SkipReason::HiddenFolder)
+                    } else if is_dir && !enter_packages && crow_fs::is_package_name(name.as_ref()) {
+                        Some(SkipReason::Package)
+                    } else {
+                        None
+                    };
+                    let descent = if let Some(reason) = skip_reason {
+                        if let Ok(mut list) = skipped.lock() {
+                            list.push(Skip { path: path.to_path_buf(), reason });
+                        }
+                        WalkState::Skip
+                    } else {
+                        WalkState::Continue
+                    };
                     // Kind and age are cheap; tags are a metadata read, so only do
                     // it for candidates that already passed them.
                     let mut tags: Option<Vec<String>> = None;
                     if !predicates.tags.is_empty() {
                         if !predicates.matches_cheap(path, is_dir, modified, run_started) {
-                            return WalkState::Continue;
+                            return descent;
                         }
                         let read = tag_reader
                             .as_ref()
@@ -481,12 +498,12 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                             }
                             Err(_) => {
                                 tag_errors.fetch_add(1, Ordering::Relaxed);
-                                return WalkState::Continue;
+                                return descent;
                             }
                         }
                     }
                     if !predicates.matches_with_tags(path, is_dir, modified, run_started, tags.as_deref()) {
-                        return WalkState::Continue;
+                        return descent;
                     }
                     if metadata_only {
                         metadata_matched.fetch_add(1, Ordering::Relaxed);
@@ -554,24 +571,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                             }
                         }
                     }
-                    // A dot folder is visited, so its name matches, but not descended
-                    // into while Show Hidden Files is off: one visible skip instead of
-                    // walking every dot folder in the home folder. Search everything enters it.
-                    if is_dir && !enter_hidden && name.starts_with('.') {
-                        if let Ok(mut list) = skipped.lock() {
-                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::HiddenFolder });
-                        }
-                        return WalkState::Skip;
-                    }
-                    // A package is a name hit, not a folder to walk; Finder opens it
-                    // rather than browsing it. Search everything looks inside.
-                    if is_dir && !enter_packages && crow_fs::is_package_name(name.as_ref()) {
-                        if let Ok(mut list) = skipped.lock() {
-                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::Package });
-                        }
-                        return WalkState::Skip;
-                    }
-                    WalkState::Continue
+                    descent
                 })
             });
             if metadata_only {
@@ -1886,6 +1886,57 @@ mod tests {
         fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
             self.0.get(path).cloned().unwrap_or_else(|| Ok(Vec::new()))
         }
+    }
+
+    fn assert_predicate_respects_folder_skips(predicates: Predicates) {
+        let root = root("filtered-skip");
+        let files = ["Foo.app/Contents/a.pdf", ".git/b.pdf", "docs/c.pdf"];
+        for file in files {
+            write(&root, file, b"x");
+        }
+        for folder in ["Foo.app", ".git", "docs"] {
+            std::fs::File::open(root.join(folder)).unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        }
+        let tags = files.into_iter().map(|file| (root.join(file), Ok(vec!["Work".into()]))).collect();
+        let query = Query {
+            names: None,
+            contents: None,
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: Arc::new(RuleSet::empty()),
+            everything: false,
+            read_gate: None,
+            predicates,
+            tag_reader: Some(Arc::new(FakeTags(tags))),
+        };
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &Control::new());
+        assert_eq!(paths(&hits), [root.join("docs/c.pdf")]);
+        assert_eq!(
+            summary.skipped,
+            [
+                Skip { path: root.join(".git"), reason: SkipReason::HiddenFolder },
+                Skip { path: root.join("Foo.app"), reason: SkipReason::Package },
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates { kind: Some(Kind::Pdf), ..Predicates::default() });
+    }
+
+    #[test]
+    fn age_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates {
+            modified_within: Some(Duration::from_secs(86_400)),
+            ..Predicates::default()
+        });
+    }
+
+    #[test]
+    fn tag_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates { tags: vec!["Work".into()], ..Predicates::default() });
     }
 
     #[test]
