@@ -23,8 +23,11 @@
 
 mod actions;
 mod bottom_bar;
+mod bundled_grant;
 mod chrome;
 mod cloud_status;
+#[cfg(any(test, feature = "component-shots"))]
+mod component_shot;
 mod context_menu;
 mod controls;
 mod drag_drop;
@@ -462,6 +465,15 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--fuzz") {
         eprintln!("crow --fuzz needs a build with --features fuzz");
         return ExitCode::FAILURE;
+    }
+
+    #[cfg(feature = "component-shots")]
+    if args.first().map(String::as_str) == Some("--component-shot") {
+        return component_shot::run(&args);
+    }
+
+    if args.first().map(String::as_str) == Some("--grant-bundled") {
+        return bundled_grant::run(&args);
     }
 
     if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {

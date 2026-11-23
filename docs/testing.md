@@ -402,6 +402,35 @@ because the app's file-system calls run off the main thread (`crates/crow-app/sr
 fails the tests on a new unmarked one). iCloud Drive placeholders (download on open,
 eviction) are out of scope for the test platform; check a cloud-backed folder by hand.
 
+## Component shots and the isolated Git grant
+
+The website's small shots (`docs/media/<name>-light.webp` and `-dark.webp`: `git-rows`,
+`git-sidebar`, `git-diff`, `compare-gallery`, `plugin-surfaces`) are single components cut out of
+the real window, so a change to a native component changes its shot:
+
+```bash
+scripts/component-shots.sh              # every component, light and dark, PNG in target/component-shots and WebP in docs/media
+scripts/component-shots.sh git-rows     # only those
+cargo run -p crow-app --features component-shots -- --component-shot git-rows --theme finder-dark --out rows.png
+```
+
+`crates/crow-app/src/component_shot.rs` opens the real `CrowWindow` in GPUI's headless test
+context (no window, the Metal headless renderer, the Mac text system, the built-in Finder themes,
+the Lucide pack from `docs/examples/icon-pack`), on fixture folders and throwaway Git repositories
+with fixed dates under a scratch folder, drives it to the wanted state and crops the elements
+(found by `debug_selector`, so it needs a debug build) with 20 pt of padding at 2x (GPUI's headless window is
+fixed at 2x). Nothing reads or writes your own config, home or Git settings. The feature `component-shots`
+is never in the bundle. Each component has a test that it renders in both themes, is padded and not blank,
+and that a render repeats byte for byte. `--whole-window` writes the full window instead, to see why a crop is missing.
+Look at every new or changed shot at 100% and 2x before committing it.
+
+The bundled Git package runs only with a grant for its exact digest. Isolated runs (the shot scripts,
+the component shots, tests) need that grant without the Settings approval: `crow --grant-bundled git
+--config-dir DIR` writes it to `DIR/plugins.toml` through the same `grants::approve` the approval uses, with the
+digest of the bundle embedded in this binary (a changed bundle is granted afresh). `DIR` must exist and be below the
+system temp folder or `$CROW_SHOT_HOME`, and it is refused when it is the folder the app would use as its real config.
+`scripts/shot.sh` uses it for demo-home shots. A real run is unchanged: it still asks.
+
 ## Folder sizes
 
 Set `folder_sizes = "visible"` in `settings.toml` (or Settings ▸ Folder sizes) and open a folder with subfolders in list view: the Size column shows `--`, then sizes fill in top first and fade in; a stale value dims until it is re-measured. Compare a folder with Finder's Get Info (logical size). Edit a file deep in a measured folder: the folder and its parents update within a couple of seconds. Quit Crow, change something, relaunch: the change shows. With the setting off, View ▸ Calculate Folder Sizes measures the current folder once. Scroll a 100k folder of folders quickly: no stutter, and Activity Monitor shows the workers stop for rows that scrolled away. No permission prompt appears just from viewing `~`; an iCloud folder's not-downloaded files stay not downloaded.
