@@ -95,6 +95,18 @@ pub enum RowState {
 pub struct Preview {
     pub rows: Vec<PreviewRow>,
     pub error: Option<String>,
+    /// The field `error` is about, so the sheet can mark it.
+    pub error_field: Option<FormField>,
+}
+
+/// A form field a form-wide error can point at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormField {
+    Find,
+    Add,
+    Base,
+    Start,
+    Padding,
 }
 
 impl Preview {
@@ -114,7 +126,10 @@ impl Preview {
 /// Apply `form` to `inputs` in display order. Pure; the caller runs filesystem
 /// validation separately.
 pub fn preview(inputs: &[RenameInput], form: &RenameForm) -> Preview {
-    let error = form_error(form);
+    let (error_field, error) = match form_error(form) {
+        Some((field, message)) => (Some(field), Some(message)),
+        None => (None, None),
+    };
     let numbers = if form.kind == RenameKind::Number { parse_numbers(form).ok() } else { Some((0, 0)) };
     let mut rows = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
@@ -164,7 +179,7 @@ pub fn preview(inputs: &[RenameInput], form: &RenameForm) -> Preview {
             inserted,
         });
     }
-    Preview { rows, error }
+    Preview { rows, error, error_field }
 }
 
 /// The part of `old` that goes away and the part of `new` that replaces it:
@@ -188,21 +203,24 @@ pub fn changed_spans(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
     (span(old, &old_clusters), span(new, &new_clusters))
 }
 
-fn form_error(form: &RenameForm) -> Option<String> {
+fn form_error(form: &RenameForm) -> Option<(FormField, String)> {
     match form.kind {
-        RenameKind::Replace if form.find.is_empty() => Some("Enter the text to find".to_owned()),
-        RenameKind::AddText if form.add.is_empty() => Some("Enter the text to add".to_owned()),
-        RenameKind::Number if form.base.trim().is_empty() => Some("Enter a base name".to_owned()),
+        RenameKind::Replace if form.find.is_empty() => Some((FormField::Find, "Enter the text to find".to_owned())),
+        RenameKind::AddText if form.add.is_empty() => Some((FormField::Add, "Enter the text to add".to_owned())),
+        RenameKind::Number if form.base.trim().is_empty() => Some((FormField::Base, "Enter a base name".to_owned())),
         RenameKind::Number => {
             let start = match form.start.trim() {
                 "" => Ok(1),
-                text => text.parse::<u64>().map_err(|_| "Start must be a whole number".to_owned()),
+                text => text.parse::<u64>().map_err(|_| (FormField::Start, "Start must be a whole number".to_owned())),
             };
             let padding = match form.padding.trim() {
                 "" | "0" => Ok(0),
-                text => text.parse::<u32>().map_err(|_| "Zero padding must be 0–32".to_owned()).and_then(|padding| {
-                    if padding <= 32 { Ok(padding as usize) } else { Err("Zero padding must be 0–32".to_owned()) }
-                }),
+                text => text
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|padding| *padding <= 32)
+                    .map(|padding| padding as usize)
+                    .ok_or((FormField::Padding, "Zero padding must be 0–32".to_owned())),
             };
             start.err().or_else(|| padding.err())
         }
@@ -343,6 +361,19 @@ mod tests {
         let bad =
             RenameForm { kind: RenameKind::Number, base: "x".into(), start: "-1".into(), ..RenameForm::default() };
         assert!(preview(&[input("a.txt", false)], &bad).error.is_some());
+    }
+
+    #[test]
+    fn a_form_error_names_its_field() {
+        let field = |form: RenameForm| preview(&[input("a.txt", false)], &form).error_field;
+        assert_eq!(field(RenameForm::default()), Some(FormField::Find));
+        assert_eq!(field(RenameForm { kind: RenameKind::AddText, ..RenameForm::default() }), Some(FormField::Add));
+        let number = RenameForm { kind: RenameKind::Number, ..RenameForm::default() };
+        assert_eq!(field(number.clone()), Some(FormField::Base));
+        let base = RenameForm { base: "x".into(), ..number };
+        assert_eq!(field(RenameForm { start: "one".into(), ..base.clone() }), Some(FormField::Start));
+        assert_eq!(field(RenameForm { padding: "40".into(), ..base.clone() }), Some(FormField::Padding));
+        assert_eq!(field(base), None);
     }
 
     #[test]

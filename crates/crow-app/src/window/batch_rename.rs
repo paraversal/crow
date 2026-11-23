@@ -4,7 +4,9 @@
 //! `crow_fs::ops` off the main thread.
 
 use super::*;
-use crow_core::batch_rename::{AddPosition, Preview, RenameForm, RenameInput, RenameKind, RowState, preview};
+use crow_core::batch_rename::{
+    AddPosition, FormField, Preview, RenameForm, RenameInput, RenameKind, RowState, preview,
+};
 use crow_fs::ops::{BatchRenameEntry, BatchRenameInput, BatchRowState, BatchValidation, validate_batch_rename};
 use gpui::{AnyElement, Pixels, UniformListScrollHandle, uniform_list};
 
@@ -410,14 +412,15 @@ impl CrowWindow {
         cx.notify();
     }
 
-    pub(super) fn render_batch_rename(&mut self, _window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_batch_rename(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(Sheet::BatchRename(sheet)) = &self.sheet else { return div().into_any_element() };
         let theme = cx.global::<Ui>().theme.clone();
-        let (fg, muted, accent, danger) = (
+        let (fg, muted, accent, danger, border) = (
             color(theme.role("fg")),
             color(theme.role("fg-muted")),
             color(theme.role("accent")),
             color(theme.role("error")),
+            color(theme.role("border")),
         );
         let control = |id: &'static str, label: &'static str, selected: bool, focus: &FocusHandle| {
             div()
@@ -436,7 +439,32 @@ impl CrowWindow {
                 .when(!selected, |el| el.text_color(muted))
                 .child(label)
         };
-        let field_label = |text: &'static str| div().text_size(px(11.)).text_color(muted).child(text);
+        let segmented = || div().flex().flex_none().gap_1().p(px(2.)).rounded_md().bg(color(theme.role("bg-inset")));
+        let word = |text: &'static str| div().flex_none().text_size(px(13.)).text_color(muted).child(text);
+        let bad_field = sheet.preview.error_field;
+        let slot = |input: &Entity<TextInput>, id: &'static str, width: f32, field: FormField| {
+            let focused = input.read(cx).focus_handle(cx).is_focused(window);
+            let edge = if bad_field == Some(field) {
+                danger
+            } else if focused {
+                accent
+            } else {
+                border
+            };
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .flex_none()
+                .w(px(width))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_size(px(13.))
+                .bg(color(theme.role("bg")))
+                .border_1()
+                .border_color(edge)
+                .child(input.clone())
+        };
         let extension = div()
             .id("batch-keep-extension")
             .debug_selector(|| "batch-keep-extension".into())
@@ -446,25 +474,21 @@ impl CrowWindow {
             .track_focus(&sheet.extension)
             .focus_visible(|style| style.shadow(cursor_ring(&theme)))
             .flex()
+            .flex_none()
             .items_center()
-            .gap_2()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(if sheet.preserve_extension { accent } else { border })
             .cursor_pointer()
             .text_size(px(12.))
-            .text_color(muted)
+            .text_color(if sheet.preserve_extension { fg } else { muted })
             .on_click(cx.listener(|this, _, window, cx| this.batch_rename_extension(window, cx)))
-            .child(
-                div()
-                    .w(px(13.))
-                    .h(px(13.))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .when(sheet.preserve_extension, |box_| box_.bg(accent)),
-            )
+            .child(div().w(px(10.)).text_color(accent).child(if sheet.preserve_extension { "✓" } else { "" }))
             .child("Keep extension");
-        let rules = div()
-            .flex()
-            .gap_1()
+        let rules = segmented()
             .child(
                 control("batch-rule-replace", "Find & Replace", sheet.kind == RenameKind::Replace, &sheet.rules[0])
                     .on_click(
@@ -481,22 +505,17 @@ impl CrowWindow {
                     cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Number, window, cx)),
                 ),
             );
-        let fields = match sheet.kind {
-            RenameKind::Replace => div()
-                .flex()
-                .gap_2()
-                .child(div().flex_1().child(sheet.find.clone()))
-                .child(div().flex_1().child(sheet.replace.clone()))
-                .into_any_element(),
-            RenameKind::AddText => {
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().child(sheet.add.clone()))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
+        let sentence = div().flex().flex_wrap().items_center().gap_2();
+        let sentence =
+            match sheet.kind {
+                RenameKind::Replace => sentence
+                    .child(word("Replace"))
+                    .child(slot(&sheet.find, "batch-field-find", 130., FormField::Find))
+                    .child(word("with"))
+                    .child(slot(&sheet.replace, "batch-field-replace", 130., FormField::Find)),
+                RenameKind::AddText => {
+                    sentence.child(word("Add")).child(slot(&sheet.add, "batch-field-add", 160., FormField::Add)).child(
+                        segmented()
                             .child(
                                 control(
                                     "batch-add-after",
@@ -520,62 +539,99 @@ impl CrowWindow {
                                 })),
                             ),
                     )
-                    .into_any_element()
+                }
+                RenameKind::Number => sentence
+                    .child(word("Name them"))
+                    .child(slot(&sheet.base, "batch-field-base", 120., FormField::Base))
+                    .child(word("counting from"))
+                    .child(slot(&sheet.start, "batch-field-start", 52., FormField::Start))
+                    .child(word("with"))
+                    .child(slot(&sheet.padding, "batch-field-padding", 40., FormField::Padding))
+                    .child(word("digits")),
             }
-            RenameKind::Number => div()
-                .flex()
-                .gap_2()
-                .child(
-                    div().flex_1().flex().flex_col().gap_1().child(field_label("Base name")).child(sheet.base.clone()),
-                )
-                .child(
-                    div().w(px(90.)).flex().flex_col().gap_1().child(field_label("Start")).child(sheet.start.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(90.))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(field_label("Padding"))
-                        .child(sheet.padding.clone()),
-                )
-                .into_any_element(),
-        };
+            .child(extension);
+        let bar = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .child(div().flex().child(rules))
+            .child(sentence);
         let header = div()
             .flex()
             .gap_2()
+            .px_3()
+            .py_1()
             .text_size(px(11.))
             .text_color(muted)
-            .child(div().flex_1().min_w_0().child("Original"))
+            .bg(color(theme.role("bg-inset")))
+            .child(div().flex_1().min_w_0().child("Before"))
             .child(div().w(PREVIEW_ARROW_WIDTH).flex_none())
-            .child(
-                div().debug_selector(|| "batch-preview-new-name-heading".into()).flex_1().min_w_0().child("New name"),
-            );
+            .child(div().debug_selector(|| "batch-preview-new-name-heading".into()).flex_1().min_w_0().child("After"));
         let rows = sheet.preview.rows.len();
         let list = uniform_list("batch-preview", rows, cx.processor(Self::render_batch_preview_rows))
             .track_scroll(&sheet.preview_scroll)
             .h(px(180.))
             .w_full();
-        let status = if let Some(error) =
-            sheet.validation_error.clone().or_else(|| sheet.preview.error.clone().map(Into::into))
-        {
-            div().text_size(px(12.)).text_color(danger).child(error)
-        } else if sheet.validating {
-            div().text_size(px(12.)).text_color(muted).child("Checking…")
-        } else if sheet.preview.changed() == 0 {
-            div().text_size(px(12.)).text_color(muted).child("No names would change")
-        } else if sheet.can_submit() {
-            div().text_size(px(12.)).text_color(muted).child(format!(
-                "{} name{} will change",
-                sheet.preview.changed(),
-                if sheet.preview.changed() == 1 { "" } else { "s" }
-            ))
+        let table = div()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(list);
+        let message: Option<SharedString> =
+            sheet.validation_error.clone().or_else(|| sheet.preview.error.clone().map(Into::into));
+        let strip = message.map(|message| {
+            div()
+                .id("batch-error")
+                .debug_selector(|| "batch-error".into())
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(crate::style::error_soft(&theme))
+                .text_size(px(12.))
+                .text_color(danger)
+                .child(crate::icons::glyph(crate::icons::Glyph::AlertCircle, 13., "error", &theme))
+                .child(message)
+        });
+        let invalid = if sheet.preview.error.is_some() {
+            0
         } else {
-            div().text_size(px(12.)).text_color(danger).child("Fix the highlighted rows")
+            (0..rows)
+                .filter(|&index| match sheet.row_state(index) {
+                    Some(BatchRowState::Invalid(_)) => true,
+                    _ => matches!(sheet.preview.rows[index].state, RowState::Invalid(_)),
+                })
+                .count()
+        };
+        let changed = sheet.preview.changed();
+        let status = if sheet.preview.error.is_some() {
+            div().text_color(danger).child("Fix the highlighted field to preview")
+        } else if sheet.validation_error.is_some() {
+            div().text_color(danger).child("Couldn't check these names")
+        } else if sheet.validating {
+            div().text_color(muted).child("Checking…")
+        } else if invalid > 0 {
+            div()
+                .text_color(danger)
+                .child(format!("{invalid} row{} can't be renamed", if invalid == 1 { "" } else { "s" }))
+        } else if changed == 0 {
+            div().text_color(muted).child("No names would change")
+        } else {
+            div().text_color(muted).child(format!("{changed} of {rows} will change"))
         };
         let can_submit = sheet.can_submit();
-        let button = |id: &'static str, label: &'static str, primary: bool, focus: &FocusHandle| {
+        let rename_label = if can_submit && changed > 0 { format!("Rename {changed}") } else { "Rename".to_owned() };
+        let button = |id: &'static str, label: SharedString, primary: bool, focus: &FocusHandle| {
             let dead = primary && !can_submit;
             crate::chrome::sheet_button(id, label, primary && can_submit, &theme)
                 .aria_disabled(dead)
@@ -583,32 +639,29 @@ impl CrowWindow {
                 .focus_visible(|style| style.shadow(cursor_ring(&theme)))
                 .when(dead, |el| el.opacity(0.5))
         };
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().id("batch-status").flex_1().min_w_0().text_size(px(12.)).child(status))
+            .child(
+                button("batch-cancel", "Cancel".into(), false, &sheet.cancel)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+            )
+            .child(
+                button("batch-rename-submit", rename_label.into(), true, &sheet.rename)
+                    .on_click(cx.listener(|this, _, window, cx| this.submit_batch_rename(window, cx))),
+            );
         let body = div()
             .id("batch-rename")
             .debug_selector(|| "batch-rename".into())
             .flex()
             .flex_col()
             .gap_3()
-            .child(rules)
-            .child(fields)
-            .child(extension)
-            .child(header)
-            .child(list)
-            .child(status)
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        button("batch-cancel", "Cancel", false, &sheet.cancel)
-                            .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
-                    )
-                    .child(
-                        button("batch-rename-submit", "Rename", true, &sheet.rename)
-                            .on_click(cx.listener(|this, _, window, cx| this.submit_batch_rename(window, cx))),
-                    ),
-            );
+            .child(bar)
+            .children(strip)
+            .child(table)
+            .child(footer);
         let tab = cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
             if event.keystroke.key != "tab" {
                 return;
@@ -653,50 +706,75 @@ impl CrowWindow {
     ) -> Vec<AnyElement> {
         let Some(Sheet::BatchRename(sheet)) = &self.sheet else { return Vec::new() };
         let theme = cx.global::<Ui>().theme.clone();
+        let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
         let error = color(theme.role("error"));
-        // A blank field is a form error, shown once in the status line. Repeating
+        // A blank field is a form error, shown once above the table. Repeating
         // it on every preview row would bury the names the rows are there to show.
         let form_error = sheet.preview.error.is_some();
         range
             .filter_map(|index| {
                 let row = sheet.preview.rows.get(index)?;
-                let state = sheet.row_state(index);
-                let (line, color_) = if form_error {
-                    ("", muted)
+                let reason = if form_error {
+                    None
                 } else {
-                    match state {
-                        Some(BatchRowState::Invalid(reason)) => (reason.as_str(), error),
+                    match sheet.row_state(index) {
+                        Some(BatchRowState::Invalid(reason)) => Some(reason.as_str()),
                         _ => match &row.state {
-                            RowState::Invalid(reason) => (reason.as_str(), error),
-                            RowState::Unchanged => ("unchanged", muted),
-                            RowState::Ready => ("", muted),
+                            RowState::Invalid(reason) => Some(reason.as_str()),
+                            _ => None,
                         },
                     }
                 };
-                let detail = if line.is_empty() { String::new() } else { format!(", {line}") };
+                let unchanged = !form_error && reason.is_none() && row.state == RowState::Unchanged;
+                let line = reason.unwrap_or("");
+                let detail = if let Some(reason) = reason {
+                    format!(", {reason}")
+                } else if unchanged {
+                    ", unchanged".to_owned()
+                } else {
+                    String::new()
+                };
+                let aria = format!("{} becomes {}{detail}", row.original_name, row.destination_name);
+                let name = |text: &str, span: std::ops::Range<usize>, tone: crow_theme::Rgb| {
+                    crate::style::change_text(text.to_owned(), span, tone)
+                };
+                let before = if form_error || unchanged || reason.is_some() {
+                    div().child(row.original_name.clone())
+                } else {
+                    div().child(name(&row.original_name, row.removed.clone(), theme.role("error")))
+                };
+                let after = if form_error {
+                    div().text_color(muted).child("—")
+                } else if unchanged {
+                    div().text_color(muted).child("unchanged")
+                } else if reason.is_some() {
+                    div().text_color(error).child(row.destination_name.clone())
+                } else {
+                    div().child(name(&row.destination_name, row.inserted.clone(), theme.role("accent")))
+                };
+                let marker = if reason.is_some() {
+                    crate::icons::glyph(crate::icons::Glyph::AlertCircle, 13., "error", &theme).into_any_element()
+                } else {
+                    div().text_color(muted).child(if form_error || unchanged { "–" } else { "→" }).into_any_element()
+                };
                 Some(
                     div()
                         .id(("batch-preview-row", index))
                         .debug_selector(move || format!("batch-preview-{index}"))
                         .role(Role::ListItem)
-                        .aria_label(format!("{} becomes {}{detail}", row.original_name, row.destination_name))
+                        .aria_label(aria)
                         .h(px(24.))
                         .w_full()
+                        .px_3()
                         .flex()
                         .items_center()
                         .gap_2()
                         .text_size(px(12.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(row.original_name.clone()),
-                        )
-                        .child(div().w(PREVIEW_ARROW_WIDTH).flex_none().text_center().text_color(muted).child("→"))
+                        .text_color(if unchanged || form_error { muted } else { fg })
+                        .when(reason.is_some(), |row| row.bg(crate::style::error_soft(&theme)))
+                        .child(before.flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis())
+                        .child(div().w(PREVIEW_ARROW_WIDTH).flex_none().flex().justify_center().child(marker))
                         .child(
                             div()
                                 .flex_1()
@@ -705,14 +783,12 @@ impl CrowWindow {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    div()
+                                    after
                                         .debug_selector(move || format!("batch-preview-new-name-{index}"))
                                         .min_w_0()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_color(if line.is_empty() { color(theme.role("fg")) } else { color_ })
-                                        .child(row.destination_name.clone()),
+                                        .text_ellipsis(),
                                 )
                                 .when(!line.is_empty(), |destination| {
                                     destination.child(
@@ -723,7 +799,7 @@ impl CrowWindow {
                                             .whitespace_nowrap()
                                             .text_ellipsis()
                                             .text_size(px(11.))
-                                            .text_color(color_)
+                                            .text_color(error)
                                             .child(line.to_owned()),
                                     )
                                 }),

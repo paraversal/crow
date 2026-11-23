@@ -482,6 +482,19 @@ pub fn highlight_text(
     )
 }
 
+/// `text` with one span tinted: the part of a batch-rename name that goes away
+/// (error) or comes in (accent). An empty span leaves the text plain.
+pub fn change_text(text: impl Into<SharedString>, span: std::ops::Range<usize>, tone: Rgb) -> StyledText {
+    let text = text.into();
+    let style = HighlightStyle {
+        color: Some(color(tone).into()),
+        background_color: Some(color_alpha(tone, 0x30).into()),
+        ..Default::default()
+    };
+    let span = clamped(&text, span);
+    StyledText::new(text).with_highlights((!span.is_empty()).then_some((span, style)))
+}
+
 /// Pull both ends of `range` back to char boundaries inside `text`.
 fn clamped(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
     let mut start = range.start.min(text.len());
