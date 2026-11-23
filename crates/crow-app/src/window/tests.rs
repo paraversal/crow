@@ -14681,13 +14681,12 @@ fn fuzz_confine(tree: &Path, cx: &mut VisualTestContext) {
     });
 }
 
-fn replay_script(
-    script: &[crate::fuzz::Step],
+fn fuzz_setup(
     tree: &Path,
     seed: u64,
     options: &FuzzOptions,
     cx: &mut TestAppContext,
-) -> Result<(), crate::fuzz::Violation> {
+) -> (Entity<CrowWindow>, VisualTestContext) {
     close_all_windows(cx);
     reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
@@ -14695,6 +14694,29 @@ fn replay_script(
     fuzz_seed_m9(&view, tree, &mut cx);
     fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
+    // Both runs and replays start with the icon pack loaded, even when the
+    // pack scan finishes after the saved-query reload.
+    for _ in 0..100 {
+        cx.run_until_parked();
+        let ready = cx.read(|cx| {
+            cx.global::<crate::icon_packs::IconPacks>().snapshot().choices().iter().any(|choice| choice.id == "fuzz")
+        });
+        if ready {
+            return (view, cx);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the seeded icon pack never loaded");
+}
+
+fn replay_script(
+    script: &[crate::fuzz::Step],
+    tree: &Path,
+    seed: u64,
+    options: &FuzzOptions,
+    cx: &mut TestAppContext,
+) -> Result<(), crate::fuzz::Violation> {
+    let (view, mut cx) = fuzz_setup(tree, seed, options, cx);
     let churn_handle = options.churn.then(|| Churn::start(tree, seed));
     for step in script {
         apply_and_check(&view, step, tree, churn_handle.as_ref(), &mut cx)?;
@@ -14714,14 +14736,9 @@ fn fuzz_run(
     tree: &Path,
     options: &FuzzOptions,
     cx: &mut TestAppContext,
-) -> Result<(), Box<crate::fuzz::Failure>> {
+) -> Result<crate::fuzz::Script, Box<crate::fuzz::Failure>> {
     use crate::fuzz::{Failure, Script, StepGen, state};
-    close_all_windows(cx);
-    reset_tree(tree, options.files, &options.edge, seed);
-    let (view, mut cx) = open(cx, tree);
-    write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
-    fuzz_confine(tree, &mut cx);
-    crate::fuzz::logs::install();
+    let (view, mut cx) = fuzz_setup(tree, seed, options, cx);
     let mut churn_handle = options.churn.then(|| Churn::start(tree, seed));
     let mut generator = StepGen::new(seed);
     let mut script = Vec::new();
@@ -14781,7 +14798,7 @@ fn fuzz_run(
             reproduces_without_churn: reproduces,
         }));
     }
-    Ok(())
+    Ok(Script(script))
 }
 
 fn settings_handle(cx: &mut TestAppContext) -> Option<WindowHandle<crate::settings_window::SettingsWindow>> {
@@ -15408,6 +15425,36 @@ fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn fuzz_run_and_replay_start_from_the_same_seeded_surfaces(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-setup-parity", 10);
+    let options = FuzzOptions::new(10, EdgeTree::default(), false);
+    let seed = 1;
+    let script = fuzz_run(seed, 1, &tree, &options, cx).unwrap_or_else(|failure| panic!("{}", failure.print()));
+    let assert_seeded = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let ui = cx.global::<Ui>();
+            assert_eq!(ui.settings.icon_pack, "fuzz");
+            assert_eq!(ui.settings.path_bar, crow_core::PathBarMode::Explorer);
+            assert!(ui.saved_queries.queries.iter().any(|query| query.id.as_str() == "fuzz-notes"));
+            let choices = cx.global::<crate::icon_packs::IconPacks>().snapshot().choices();
+            assert!(choices.iter().any(|choice| choice.id == "fuzz"));
+        });
+    };
+    let state = |cx: &mut TestAppContext| {
+        let window = cx.read(|cx| cx.windows().iter().find_map(|w| w.downcast::<CrowWindow>())).unwrap();
+        window.update(cx, |w, window, cx| crate::fuzz::state_for(w, window, cx)).expect("read fuzz window")
+    };
+    assert_seeded(cx);
+    let run = state(cx);
+    replay_script(&script.0, &tree, seed, &options, cx).expect("replay recorded first step");
+    assert_seeded(cx);
+    let replay = state(cx);
+    assert_eq!(run.selectors, replay.selectors);
+    assert_eq!(run.active_keys, replay.active_keys);
+    assert_eq!((run.tabs, run.windows, run.text_focused), (replay.tabs, replay.windows, replay.text_focused));
+}
+
+#[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
     let options = FuzzOptions::new(40, EdgeTree::default(), false);
@@ -15532,7 +15579,7 @@ fn fuzz_long(cx: &mut TestAppContext) {
         let options = FuzzOptions::new(200, edge.clone(), churn);
         let mut replay = fuzz_replay(seed, &edge, churn, steps);
         match fuzz_run(seed, steps, &tree, &options, cx) {
-            Ok(()) => crate::fuzz_events::seed_end("fuzz", seed, steps, started.elapsed(), "passed"),
+            Ok(_) => crate::fuzz_events::seed_end("fuzz", seed, steps, started.elapsed(), "passed"),
             Err(failure) => {
                 replay.script = Some(failure.script.print());
                 crate::fuzz_events::seed_failure(
