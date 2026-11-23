@@ -596,6 +596,13 @@ impl PluginHost {
                     RequestError::new(RequestErrorKind::Busy, "the plugin worker lane is full"),
                 );
             }
+            Err(EnqueueError::Closed) => {
+                self.finish_error(
+                    &extension,
+                    stamp,
+                    RequestError::new(RequestErrorKind::WorkerFailed, "the plugin worker stopped"),
+                );
+            }
         }
     }
 
@@ -1834,6 +1841,44 @@ fn run(ctx) { hold_worker("cancel-queued"); #{ kind: "copy_text", text: "ran" } 
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
+    }
+
+    #[test]
+    fn a_panicking_worker_finishes_its_request_and_leaves_the_service_alive() {
+        let panics = r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { __test_panic(); }
+"#;
+        let broken = "example.panics";
+        let healthy = "example.healthy";
+        let mut service = ServiceHarness::new(&[(broken, panics), (healthy, COMMAND)], test_limits());
+        service.approve(broken);
+        service.approve(healthy);
+
+        let broken_command = extension(broken, "copy");
+        let generation = service.generation(broken);
+        let ticket = service.handle.try_evaluate(broken_command.clone(), generation, 1, Harness::input()).unwrap();
+        assert_rejection(service.wait_terminal(&ticket), RequestErrorKind::WorkerFailed, "panicked");
+        service.wait_inventory(|inventory| {
+            inventory.plugins.iter().any(|entry| {
+                entry.id.as_ref().is_some_and(|id| id.as_str() == broken) && entry.state == PluginState::Failed
+            })
+        });
+        assert!(service.entry(broken).detail.as_deref().is_some_and(|detail| detail.contains("panicked")));
+        let later = service.handle.try_evaluate(broken_command, generation, 2, Harness::input()).unwrap();
+        assert_rejection(service.wait_terminal(&later), RequestErrorKind::StaleGeneration, "not current");
+
+        let healthy = service
+            .handle
+            .try_evaluate(extension(healthy, "copy"), service.generation(healthy), 1, Harness::input())
+            .unwrap();
+        assert!(matches!(service.wait_terminal(&healthy), RequestResult::Intent(_)));
+        assert!(
+            !service
+                .events
+                .try_iter()
+                .any(|event| { matches!(event, HostEvent::RequestFinished { stamp, .. } if stamp == ticket.stamp()) })
+        );
     }
 
     #[test]

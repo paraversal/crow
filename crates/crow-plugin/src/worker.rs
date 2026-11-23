@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ use crate::registry;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnqueueError {
     Busy,
+    Closed,
 }
 
 /// The result of queueing a hook. The host, not the mailbox, owns the terminal
@@ -56,9 +57,9 @@ impl Mailbox {
     }
 
     pub fn enqueue_command(&self, call: Call) -> Result<(), EnqueueError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.closed {
-            return Err(EnqueueError::Busy);
+            return Err(EnqueueError::Closed);
         }
         if state.commands.len() >= self.command_capacity {
             return Err(EnqueueError::Busy);
@@ -72,7 +73,7 @@ impl Mailbox {
     /// rejected call goes back to the host so it can release the request record
     /// and emit exactly one terminal event. Explicit commands report busy.
     pub fn enqueue_refresh(&self, call: Call) -> RefreshEnqueue {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.closed {
             return RefreshEnqueue::Closed;
         }
@@ -92,7 +93,7 @@ impl Mailbox {
     }
 
     fn recv(&self, cancel: &AtomicBool) -> Option<Call> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(call) = state.commands.pop_front() {
                 return Some(call);
@@ -103,13 +104,14 @@ impl Mailbox {
             if state.closed || cancel.load(Ordering::Relaxed) {
                 return None;
             }
-            let (guard, _) = self.ready.wait_timeout(state, Duration::from_millis(10)).unwrap();
+            let (guard, _) =
+                self.ready.wait_timeout(state, Duration::from_millis(10)).unwrap_or_else(PoisonError::into_inner);
             state = guard;
         }
     }
 
     pub fn close(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.closed = true;
         for call in state.commands.iter().chain(state.refreshes.iter()) {
             call.cancel();
@@ -176,15 +178,15 @@ impl Runtime {
     }
 
     fn begin(&self, deadline: Instant, call_cancel: Option<crate::dto::CancelToken>) {
-        *self.deadline.lock().unwrap() = Some(deadline);
-        *self.call_cancel.lock().unwrap() = call_cancel;
+        *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) = Some(deadline);
+        *self.call_cancel.lock().unwrap_or_else(PoisonError::into_inner) = call_cancel;
         self.terminate.store(0, Ordering::Relaxed);
         self.violation.store(false, Ordering::Relaxed);
     }
 
     fn end(&self) {
-        *self.deadline.lock().unwrap() = None;
-        *self.call_cancel.lock().unwrap() = None;
+        *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.call_cancel.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Read before `end()` clears the call token. A cancellation that races a
@@ -192,7 +194,39 @@ impl Runtime {
     /// user's Cancel could pause the whole plugin.
     fn call_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
-            || self.call_cancel.lock().unwrap().as_ref().is_some_and(|token| token.load(Ordering::Relaxed))
+            || self
+                .call_cancel
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|token| token.load(Ordering::Relaxed))
+    }
+}
+
+/// Report a panic through the same message that completes a failed request and
+/// withdraws its worker. The host owns terminal events for queued requests.
+struct WorkerPanic<'a> {
+    plugin: PluginId,
+    generation: u64,
+    request: Option<RequestStamp>,
+    mailbox: &'a Mailbox,
+    inbox: &'a Sender<Inbox>,
+}
+
+impl Drop for WorkerPanic<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.mailbox.close();
+            send(
+                self.inbox,
+                WorkerMessage::Failed {
+                    plugin: self.plugin.clone(),
+                    generation: self.generation,
+                    request: self.request,
+                    error: CallError::script("the plugin worker panicked"),
+                },
+            );
+        }
     }
 }
 
@@ -207,6 +241,8 @@ fn worker_main(
     runtime: Arc<Runtime>,
     inbox: Sender<Inbox>,
 ) {
+    let mut failure =
+        WorkerPanic { plugin: plugin.clone(), generation, request: None, mailbox: &mailbox, inbox: &inbox };
     let source = match std::str::from_utf8(snapshot.entry_source()) {
         Ok(source) => source,
         Err(_) => {
@@ -281,6 +317,7 @@ fn worker_main(
                 &runtime,
                 &inbox,
                 &mut by_local,
+                &mut failure.request,
             );
         }
         Err(error) => {
@@ -302,6 +339,7 @@ fn run_loop(
     runtime: &Runtime,
     inbox: &Sender<Inbox>,
     registered: &mut BTreeMap<LocalId, Descriptor>,
+    in_flight: &mut Option<RequestStamp>,
 ) {
     while let Some(call) = mailbox.recv(cancel) {
         if cancel.load(Ordering::Relaxed) {
@@ -318,6 +356,7 @@ fn run_loop(
             );
             continue;
         }
+        *in_flight = request;
         let deadline = Instant::now() + limits.call_deadline;
         let result: Result<(ExtensionId, RequestStamp, Reply), CallError> = match call {
             Call::Register => Err(CallError::script("register() ran twice")),
@@ -350,10 +389,12 @@ fn run_loop(
                     WorkerMessage::Failed { plugin: plugin.clone(), generation, request, error: error.clone() },
                 );
                 if error.kind != CallErrorKind::Cancelled {
+                    *in_flight = None;
                     break;
                 }
             }
         }
+        *in_flight = None;
     }
 }
 
@@ -473,13 +514,22 @@ fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<Str
     engine.on_debug(|_, _, _| {});
     let progress = runtime.clone();
     engine.on_progress(move |_| {
-        let call_cancelled =
-            progress.call_cancel.lock().unwrap().as_ref().is_some_and(|token| token.load(Ordering::Relaxed));
+        let call_cancelled = progress
+            .call_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::Relaxed));
         if progress.cancel.load(Ordering::Relaxed) || call_cancelled {
             progress.terminate.store(2, Ordering::Relaxed);
             return Some(Dynamic::UNIT);
         }
-        if progress.deadline.lock().unwrap().is_some_and(|deadline| Instant::now() >= deadline) {
+        if progress
+            .deadline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             progress.terminate.store(1, Ordering::Relaxed);
             return Some(Dynamic::UNIT);
         }
@@ -489,6 +539,8 @@ fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<Str
     engine.register_fn("hold_worker", |name: &str| {
         test_gate::hold(name);
     });
+    #[cfg(test)]
+    engine.register_fn("__test_panic", || panic!("intentional plugin worker panic"));
     let asset_closure = assets;
     let asset_runtime = runtime.clone();
     engine.register_fn("asset", move |name: &str| -> Result<String, Box<EvalAltResult>> {
@@ -781,6 +833,25 @@ fn run(ctx) {{ {body} }}
                 cancel,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_poisoned_mailbox_can_enqueue_receive_and_close() {
+        let mailbox = Mailbox::new(&limits());
+        let poisoned = std::panic::catch_unwind(|| {
+            let _state = mailbox.state.lock().unwrap();
+            panic!("poison the mailbox");
+        });
+        assert!(poisoned.is_err());
+        assert!(mailbox.enqueue_command(Call::Register).is_ok());
+        assert!(matches!(mailbox.enqueue_refresh(Call::Register), RefreshEnqueue::Queued));
+        let cancel = AtomicBool::new(false);
+        assert!(matches!(mailbox.recv(&cancel), Some(Call::Register)));
+        assert!(matches!(mailbox.recv(&cancel), Some(Call::Register)));
+        mailbox.close();
+        assert_eq!(mailbox.enqueue_command(Call::Register), Err(EnqueueError::Closed));
+        assert!(matches!(mailbox.enqueue_refresh(Call::Register), RefreshEnqueue::Closed));
+        assert!(mailbox.recv(&cancel).is_none());
     }
 
     #[test]
