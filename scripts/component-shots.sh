@@ -27,7 +27,8 @@ mkdir -p target/component-shots
 for name in "${names[@]}"; do
   for variant in light dark; do
     png="target/component-shots/$name-$variant.png"
-    "$bin" --component-shot "$name" --theme "finder-$variant" --scale 2 --out "$png"
+    # crow-macos says once per call that it runs off the main thread; that is expected here.
+    "$bin" --component-shot "$name" --theme "finder-$variant" --scale 2 --out "$png" 2> >(grep -v 'off the main thread' >&2 || true)
     cwebp -quiet -q 86 -alpha_q 100 "$png" -o "docs/media/$name-$variant.webp"
     echo "docs/media/$name-$variant.webp"
   done

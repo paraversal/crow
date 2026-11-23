@@ -142,12 +142,21 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .list li { padding: 14px 0; border-bottom: 1px solid var(--line); }
 .example { margin-top: 72px; }
 .example h3 { margin: 0 0 24px; font-size: 22px; font-weight: 600; }
-.crops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0; padding: 0; list-style: none; }
-.crops figure { margin: 0; }
-.crops figcaption { margin-top: 12px; color: var(--muted); font-size: 15px; }
-/* A crop-in on a full shot: the box is 4:3, the image is scaled and shifted by its pixel box (--x --y --cw --ch of a 2000 px wide shot). */
-.crop { position: relative; display: block; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 12px; border: 1px solid var(--line); background: var(--raised); filter: drop-shadow(0 8px 16px var(--shadow)); }
-.crop img { position: absolute; max-width: none; width: calc(2000 / var(--cw) * 100%); left: calc(var(--x) / var(--cw) * -100%); top: calc(var(--y) / var(--ch) * -100%); }
+/* Component shots: single components rendered by Crow itself (scripts/component-shots.sh), padded; the page rounds them. Widths are half the file's pixels. */
+.comps { display: grid; grid-template-columns: auto auto; justify-content: start; align-items: start; gap: 32px 40px; margin: 0; padding: 0; list-style: none; }
+.comps li { min-width: 0; }
+.comps li:nth-child(3) { grid-column: 2; grid-row: 1 / span 2; }
+.comps figure { margin: 0; }
+.comps figcaption { margin-top: 12px; color: var(--muted); font-size: 15px; }
+.comps .zoom, .rows .shotrow .zoom { width: auto; max-width: 100%; }
+.comp { display: block; max-width: 100%; height: auto; border-radius: 14px; filter: drop-shadow(0 8px 16px var(--shadow)); }
+.split .list { grid-template-columns: 1fr; }
+.split.wide { grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); gap: 48px; }
+.plug { margin: 0; }
+.plug .comp { margin-left: auto; }
+.rows li.shotrow { grid-column: 1 / -1; align-items: flex-start; }
+.rows .shotrow .k { padding-top: 4px; }
+.rows .shotrow > span:last-child { min-width: 0; }
 .fold { width: 1.05em; height: 1.05em; fill: none; stroke: var(--folder); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -.17em; margin-right: .3em; }
 #keys .rows .k { width: 11em; }
 .rows .k.stack { flex-direction: column; flex-wrap: nowrap; gap: 2px; }
@@ -233,8 +242,9 @@ footer nav { gap: 22px; }
   .clips { grid-template-columns: 1fr; }
   nav a:not(.button) { display: none; }
   .hero { padding-top: 32px; }
-  .pair, .split, .install, .rows, .list { grid-template-columns: 1fr; }
-  .crops { grid-template-columns: 1fr; }
+  .pair, .split, .split.wide, .install, .rows, .list { grid-template-columns: 1fr; }
+  .comps { grid-template-columns: minmax(0, 1fr); }
+  .comps li:nth-child(3) { grid-column: auto; grid-row: auto; }
   .views { grid-template-columns: 1fr 1fr; }
   .numbers { grid-template-columns: 1fr; gap: 28px; }
   section.block { padding-top: 88px; }
@@ -317,7 +327,10 @@ footer nav { gap: 22px; }
         <li><span class="k">Folder views</span><span>Set per folder, or use the same view everywhere</span></li>
         <li><span class="k">Terminal</span><span>Open the terminal you choose in the focused folder</span></li>
         <li><span class="k">Customisable</span><span>Keys, themes, icon packs, and sidebar groups with icons of your own</span></li>
+        <!-- Trial: the shot replaces this text row. To revert, delete the shotrow below and uncomment this.
         <li><span class="k">Compare</span><span>View two photos side by side in the Gallery view</span></li>
+        -->
+        <li class="shotrow"><span class="k">Compare</span><span><button class="zoom" type="button" aria-label="Enlarge the two photos compared side by side"><picture><source srcset="media/compare-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/compare-gallery-light.webp" width="680" height="290" alt="Gallery view with two photos selected, side by side: Reine at dawn and Reine at dusk."></picture></button></span></li>
       </ul>
     </div>
   </section>
@@ -341,23 +354,29 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="plugins-h">Add what’s missing.</h2>
       <p class="sub">Plugins are small Rhai scripts. You approve what each one may touch.</p>
-      <ul class="list">
-        <li>A section of folders in the left sidebar</li>
-        <li>Extra columns in List and Columns views</li>
-        <li>Badges and tints on files and folders</li>
-        <li>Commands in the File menu, the palette and the context menu</li>
-        <li>A preview for a kind of file</li>
-        <li>More fields in the Info tab</li>
-        <li>A value in the bottom bar</li>
-        <li>File and folder icon packs</li>
-      </ul>
+      <div class="split wide">
+        <div>
+          <ul class="list">
+            <li>A section of folders in the left sidebar</li>
+            <li>Extra columns in List and Columns views</li>
+            <li>Badges and tints on files and folders</li>
+            <li>Commands in the File menu, the palette and the context menu</li>
+            <li>A preview for a kind of file</li>
+            <li>More fields in the Info tab</li>
+            <li>A value in the bottom bar</li>
+            <li>File and folder icon packs</li>
+          </ul>
+
+        </div>
+        <figure class="plug"><button class="zoom" type="button" aria-label="Enlarge the plugin shot"><picture><source srcset="media/plugin-surfaces-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/plugin-surfaces-light.webp" width="784" height="264" alt="A plugin at work: a Shoot stages section in the sidebar, a Rating column, RAW badges with a blue tint and a dimmed rejected shot."></picture></button></figure>
+      </div>
 
       <div class="example" id="git" role="group" aria-labelledby="git-h">
         <h3 id="git-h">Git, included</h3>
-        <ul class="crops">
-          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><span class="crop shot" style="--x:480;--y:95;--cw:480;--ch:360"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Badges in the listing</figcaption></figure></li>
-          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git projects in the sidebar"><span class="crop shot" style="--x:0;--y:772;--cw:470;--ch:352"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Branch and changes per project</figcaption></figure></li>
-          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git Diff tab"><span class="crop shot" style="--x:1535;--y:82;--cw:465;--ch:349"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, the Git Diff tab shows the unstaged changes, and the sidebar lists Git projects with their branch."></picture></span></button><figcaption>Git Diff beside the file</figcaption></figure></li>
+        <ul class="comps">
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><picture><source srcset="media/git-rows-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-rows-light.webp" width="424" height="144" alt="Three files in list view: harbor.toml with a question mark badge, scratch.log tinted as ignored, tides.rs with an M badge and ten changed lines."></picture></button><figcaption>Badges in the listing</figcaption></figure></li>
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git projects in the sidebar"><picture><source srcset="media/git-sidebar-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-sidebar-light.webp" width="324" height="187" alt="The sidebar’s Projects section: four repositories with their branch and the number of changed files."></picture></button><figcaption>Branch and changes per project</figcaption></figure></li>
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git Diff tab"><picture><source srcset="media/git-diff-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-diff-light.webp" width="339" height="360" alt="The Git Diff tab beside a file: the unstaged changes, with removed lines in red and added lines in green."></picture></button><figcaption>Git Diff beside the file</figcaption></figure></li>
         </ul>
       </div>
     </div>

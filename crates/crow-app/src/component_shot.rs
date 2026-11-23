@@ -640,9 +640,15 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let theme = value("--theme").unwrap_or_else(|| "finder-light".to_owned());
-    match render_with(&name, &theme, args.iter().any(|a| a == "--whole-window"))
-        .and_then(|image| image.save(&out).map_err(|e| e.to_string()))
-    {
+    let whole = args.iter().any(|a| a == "--whole-window");
+    // Off the main thread, like the tests: there the Mac calls that need the main run loop
+    // (Quick Look thumbnails) degrade at once to decoding the file, so every run draws the same.
+    let result = std::thread::spawn(move || {
+        render_with(&name, &theme, whole).and_then(|image| image.save(&out).map_err(|e| e.to_string()))
+    })
+    .join()
+    .unwrap_or_else(|_| Err("the render panicked".to_owned()));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("crow --component-shot: {error}");
@@ -696,6 +702,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_gallery_shot_shows_the_photos_not_their_placeholder_icons() {
+        let image = render("compare-gallery", "finder-light").unwrap();
+        let colours: std::collections::HashSet<[u8; 4]> = image.pixels().map(|pixel| pixel.0).collect();
+        assert!(
+            colours.len() > 2000,
+            "two gradients have thousands of colours, a placeholder icon a few: {}",
+            colours.len()
+        );
     }
 
     #[test]
