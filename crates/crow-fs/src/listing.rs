@@ -75,10 +75,28 @@ impl Entry {
 
 /// Application bundles and other packages open rather than navigate.
 pub fn is_package_name(name: &str) -> bool {
-    matches!(
-        Path::new(name).extension().and_then(|e| e.to_str()),
-        Some("app" | "bundle" | "framework" | "photoslibrary")
-    )
+    Path::new(name).extension().and_then(|e| e.to_str()).is_some_and(is_package_ext)
+}
+
+/// Extensions of folders that open as one item. The single list for listing,
+/// sizes, rename and duplicate, so they never disagree.
+const PACKAGE_EXTS: [&str; 5] = ["app", "bundle", "framework", "photoslibrary", "pkg"];
+
+/// Whether a folder with this extension is a package. Case-insensitive, like Finder.
+pub(crate) fn is_package_ext(ext: &str) -> bool {
+    PACKAGE_EXTS.iter().any(|known| known.eq_ignore_ascii_case(ext))
+}
+
+/// `is_package_ext` over raw bytes, for names that are not UTF-8.
+pub(crate) fn is_package_ext_bytes(ext: &[u8]) -> bool {
+    PACKAGE_EXTS.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(ext))
+}
+
+/// The error `getattrlistbulk` gives on volumes that cannot do bulk listing
+/// (SMB, NFS, FUSE). macOS spells it two ways.
+#[cfg(target_os = "macos")]
+pub(crate) fn is_unsupported(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP)
 }
 
 /// The same test for a path, for the size walk.
@@ -92,7 +110,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool, mut on_batch: impl FnMut(Vec<Entr
     #[cfg(target_os = "macos")]
     {
         match bulk::list(dir, show_hidden, &mut on_batch) {
-            Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
+            Err(e) if is_unsupported(&e) => {}
             other => return other,
         }
     }
@@ -136,7 +154,7 @@ pub fn list_sample(
     #[cfg(target_os = "macos")]
     {
         match bulk::sample(dir, show_hidden, max_entries, max_examined, cancel) {
-            Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
+            Err(e) if is_unsupported(&e) => {}
             other => return other,
         }
     }

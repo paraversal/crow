@@ -106,7 +106,8 @@ impl Cache {
     pub fn validate_inodes(&mut self) {
         let mut replaced = Vec::new();
         for (path, entry) in &self.entries {
-            let inode = std::fs::metadata(path).ok().filter(|meta| meta.is_dir()).map_or(0, |meta| inode(&meta));
+            let inode =
+                std::fs::symlink_metadata(path).ok().filter(|meta| meta.is_dir()).map_or(0, |meta| inode(&meta));
             if inode != entry.inode {
                 replaced.push(path.clone());
             }

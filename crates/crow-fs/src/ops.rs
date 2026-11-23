@@ -16,7 +16,9 @@
 //! - A move across volumes deletes the source only after the copy is complete.
 //! - Undo refuses to overwrite anything that appeared in the meantime.
 
+use crate::listing::{is_package_ext, is_package_ext_bytes};
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -356,16 +358,34 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> OpError + '_ {
 
 // ----- names -----
 
-const PACKAGE_EXTS: [&str; 5] = ["app", "bundle", "framework", "photoslibrary", "pkg"];
-
 /// Split "report.pdf" into ("report", ".pdf"). Folders keep their whole name,
 /// except packages ("Tool.app"), like Finder. Shared with the batch-rename
 /// transform in `crow-core`, so both preserve exactly the same extension.
 pub fn split_name(name: &str, is_dir: bool) -> (&str, &str) {
     match name.rfind('.') {
-        Some(i) if i > 0 && (!is_dir || PACKAGE_EXTS.contains(&&name[i + 1..])) => (&name[..i], &name[i..]),
+        Some(i) if i > 0 && (!is_dir || is_package_ext(&name[i + 1..])) => (&name[..i], &name[i..]),
         _ => (name, ""),
     }
+}
+
+/// `split_name` over raw bytes, so names that are not UTF-8 keep every byte.
+/// The split point is an ASCII dot, so both halves are whole names.
+fn split_name_bytes(name: &[u8], is_dir: bool) -> (&[u8], &[u8]) {
+    match name.iter().rposition(|&b| b == b'.') {
+        Some(i) if i > 0 && (!is_dir || is_package_ext_bytes(&name[i + 1..])) => (&name[..i], &name[i..]),
+        _ => (name, &[]),
+    }
+}
+
+/// "stem{middle}ext" in `dir`, where the stem and extension come from `name` byte for byte.
+fn suffixed(dir: &Path, name: &OsStr, is_dir: bool, middle: &str) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let (stem, ext) = split_name_bytes(name.as_bytes(), is_dir);
+    let mut bytes = Vec::with_capacity(name.len() + middle.len());
+    bytes.extend_from_slice(stem);
+    bytes.extend_from_slice(middle.as_bytes());
+    bytes.extend_from_slice(ext);
+    dir.join(OsString::from_vec(bytes))
 }
 
 fn exists(path: &Path) -> bool {
@@ -379,14 +399,26 @@ fn first_free(dir: &Path, candidates: impl Iterator<Item = String>) -> PathBuf {
 
 /// Finder's "keep both" name: "report 2.pdf", "report 3.pdf", …
 pub fn keep_both_name(dir: &Path, name: &str, is_dir: bool) -> PathBuf {
-    let (stem, ext) = split_name(name, is_dir);
-    first_free(dir, (2..).map(|n| format!("{stem} {n}{ext}")))
+    keep_both_candidates(dir, OsStr::new(name), is_dir)
+        .find(|p| !exists(p))
+        .expect("an unbounded sequence has a free name")
+}
+
+/// "report 2.pdf", "report 3.pdf", … without checking the disk.
+fn keep_both_candidates<'a>(dir: &'a Path, name: &'a OsStr, is_dir: bool) -> impl Iterator<Item = PathBuf> + 'a {
+    (2..).map(move |n| suffixed(dir, name, is_dir, &format!(" {n}")))
+}
+
+/// "report copy.pdf", "report copy 2.pdf", … without checking the disk.
+fn copy_candidates<'a>(dir: &'a Path, name: &'a OsStr, is_dir: bool) -> impl Iterator<Item = PathBuf> + 'a {
+    std::iter::once(" copy".to_owned())
+        .chain((2..).map(|n| format!(" copy {n}")))
+        .map(move |middle| suffixed(dir, name, is_dir, &middle))
 }
 
 /// Finder's duplicate name: "report copy.pdf", "report copy 2.pdf", …
 pub fn copy_name(dir: &Path, name: &str, is_dir: bool) -> PathBuf {
-    let (stem, ext) = split_name(name, is_dir);
-    first_free(dir, std::iter::once(format!("{stem} copy{ext}")).chain((2..).map(|n| format!("{stem} copy {n}{ext}"))))
+    copy_candidates(dir, OsStr::new(name), is_dir).find(|p| !exists(p)).expect("an unbounded sequence has a free name")
 }
 
 /// The name a new folder gets before you rename it.
@@ -418,14 +450,40 @@ pub fn check_name(name: &str) -> Result<(), OpError> {
     Err(OpError::InvalidName(why.into()))
 }
 
+/// The final component with every byte intact, for names built from a source's.
+fn file_name_os(path: &Path) -> Result<&OsStr, OpError> {
+    path.file_name().ok_or_else(|| OpError::NotFound(path.to_path_buf()))
+}
+
 fn file_name(path: &Path) -> Result<String, OpError> {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or_else(|| OpError::NotFound(path.to_path_buf()))
 }
 
+/// Whether `a` and `b` are one directory entry spelled two ways (a case-only or
+/// normalization-only rename on a volume that folds names). Two hard links to one
+/// inode are different entries, so they are not "the same file".
 fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (a.symlink_metadata(), b.symlink_metadata()) {
+    let same_inode = match (a.symlink_metadata(), b.symlink_metadata()) {
         (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    };
+    if !same_inode {
+        return false;
+    }
+    let (Some(parent_a), Some(parent_b)) = (a.parent(), b.parent()) else { return false };
+    if !same_directory(parent_a, parent_b) {
+        return false;
+    }
+    let (Some(name_a), Some(name_b)) = (a.file_name(), b.file_name()) else { return false };
+    if name_a == name_b {
+        return true;
+    }
+    match (name_a.to_str(), name_b.to_str()) {
+        (Some(x), Some(y)) => {
+            let folds = NameSemantics { case_sensitive: false, normalization_insensitive: true };
+            names_equal(x, y, name_semantics(parent_a).unwrap_or(folds))
+        }
         _ => false,
     }
 }
@@ -442,11 +500,8 @@ fn same_directory(a: &Path, b: &Path) -> bool {
 }
 
 /// Finder's duplicate name, also avoiding names this plan already claimed.
-fn copy_name_avoiding(dir: &Path, name: &str, is_dir: bool, reserved: &HashMap<PathBuf, ()>) -> PathBuf {
-    let (stem, ext) = split_name(name, is_dir);
-    (1..)
-        .map(|n| if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") })
-        .map(|n| dir.join(n))
+fn copy_name_avoiding(dir: &Path, name: &OsStr, is_dir: bool, reserved: &HashMap<PathBuf, ()>) -> PathBuf {
+    copy_candidates(dir, name, is_dir)
         .find(|p| !exists(p) && !reserved.contains_key(p))
         .expect("an unbounded sequence has a free name")
 }
@@ -466,10 +521,27 @@ fn tree_size(path: &Path, cancel: &AtomicBool) -> Result<u64, OpError> {
         return Ok(meta.len());
     }
     let mut total = 0;
-    for entry in std::fs::read_dir(path).map_err(io_err(path))? {
-        let entry = entry.map_err(io_err(path))?;
-        let child = entry.path();
-        total += tree_size(&child, cancel)?;
+    // A worklist, not recursion: a tree thousands of folders deep must not
+    // overflow the planning thread's stack.
+    let mut folders = vec![path.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
+        for entry in std::fs::read_dir(&folder).map_err(io_err(&folder))? {
+            let entry = entry.map_err(io_err(&folder))?;
+            let child = entry.path();
+            let meta = child.symlink_metadata().map_err(io_err(&child))?;
+            if meta.is_dir() {
+                folders.push(child);
+            } else {
+                let file_type = meta.file_type();
+                if !file_type.is_file() && !file_type.is_symlink() {
+                    return Err(OpError::Unsupported(child, "copying this file type"));
+                }
+                total += meta.len();
+            }
+        }
     }
     Ok(total)
 }
@@ -571,8 +643,8 @@ pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, O
                 }
                 let source = identity(path).map_err(io_err(path))?;
                 let parent = path.parent().ok_or_else(|| OpError::NotFound(path.clone()))?;
-                let is_dir = path.is_dir();
-                let target = copy_name_avoiding(parent, &file_name(path)?, is_dir, &reserved);
+                let is_dir = source.kind == EntryKind::Dir;
+                let target = copy_name_avoiding(parent, file_name_os(path)?, is_dir, &reserved);
                 reserved.insert(target.clone(), ());
                 items.push(PlannedItem {
                     source: Some(path.clone()),
@@ -601,8 +673,8 @@ pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, O
                 if into_itself(source, into) {
                     return Err(OpError::IntoItself(source.clone()));
                 }
-                let name = file_name(source)?;
-                let target = into.join(&name);
+                let name = file_name_os(source)?;
+                let target = into.join(name);
                 // A symlinked parent names the same folder; moving there is a no-op.
                 let same_parent = source.parent().is_some_and(|parent| same_directory(parent, into));
                 if moving && same_parent {
@@ -610,7 +682,7 @@ pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, O
                 }
                 // Copying into its own folder makes a copy, as Duplicate does.
                 let target = if target == *source || same_parent {
-                    copy_name_avoiding(into, &name, source.is_dir(), &reserved)
+                    copy_name_avoiding(into, name, source_meta.kind == EntryKind::Dir, &reserved)
                 } else {
                     target
                 };
@@ -770,4 +842,34 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
         }
     }
     Ok(reversed)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    fn bytes_path(dir: &Path, name: &[u8]) -> PathBuf {
+        dir.join(OsString::from_vec(name.to_vec()))
+    }
+
+    #[test]
+    fn generated_names_keep_the_bytes_of_non_utf8_names() {
+        let dir = Path::new("/crow-no-such-folder");
+        let name = OsStr::from_bytes(b"foo\xfe.txt");
+        let reserved = HashMap::new();
+        assert_eq!(copy_name_avoiding(dir, name, false, &reserved), bytes_path(dir, b"foo\xfe copy.txt"));
+        let other = copy_name_avoiding(dir, OsStr::from_bytes(b"foo\xff.txt"), false, &reserved);
+        assert_ne!(copy_name_avoiding(dir, name, false, &reserved), other, "two bad names stay two names");
+        assert_eq!(keep_both_candidates(dir, name, false).next().unwrap(), bytes_path(dir, b"foo\xfe 2.txt"));
+        assert_eq!(suffixed(dir, OsStr::from_bytes(b"T\xfe.app"), true, " copy"), bytes_path(dir, b"T\xfe copy.app"));
+    }
+
+    #[test]
+    fn pkg_is_a_package_everywhere() {
+        assert_eq!(split_name("Setup.pkg", true), ("Setup", ".pkg"));
+        assert!(crate::listing::is_package_name("Setup.pkg"));
+        assert!(crate::listing::is_package_name("Tool.APP"));
+        assert!(!crate::listing::is_package_name("v1.2"));
+    }
 }

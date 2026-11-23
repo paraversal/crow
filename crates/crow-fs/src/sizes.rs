@@ -112,10 +112,36 @@ fn device(_: &std::fs::Metadata) -> u64 {
     0
 }
 
+/// What one directory contributes: the subfolders still to visit with whether
+/// their contents count, or `None` to stop the whole walk.
+type Visit = Option<Vec<(std::path::PathBuf, bool)>>;
+
+/// Walk the tree under `dir` with a worklist on the heap, so a tree thousands of
+/// levels deep cannot overflow the worker's stack. Folders are visited in the
+/// same preorder a recursive walk would use. `false`: cancelled or unreadable root.
+fn walk_tree(
+    dir: &Path,
+    count: bool,
+    cancel: &Cancel,
+    on_dir: &mut dyn FnMut(&Path),
+    mut visit: impl FnMut(&Path, bool, bool) -> Visit,
+) -> bool {
+    let mut pending = vec![(dir.to_path_buf(), count, true)];
+    while let Some((dir, count, root)) = pending.pop() {
+        on_dir(&dir);
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let Some(subdirs) = visit(&dir, count, root) else { return false };
+        pending.extend(subdirs.into_iter().rev().map(|(sub, count)| (sub, count, false)));
+    }
+    true
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{Cancel, Walk};
-    use crate::listing::{is_package_path, list_raw};
+    use super::{Cancel, Visit, Walk, walk_tree};
+    use crate::listing::{is_package_path, is_unsupported, list_raw};
     use std::path::{Path, PathBuf};
 
     pub(super) fn walk_dir(
@@ -127,10 +153,13 @@ mod imp {
         walk: &mut Walk,
         on_dir: &mut dyn FnMut(&Path),
     ) -> bool {
-        on_dir(dir);
-        if cancel.is_cancelled() {
-            return false;
-        }
+        debug_assert!(root, "a walk starts at its root");
+        walk_tree(dir, count, cancel, on_dir, |dir, count, root| visit(dir, root_dev, count, root, cancel, walk))
+    }
+
+    /// One folder. Volumes without `getattrlistbulk` (SMB, NFS, FUSE) are read
+    /// the portable way instead of counting every folder on them unreadable.
+    fn visit(dir: &Path, root_dev: u64, count: bool, root: bool, cancel: &Cancel, walk: &mut Walk) -> Visit {
         let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
         let mut stopped = false;
         let result = list_raw(dir, false, &mut |batch| {
@@ -155,31 +184,29 @@ mod imp {
             }
             true
         });
-        if result.is_err() {
+        match result {
+            Err(e) if is_unsupported(&e) && !stopped && subdirs.is_empty() => {
+                super::portable::visit(dir, root_dev, count, root, cancel, walk)
+            }
             // A subfolder that cannot be listed is partial, not fatal; the root
             // itself has nothing to measure.
-            walk.measured.unreadable += 1;
-            return !root;
-        }
-        if stopped {
-            return false;
-        }
-        for (sub, count) in subdirs {
-            if !walk_dir(&sub, root_dev, count, false, cancel, walk, on_dir) {
-                return false;
+            Err(_) => {
+                walk.measured.unreadable += 1;
+                (!root).then(Vec::new)
             }
+            Ok(()) if stopped => None,
+            Ok(()) => Some(subdirs),
         }
-        true
     }
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
 mod portable {
-    use super::{Cancel, Walk};
+    use super::{Cancel, Visit, Walk};
     use crate::listing::is_package_path;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
+    #[cfg(test)]
     pub(super) fn walk_dir(
         dir: &Path,
         root_dev: u64,
@@ -189,18 +216,19 @@ mod portable {
         walk: &mut Walk,
         on_dir: &mut dyn FnMut(&Path),
     ) -> bool {
-        on_dir(dir);
-        if cancel.is_cancelled() {
-            return false;
-        }
+        debug_assert!(root, "a walk starts at its root");
+        super::walk_tree(dir, count, cancel, on_dir, |dir, count, root| visit(dir, root_dev, count, root, cancel, walk))
+    }
+
+    pub(super) fn visit(dir: &Path, root_dev: u64, count: bool, root: bool, cancel: &Cancel, walk: &mut Walk) -> Visit {
         let Ok(read) = std::fs::read_dir(dir) else {
             walk.measured.unreadable += 1;
-            return !root;
+            return (!root).then(Vec::new);
         };
         let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
         for entry in read {
             if cancel.is_cancelled() {
-                return false;
+                return None;
             }
             let Ok(entry) = entry else {
                 walk.measured.unreadable += 1;
@@ -224,12 +252,7 @@ mod portable {
                 walk.file(meta.dev(), meta.ino(), meta.nlink() as u32, meta.len(), count);
             }
         }
-        for (sub, count) in subdirs {
-            if !walk_dir(&sub, root_dev, count, false, cancel, walk, on_dir) {
-                return false;
-            }
-        }
-        true
+        Some(subdirs)
     }
 }
 
