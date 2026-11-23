@@ -197,7 +197,7 @@ fn stop_slide_back() {
 fn install_key_observers() {
     use block2::RcBlock;
     use objc2_app_kit::{NSApplicationDidResignActiveNotification, NSWindowDidResignKeyNotification};
-    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue};
     use std::ptr::NonNull;
     thread_local!(static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
     if DONE.with(|done| done.replace(true)) {
@@ -209,9 +209,16 @@ fn install_key_observers() {
     for name in names {
         let block = RcBlock::new(|_: NonNull<NSNotification>| stop_slide_back());
         // SAFETY: the block only touches this thread's session handle and lives for the process.
-        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block) };
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(name),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &block,
+            )
+        };
+        // The center keeps the observer, and copies the block, for the process.
         std::mem::forget(token);
-        std::mem::forget(block);
     }
 }
 
@@ -241,7 +248,7 @@ fn primary_button_down() -> bool {
 /// mouse-up that caused it was synthetic, so the drop must not act. The session then
 /// starts again at the pointer.
 pub fn drop_is_premature() -> bool {
-    primary_button_down()
+    main_thread().is_some() && primary_button_down()
 }
 
 /// Whether a session that just ended was cut short and should start again: the user is

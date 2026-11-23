@@ -16,6 +16,9 @@ pub struct SystemTrash;
 
 impl crow_fs::ops::Trash for SystemTrash {
     fn trash(&self, path: &Path) -> io::Result<PathBuf> {
+        if !crate::valid_path(path) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a usable path"));
+        }
         autoreleasepool(|_| {
             let mut resulting: Option<Retained<NSURL>> = None;
             NSFileManager::defaultManager()
@@ -65,7 +68,10 @@ pub fn read_file_urls() -> Vec<PathBuf> {
         // SAFETY: NSPasteboardTypeFileURL is a valid, static pasteboard type.
         .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
         .filter_map(|s| NSURL::URLWithString(&s))
-        .filter_map(|url| url.path())
+        // A file-reference URL (file:///.file/id=...) names the item by id; resolve it
+        // to the real path, and ignore anything that is not a file URL.
+        .filter(|url| url.isFileURL())
+        .filter_map(|url| url.filePathURL().and_then(|resolved| resolved.path()))
         .map(|p| PathBuf::from(p.to_string()))
         .collect()
 }
