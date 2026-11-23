@@ -19,6 +19,8 @@ pub(crate) struct BatchRenameSheet {
     pub(crate) start: Entity<TextInput>,
     pub(crate) padding: Entity<TextInput>,
     pub(crate) kind: RenameKind,
+    /// Index of the tab the ink bar slides from after a mode change.
+    tab_from: usize,
     pub(crate) add_position: AddPosition,
     pub(crate) preserve_extension: bool,
     pub(crate) preview: Preview,
@@ -79,20 +81,39 @@ fn enter<E: IntoElement + gpui::Styled + 'static>(
     mode: crow_core::motion::Effective,
     ms: u64,
 ) -> AnyElement {
+    enter_after(element, id, mode, ms, 0)
+}
+
+/// `enter` that waits `delay` ms first (invisible meanwhile), so rows of a table
+/// can arrive one after another.
+fn enter_after<E: IntoElement + gpui::Styled + 'static>(
+    element: E,
+    id: impl Into<gpui::ElementId>,
+    mode: crow_core::motion::Effective,
+    ms: u64,
+    delay: u64,
+) -> AnyElement {
     use crow_core::motion::{Effective, ease_out};
     use gpui::{Animation, AnimationExt as _};
     if mode == Effective::Off {
         return element.into_any_element();
     }
+    let total = (ms + delay) as f32;
     element
         .relative()
-        .with_animation(id, Animation::new(std::time::Duration::from_millis(ms)), move |el, t| {
-            let t = ease_out(t);
+        .with_animation(id, Animation::new(std::time::Duration::from_millis(ms + delay)), move |el, t| {
+            let t = ease_out(((t * total - delay as f32) / ms as f32).clamp(0., 1.));
             let el = el.opacity(t);
             if mode == Effective::Full { el.top(px(4. * (1. - t))) } else { el }
         })
         .into_any_element()
 }
+
+/// Width of one mode tab; the ink bar slides in steps of this.
+const TAB_WIDTH: f32 = 104.;
+/// Gap between rows' arrival when the mode changes, and how many rows stagger.
+const ROW_STAGGER_MS: u64 = 35;
+const ROW_STAGGER_ROWS: usize = 6;
 
 fn field(value: String, placeholder: &'static str, aria: &'static str, cx: &mut App) -> Entity<TextInput> {
     cx.new(|cx| TextInput::new(value, placeholder, cx).bare().with_aria_label(aria))
@@ -110,6 +131,7 @@ impl BatchRenameSheet {
             start: field("1".to_owned(), "1", "Start number", cx),
             padding: field(String::new(), "0", "Zero padding", cx),
             kind: RenameKind::Replace,
+            tab_from: 0,
             add_position: AddPosition::After,
             preserve_extension: true,
             preview: preview(&snapshot, &RenameForm::default()),
@@ -347,6 +369,9 @@ impl CrowWindow {
 
     pub(super) fn batch_rename_kind(&mut self, kind: RenameKind, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Sheet::BatchRename(sheet)) = &mut self.sheet else { return };
+        if sheet.kind != kind {
+            sheet.tab_from = sheet.kind as usize;
+        }
         sheet.kind = kind;
         let focus = match kind {
             RenameKind::Replace => sheet.find.read(cx).focus_handle(cx),
@@ -486,17 +511,16 @@ impl CrowWindow {
             } else {
                 border
             };
+            // Inline text with an underline, not a box: the sentence reads as one line.
             div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .flex_none()
                 .w(px(width))
-                .px_2()
+                .px_1()
                 .py_1()
-                .rounded_md()
                 .text_size(px(13.))
-                .bg(color(theme.role("bg")))
-                .border_1()
+                .border_b_1()
                 .border_color(edge)
                 .child(input.clone())
         };
@@ -515,31 +539,68 @@ impl CrowWindow {
             .px_2()
             .py_1()
             .rounded_md()
-            .border_1()
-            .border_color(if sheet.preserve_extension { accent } else { border })
             .cursor_pointer()
             .text_size(px(12.))
             .text_color(if sheet.preserve_extension { fg } else { muted })
             .on_click(cx.listener(|this, _, window, cx| this.batch_rename_extension(window, cx)))
             .child(div().w(px(10.)).text_color(accent).child(if sheet.preserve_extension { "✓" } else { "" }))
             .child("Keep extension");
-        let rules = segmented()
-            .child(
-                control("batch-rule-replace", "Find & Replace", sheet.kind == RenameKind::Replace, &sheet.rules[0])
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Replace, window, cx)),
-                    ),
-            )
-            .child(
-                control("batch-rule-add", "Add Text", sheet.kind == RenameKind::AddText, &sheet.rules[1]).on_click(
+        let mode = cx.global::<Ui>().feedback.mode;
+        let tab = |id: &'static str, label: &'static str, selected: bool, focus: &FocusHandle| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(Role::RadioButton)
+                .aria_label(label)
+                .aria_selected(selected)
+                .track_focus(focus)
+                .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+                .w(px(TAB_WIDTH))
+                .flex_none()
+                .py_2()
+                .flex()
+                .justify_center()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when(selected, |el| el.text_color(fg).font_weight(FontWeight::MEDIUM))
+                .when(!selected, |el| el.text_color(muted).hover(|el| el.text_color(fg)))
+                .child(label)
+        };
+        // The ink bar slides from the tab that was active; Off puts it there at once.
+        let (from, to) = (sheet.tab_from as f32 * TAB_WIDTH, sheet.kind as usize as f32 * TAB_WIDTH);
+        let ink = div().absolute().bottom(px(-1.)).w(px(TAB_WIDTH)).h(px(2.)).bg(accent);
+        let ink = if mode == crow_core::motion::Effective::Off {
+            ink.left(px(to)).into_any_element()
+        } else {
+            use gpui::{Animation, AnimationExt as _};
+            ink.left(px(from))
+                .with_animation(
+                    ("batch-ink", sheet.kind as usize),
+                    Animation::new(std::time::Duration::from_millis(crow_core::motion::ms::FIELD)),
+                    move |el, t| el.left(px(from + (to - from) * crow_core::motion::ease_out(t))),
+                )
+                .into_any_element()
+        };
+        let rules =
+            div()
+                .flex()
+                .flex_none()
+                .relative()
+                .child(
+                    tab("batch-rule-replace", "Find & Replace", sheet.kind == RenameKind::Replace, &sheet.rules[0])
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Replace, window, cx)),
+                        ),
+                )
+                .child(tab("batch-rule-add", "Add Text", sheet.kind == RenameKind::AddText, &sheet.rules[1]).on_click(
                     cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::AddText, window, cx)),
-                ),
-            )
-            .child(
-                control("batch-rule-number", "Numbering", sheet.kind == RenameKind::Number, &sheet.rules[2]).on_click(
-                    cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Number, window, cx)),
-                ),
-            );
+                ))
+                .child(
+                    tab("batch-rule-number", "Numbering", sheet.kind == RenameKind::Number, &sheet.rules[2]).on_click(
+                        cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Number, window, cx)),
+                    ),
+                )
+                .child(ink);
         let sentence = div().flex().flex_wrap().items_center().gap_2();
         let sentence =
             match sheet.kind {
@@ -585,18 +646,23 @@ impl CrowWindow {
                     .child(slot(&sheet.padding, "batch-field-padding", 40., Some(FormField::Padding)))
                     .child(word("digits")),
             };
-        let mode = cx.global::<Ui>().feedback.mode;
         let sentence = enter(sentence, ("batch-sentence", sheet.kind as usize), mode, crow_core::motion::ms::FIELD);
         let bar = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded_md()
-            .border_1()
-            .border_color(border)
-            .child(div().flex().items_center().justify_between().gap_2().child(rules).child(extension))
-            .child(sentence);
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(rules)
+                    .child(extension),
+            )
+            .child(div().min_h(px(28.)).child(sentence));
         let header = div()
             .flex()
             .gap_2()
@@ -750,6 +816,8 @@ impl CrowWindow {
         // A blank field is a form error, shown once above the table. Repeating
         // it on every preview row would bury the names the rows are there to show.
         let form_error = sheet.preview.error.is_some();
+        let motion = cx.global::<Ui>().feedback.mode;
+        let kind = sheet.kind as usize;
         range
             .filter_map(|index| {
                 let row = sheet.preview.rows.get(index)?;
@@ -796,6 +864,38 @@ impl CrowWindow {
                 } else {
                     div().text_color(muted).child(if form_error || unchanged { "–" } else { "→" }).into_any_element()
                 };
+                let cell = div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        after
+                            .debug_selector(move || format!("batch-preview-new-name-{index}"))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis(),
+                    )
+                    .when(!line.is_empty(), |destination| {
+                        destination.child(
+                            div()
+                                .max_w(gpui::relative(0.8))
+                                .flex_none()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(11.))
+                                .text_color(error)
+                                .child(line.to_owned()),
+                        )
+                    });
+                // A mode change brings the new names in one row after another; the
+                // keystroke-driven rebuilds keep the same id and do not replay it.
+                let delay = ROW_STAGGER_MS * index.min(ROW_STAGGER_ROWS) as u64;
+                let cell =
+                    enter_after(cell, ("batch-after", index * 3 + kind), motion, crow_core::motion::ms::FIELD, delay);
                 Some(
                     div()
                         .id(("batch-preview-row", index))
@@ -813,35 +913,7 @@ impl CrowWindow {
                         .when(reason.is_some(), |row| row.bg(crate::style::error_soft(&theme)))
                         .child(before.flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis())
                         .child(div().w(PREVIEW_ARROW_WIDTH).flex_none().flex().justify_center().child(marker))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    after
-                                        .debug_selector(move || format!("batch-preview-new-name-{index}"))
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis(),
-                                )
-                                .when(!line.is_empty(), |destination| {
-                                    destination.child(
-                                        div()
-                                            .max_w(gpui::relative(0.8))
-                                            .flex_none()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .text_size(px(11.))
-                                            .text_color(error)
-                                            .child(line.to_owned()),
-                                    )
-                                }),
-                        )
+                        .child(cell)
                         .into_any_element(),
                 )
             })
