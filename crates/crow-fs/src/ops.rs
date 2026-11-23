@@ -3,7 +3,7 @@
 //! Three stages, so nothing touches the disk before the user has seen what will happen:
 //! 1. [`plan`] turns a request into items and marks conflicts. Read-only.
 //! 2. [`Job`] carries out the plan with ordered events, pause/cancel gates and
-//!    conflict decisions; [`execute`] is the synchronous compatibility adapter.
+//!    conflict decisions.
 //! 3. [`undo`] reverses a finished (or partly finished) operation from its [`Record`].
 //!
 //! Safety rules, enforced here rather than trusted to callers:
@@ -38,6 +38,7 @@ pub use batch::{
 pub(crate) use job::FORCE_CROSS_DEVICE;
 #[cfg(test)]
 pub(crate) use job::TestHooks;
+#[cfg(test)]
 pub use job::execute;
 pub use job::{Conflict, ConflictKey, ConflictReason, Job, JobEvent, JobId, JobOptions};
 

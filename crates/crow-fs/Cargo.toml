@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Folder snapshots, watching and (from M4) the file operation engine"
+description = "Folder snapshots, watching and the file operation engine"
 
 [features]
 # Edge-case trees and churn. Enabled by `crow-app` for `--make-fixture` and the

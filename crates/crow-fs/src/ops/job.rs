@@ -1,8 +1,7 @@
 //! Job execution for the file operation engine: stable job/item/attempt ids,
 //! ordered events, pause/cancel gates, staging, late conflicts and Replace.
 //!
-//! The compatibility [`execute`] entry point keeps the old synchronous shape for
-//! existing callers until P5B moves them to [`Job`].
+//! A synchronous `execute` entry point exists for the engine's own tests.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -87,7 +86,7 @@ pub struct JobOptions {
     pub resolutions: HashMap<PathBuf, Resolution>,
     /// Used when a plan-time conflict has no entry in `resolutions`.
     pub initial_default: Option<Resolution>,
-    /// Used for a conflict that appears after planning. P5B leaves this `None`
+    /// Used for a conflict that appears after planning. The app leaves this `None`
     /// so every late conflict waits for the current decision.
     pub late_default: Option<Resolution>,
     /// At most one progress event per interval. Zero emits every update.
@@ -837,7 +836,6 @@ impl<'a> Runner<'a> {
                             // NSFileManager's Trash has no expected-identity argument.
                             // Verify immediately before and after; a swap in this
                             // window is detected below and restored no-clobber.
-                            // See P5A Q1 and the progress Decisions.
                             #[cfg(test)]
                             self.fire_hook(|h| h.before_replace_trash.clone());
                             let trashed = match self.trash.trash(&target) {
@@ -1127,8 +1125,9 @@ fn run_job(
     outcome
 }
 
-/// The compatibility entry point: synchronous, no pause, plan-time choices by
+/// A synchronous run for the engine's tests: no pause, plan-time choices by
 /// path and Keep Both for anything that appears later.
+#[cfg(test)]
 pub fn execute(
     plan: &Plan,
     resolutions: &HashMap<PathBuf, Resolution>,

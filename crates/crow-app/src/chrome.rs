@@ -15,8 +15,6 @@ use crate::style::{BAND_HEIGHT, color, ui_font};
 use crate::ui::Ui;
 
 /// How a keycap draws: an outlined chord, one filled cap per key, or plain text.
-// U1 only uses Text; U3–U7 draw Outline and Key.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeycapWeight {
     Outline,
@@ -37,8 +35,6 @@ pub struct Keycap {
     text_role: Option<&'static str>,
 }
 
-// `from_binding` and `for_action` are the builders U3–U7 use.
-#[allow(dead_code)]
 impl Keycap {
     /// A literal shortcut, e.g. `"esc"` (`Key` splits it on nothing: use
     /// `from_binding` for a chord).

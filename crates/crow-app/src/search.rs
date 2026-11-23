@@ -2112,7 +2112,6 @@ impl SearchView {
     }
 
     /// Whether the query field has focus.
-    #[allow(dead_code)] // U5's hints read it.
     pub fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.input.read(cx).focus_handle(cx).is_focused(window)
     }

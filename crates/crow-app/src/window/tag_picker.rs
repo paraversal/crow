@@ -160,14 +160,7 @@ impl CrowWindow {
                     match event.keystroke.key.as_str() {
                         "tab" => {
                             let forward = !event.keystroke.modifiers.shift;
-                            let count = picker.buttons.len();
-                            let next = match (focused, forward) {
-                                (Some(index), true) => (index + 1) % count,
-                                (Some(index), false) => (index + count - 1) % count,
-                                (None, true) => 0,
-                                (None, false) => count - 1,
-                            };
-                            window.focus(&picker.buttons[next], cx);
+                            chrome::cycle_focus(&picker.buttons, forward, window, cx);
                         }
                         "up" => picker.cursor = picker.cursor.saturating_sub(1),
                         "down" => picker.cursor = (picker.cursor + 1).min(limit),

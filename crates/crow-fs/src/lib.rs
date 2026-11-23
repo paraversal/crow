@@ -1,4 +1,4 @@
-//! Folder listings, sorting, watching and, from M4, the file operation engine.
+//! Folder listings, sorting, watching and the file operation engine.
 //!
 //! No UI types here: everything is plain data so it can be tested without a window.
 
