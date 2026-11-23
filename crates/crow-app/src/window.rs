@@ -594,7 +594,9 @@ impl CrowWindow {
             allowed.push(("search field", search.input_focus_handle(cx)));
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
-            allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            if self.sidebar_takes_focus(cx) {
+                allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            }
             allowed.push(("sidebar divider", self.side_panes.left_focus.clone()));
             allowed.push(("preview divider", self.info.read(cx).splitter_focus().clone()));
             // ⌘L can edit the path while search is open; the bar's field owns focus then.
@@ -766,6 +768,12 @@ impl CrowWindow {
         self.left_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: !hide });
         crate::menus::refresh(cx);
         cx.refresh_windows();
+    }
+
+    /// Whether focus may be in the left sidebar: it is shown, or still sliding away.
+    /// A hidden sidebar that keeps focus is a trap the focus invariant must report.
+    fn sidebar_takes_focus(&self, cx: &App) -> bool {
+        !cx.global::<Ui>().sidebar_hidden || self.left_look(cx).is_some_and(|look| look.width > 0.0 || look.overlay)
     }
 
     /// How the left sidebar looks now: `None` when it is not moving, else its slide.
@@ -4542,7 +4550,9 @@ impl CrowWindow {
                     let pane = self.pane().read(cx);
                     let sidebar = self.sidebar.read(cx);
                     allowed.push(("pane", pane.focus_handle().clone()));
-                    allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    if self.sidebar_takes_focus(cx) {
+                        allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    }
                     // A saved search or tag destination fills the center with its own session.
                     if let Some(session) = pane.saved_session() {
                         let session = session.read(cx);

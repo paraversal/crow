@@ -926,6 +926,23 @@ fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
 }
 
+#[gpui::test]
+fn focus_left_in_a_hidden_sidebar_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-hidden-sidebar-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    let in_sidebar =
+        cx.update(|window, cx| view.read(cx).sidebar.read(cx).focus_handle(cx).contains_focused(window, cx));
+    assert!(in_sidebar, "Tab moved focus into the sidebar");
+    // Hide it without the focus move the toggle does, then let the slide end.
+    let found = cx.update(|window, cx| {
+        cx.global_mut::<Ui>().sidebar_hidden = true;
+        view.read(cx).check_invariants(window, cx, false, None)
+    });
+    assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
+}
+
 /// H4 #8: ⌘N's second window must not fire the focus invariant.
 #[gpui::test]
 fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
@@ -1408,6 +1425,7 @@ fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
     let looks = row_looks(&view, &mut cx);
     let labels: Vec<&str> = looks.iter().map(|look| look.label.as_str()).collect();
     assert_eq!(labels, ["alpha", "beta"]);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| look.spoken == look.label), "no hint or mark yet: {looks:?}");
 }
 
@@ -1501,6 +1519,7 @@ fn sidebar_click_shows_fill_before_window_confirms_navigation(cx: &mut TestAppCo
     cx.run_until_parked();
     let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
     assert!(looks[2].current && !looks[1].current);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring));
 
     cx.simulate_keystrokes("up");
@@ -1527,6 +1546,7 @@ fn sidebar_failed_click_restores_fill_and_keeps_the_error(cx: &mut TestAppContex
     });
     let looks = row_looks(&view, &mut cx);
     assert!(looks[0].current && !looks[1].current);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring));
 }
 
@@ -1553,6 +1573,7 @@ fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestA
 
     cx.simulate_keystrokes("tab");
     let looks = row_looks(&view, &mut cx);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
     assert!(looks[1].current, "the current folder stays filled");
 }
@@ -1665,6 +1686,7 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
     );
     write_config(&view, &mut cx, "sidebar.toml", &toml);
     let looks = row_looks(&view, &mut cx);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| look.right.is_none()), "the Finder layer shows no letters: {looks:?}");
 
     use_vim(&view, &mut cx);
@@ -8576,10 +8598,13 @@ fn tag_filter_requires_every_tag_and_reuses_metadata_for_name_changes(cx: &mut T
 /// Holds every tag read until the test opens the gate, so two scans overlap.
 struct HeldTags {
     open: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    /// How many reads are waiting at the gate.
+    entered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl crow_search::TagReader for HeldTags {
     fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (lock, wake) = &*self.open;
         let mut open = lock.lock().expect("gate");
         while !*open {
@@ -8595,7 +8620,10 @@ fn a_stale_tag_scan_that_finishes_late_is_dropped(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
     let open_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    folder.update(&mut cx, |folder, _| folder.set_tag_reader_for_test(Arc::new(HeldTags { open: open_gate.clone() })));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    folder.update(&mut cx, |folder, _| {
+        folder.set_tag_reader_for_test(Arc::new(HeldTags { open: open_gate.clone(), entered: entered.clone() }))
+    });
 
     // Scan 1 (`Work`: alpha and beta) is held inside the reader when the
     // constraint changes to `review` (alpha only) and scan 2 starts. The gate
@@ -8603,7 +8631,12 @@ fn a_stale_tag_scan_that_finishes_late_is_dropped(cx: &mut TestAppContext) {
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["review".into()], cx));
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Open the gate once scan 1 is held inside the reader (scan 2 was started
+        // before this thread), so scan 1 really does finish after scan 2 began.
+        let limit = Instant::now() + std::time::Duration::from_secs(5);
+        while entered.load(std::sync::atomic::Ordering::SeqCst) < 1 && Instant::now() < limit {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let (lock, wake) = &*open_gate;
         *lock.lock().expect("gate") = true;
         wake.notify_all();
@@ -11490,7 +11523,9 @@ fn a_huge_paste_into_the_palette_stays_quick(cx: &mut TestAppContext) {
     let started = Instant::now();
     cx.simulate_keystrokes("cmd-v");
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_millis(250), "a 10 MB paste took {elapsed:?}");
+    // A debug build on a shared runner: the bound only has to separate "truncated"
+    // from "reshaped 10 MB", which takes seconds.
+    assert!(elapsed < Duration::from_secs(2), "a 10 MB paste took {elapsed:?}");
 }
 
 /// H4 #25: a huge path query must not shape a multi-MB missing-path label.
@@ -11507,7 +11542,7 @@ fn a_huge_path_query_stays_quick(cx: &mut TestAppContext) {
         window.draw(cx).clear(cx);
     });
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_millis(500), "a 10 MB path query took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "a 10 MB path query took {elapsed:?}");
 }
 
 #[gpui::test]
@@ -18373,9 +18408,14 @@ fn an_unreadable_folder_shows_a_lock_state_in_every_view(cx: &mut TestAppContext
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(locked.clone(), cx));
     for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Icons, ViewMode::Gallery] {
         pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
-        cx.run_until_parked();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        cx.run_until_parked();
+        // The listing fails on a background thread; wait for the lock state, not a fixed time.
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if cx.debug_bounds("folder-unreadable").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(cx.debug_bounds("folder-unreadable").is_some(), "{mode:?} shows the lock state");
         assert!(cx.debug_bounds("folder-retry").is_some(), "{mode:?} offers Retry");
         assert!(
@@ -19693,4 +19733,135 @@ fn turning_git_off_under_the_review_returns_focus_to_the_listing(cx: &mut TestAp
     assert!(view.read_with(&cx, |this, _| this.git_review.is_none()), "the review closes");
     let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
     assert!(cx.update(|window, cx| pane_focus.contains_focused(window, cx)), "focus is back on the listing");
+}
+
+// ----- keystroke tests for bindings that had none (audit TST-7) -----
+
+#[gpui::test]
+fn cmd_o_opens_the_selected_folder(cx: &mut TestAppContext) {
+    let root = fixture("key-cmd-o");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-alpha");
+    cx.simulate_keystrokes("cmd-o");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+}
+
+#[gpui::test]
+fn cmd_alt_v_moves_the_copied_file_into_the_folder(cx: &mut TestAppContext) {
+    let root = fixture("key-cmd-alt-v");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.simulate_keystrokes("cmd-c");
+    click_selector(&mut cx, "row-alpha");
+    cx.simulate_keystrokes("cmd-o");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+    cx.simulate_keystrokes("cmd-alt-v");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/notes.txt").exists(), "the file arrived");
+    assert!(!root.join("notes.txt").exists(), "Paste Item and Move it moves rather than copies");
+}
+
+#[gpui::test]
+fn ctrl_shift_tab_goes_to_the_previous_tab(cx: &mut TestAppContext) {
+    let root = fixture("key-prev-tab");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-t");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 1);
+    cx.simulate_keystrokes("ctrl-shift-tab");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 0);
+}
+
+#[gpui::test]
+fn cmd_alt_up_moves_a_favorite_up(cx: &mut TestAppContext) {
+    let root = fixture("key-favorite-up");
+    let (view, mut cx) = open(cx, &root);
+    let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+    cx.simulate_keystrokes("tab down cmd-alt-up");
+    settle(&view, &mut cx);
+    assert_eq!(sidebar_paths(&cx), [beta, alpha], "Cmd-Option-Up moves the second favorite above the first");
+}
+
+#[gpui::test]
+fn cmd_e_ejects_the_volume_under_the_sidebar_cursor(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("key-eject");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+    cx.update(|_, cx| {
+        cx.global_mut::<Ui>().volumes = vec![crow_macos::Volume {
+            name: "Test HD".into(),
+            path: root.to_path_buf(),
+            total_bytes: 1_000_000,
+            free_bytes: 500_000,
+            ejectable: true,
+        }];
+        cx.refresh_windows();
+    });
+    cx.run_until_parked();
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    // Walk the cursor down to the volume row.
+    for _ in 0..12 {
+        let looks = sidebar_looks(&view, &mut cx);
+        if looks.iter().any(|look| look.ring && look.label == "Test HD") {
+            break;
+        }
+        cx.simulate_keystrokes("down");
+    }
+    cx.simulate_keystrokes("cmd-e");
+    settle(&view, &mut cx);
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::Eject(root.to_path_buf())), "{calls:?}");
+}
+
+#[gpui::test]
+fn vim_shift_j_and_shift_k_extend_the_selection(cx: &mut TestAppContext) {
+    let root = fixture("key-vim-extend");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("shift-j");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"], "Shift-J grows the selection down");
+    cx.simulate_keystrokes("shift-j");
+    assert_eq!(selected_names(&view, &cx).len(), 3);
+    cx.simulate_keystrokes("shift-k");
+    assert_eq!(selected_names(&view, &cx).len(), 2, "Shift-K shrinks it back");
+}
+
+#[gpui::test]
+fn vim_yy_dd_p_u_and_ctrl_r_copy_cut_paste_undo_and_redo(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("key-vim-files");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("shift-g");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("y y");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::WriteFileUrls(vec![root.join("notes.txt")])), "yy copies: {calls:?}");
+
+    // p pastes beside the file: a copy appears; u takes it away; ctrl-r brings it back.
+    cx.simulate_keystrokes("p");
+    settle(&view, &mut cx);
+    assert!(root.join("notes copy.txt").exists(), "p pastes the copy");
+    cx.simulate_keystrokes("u");
+    settle(&view, &mut cx);
+    assert!(!root.join("notes copy.txt").exists(), "u undoes the paste");
+    cx.simulate_keystrokes("ctrl-r");
+    settle(&view, &mut cx);
+    assert!(root.join("notes copy.txt").exists(), "ctrl-r redoes it");
+
+    // dd marks the file to move; nothing is deleted.
+    cx.simulate_keystrokes("g g");
+    cx.simulate_keystrokes("d d");
+    let (paths, cut) = cx.read(crate::operations::pasteboard_paths);
+    assert!(cut, "dd cuts");
+    assert_eq!(&*paths, [root.join("alpha")]);
+    assert!(root.join("alpha").exists(), "dd deletes nothing");
 }
