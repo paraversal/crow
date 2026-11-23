@@ -1458,9 +1458,14 @@ impl CrowWindow {
             .map(|t| crow_core::motion::band_look(band_mode, opening, t))
         });
         let band_opening = self.search_motion.is_some_and(|(opening, _)| opening);
-        let band = self.active_search(cx).map(|search| {
-            let look = band_look.filter(|_| band_opening);
-            search.update(cx, |search, cx| search.render_band(look, window, cx).into_any_element())
+        let active_search = self.active_search(cx);
+        let right_sidebar_hidden = !self.info.read(cx).visible();
+        // Leave room for the sidebar affordances as well as the query and its controls.
+        let search_width = width - px(102. * (1.0 - left_share)) - px(if right_sidebar_hidden { 32. } else { 0. });
+        let compact_search = active_search.is_some() && search_width < px(570.);
+        let band = active_search.as_ref().map(|search| {
+            let look = band_look.filter(|_| band_opening && !compact_search);
+            search.update(cx, |search, cx| search.render_band(look, compact_search, window, cx).into_any_element())
         });
         // Closing: the toolbar's own field starts as wide as the band was and narrows back.
         let closing = band_look.filter(|_| !band_opening);
@@ -1471,7 +1476,7 @@ impl CrowWindow {
             .role(Role::Toolbar)
             .aria_label("Toolbar")
             .relative()
-            .h(px(BAND_HEIGHT))
+            .h(px(BAND_HEIGHT + if compact_search { 30. } else { 0. }))
             .flex_none()
             // With the sidebar hidden the traffic lights sit at the toolbar's left, and the
             // button that brings the sidebar back sits right after them.
@@ -1497,9 +1502,9 @@ impl CrowWindow {
             .gap(px(if tight { 4. } else { 10. }))
             .border_b_1()
             .border_color(crate::style::hairline(&theme))
-            .child(nav)
-            .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
-            .when(self.active_search(cx).is_none(), |bar| {
+            .child(nav.when(compact_search, |nav| nav.self_start().mt(px(11.))))
+            .children(band)
+            .when(active_search.is_none(), |bar| {
                 let search_field = match closing {
                     Some(look) if look.widen > 0.0 && !search_icon_only => {
                         // Narrowing back: the field keeps its 240 px basis and gives up a
@@ -1525,14 +1530,16 @@ impl CrowWindow {
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(search_field)
             })
-            .when(!self.info.read(cx).visible(), |bar| {
-                bar.child(chrome::collapse_chevron(
-                    "show-right-sidebar",
-                    "Show Right Sidebar",
-                    icons::Glyph::CollapseLeft,
-                    &TogglePreview,
-                    &theme,
-                    cx,
+            .when(right_sidebar_hidden, |bar| {
+                bar.child(div().when(compact_search, |button| button.self_start().mt(px(11.))).child(
+                    chrome::collapse_chevron(
+                        "show-right-sidebar",
+                        "Show Right Sidebar",
+                        icons::Glyph::CollapseLeft,
+                        &TogglePreview,
+                        &theme,
+                        cx,
+                    ),
                 ))
             })
     }

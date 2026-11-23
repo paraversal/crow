@@ -18769,6 +18769,42 @@ fn the_view_switcher_fill_glides_only_in_full(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn narrow_search_band_keeps_regex_and_match_controls_clear_of_save_and_done(cx: &mut TestAppContext) {
+    let root = fixture("narrow-search-band");
+    let (view, mut cx) = open_sized(cx, &root, 640., 540.);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = crow_core::motion::Effective::Off);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("/notes/");
+    settle(&view, &mut cx);
+
+    let query = cx.debug_bounds("search-query").expect("editable query");
+    assert!(query.size.width >= px(70.), "query has room to show text: {query:?}");
+
+    let toolbar = cx.debug_bounds("toolbar").expect("toolbar");
+    let field = cx.debug_bounds("search-field").expect("query field");
+    let regex = cx.debug_bounds("search-regex").expect("regex badge");
+    let contents = cx.debug_bounds("search-match-contents").expect("Contents control");
+    let save = cx.debug_bounds("search-save").expect("Save control");
+    let done = cx.debug_bounds("search-done").expect("Done control");
+
+    assert!(field.right() <= save.left() && save.right() <= done.left());
+    assert!(regex.right() <= field.right());
+    assert!(
+        contents.bottom() <= save.top() || contents.top() >= save.bottom() || contents.right() <= save.left(),
+        "Contents {contents:?} overlaps Save {save:?}"
+    );
+    for bounds in [field, query, regex, contents, save, done] {
+        assert!(bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right());
+        assert!(bounds.top() >= toolbar.top() && bounds.bottom() <= toolbar.bottom());
+    }
+
+    cx.simulate_click(contents.center(), gpui::Modifiers::none());
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |view, _| view.search.is_none()));
+}
+
+#[gpui::test]
 fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContext) {
     use crow_core::motion::Effective;
     let mut finals = Vec::new();
