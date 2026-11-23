@@ -520,6 +520,7 @@ impl<'a> Runner<'a> {
             let hooks = self.options.hooks.as_ref();
             BatchHooks {
                 before_stage: hooks.and_then(|h| h.before_batch_stage.clone()),
+                after_stage: None,
                 before_place: hooks.and_then(|h| h.before_batch_place.clone()),
                 before_restore: hooks.and_then(|h| h.before_batch_restore.clone()),
             }

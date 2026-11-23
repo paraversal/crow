@@ -1588,6 +1588,30 @@ fn batch_stage_failure_restores_the_earlier_items() {
 }
 
 #[test]
+fn batch_post_stage_identity_failure_restores_the_staged_item() {
+    let f = Fixture::new("batch-post-stage-fail");
+    f.file("a.txt", "A");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt")]);
+    f.file("replacement.txt", "replacement bytes");
+    let replacement = f.path("replacement.txt");
+    let hooks = BatchHooks {
+        after_stage: Some(Arc::new(move |staged| {
+            std::fs::rename(&replacement, staged).unwrap();
+        })),
+        ..Default::default()
+    };
+
+    let result = execute_batch(&moves, &|| false, &mut |_| {}, &hooks);
+    assert!(matches!(result, Err(OpError::BatchChanged(_))), "{result:?}");
+    assert_eq!(std::fs::read_to_string(f.path("a.txt")).unwrap(), "replacement bytes");
+    assert!(
+        !std::fs::read_dir(&f.root)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-batch-") })
+    );
+}
+
+#[test]
 fn batch_placement_failure_rolls_back_without_touching_an_external_file() {
     let f = Fixture::new("batch-place-fail");
     f.file("a.txt", "A");

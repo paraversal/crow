@@ -310,8 +310,9 @@ mod bulk {
         }
         fn time(&mut self) -> Option<SystemTime> {
             let (secs, nanos) = (self.i64()?, self.i64()?);
-            let since = Duration::new(secs.unsigned_abs(), nanos.clamp(0, 999_999_999) as u32);
-            Some(if secs >= 0 { UNIX_EPOCH + since } else { UNIX_EPOCH - since })
+            let seconds = Duration::from_secs(secs.unsigned_abs());
+            let whole = if secs >= 0 { UNIX_EPOCH.checked_add(seconds)? } else { UNIX_EPOCH.checked_sub(seconds)? };
+            whole.checked_add(Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64))
         }
         fn finder_flags(&mut self) -> Option<u16> {
             let finder_info = self.take::<32>()?;
@@ -564,6 +565,33 @@ mod bulk {
         let flags = if common & libc::ATTR_CMN_FLAGS != 0 { c.u32().unwrap_or(0) } else { 0 };
         let added = if common & libc::ATTR_CMN_ADDEDTIME != 0 { c.time() } else { None };
         (flags & UF_HIDDEN != 0, added, finder_flags)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn read_time(seconds: i64, nanoseconds: i64) -> Option<SystemTime> {
+            let mut bytes = Vec::new();
+            bytes.extend(seconds.to_ne_bytes());
+            bytes.extend(nanoseconds.to_ne_bytes());
+            bytes.extend(42_u32.to_ne_bytes());
+            let mut cursor = Cursor { entry: &bytes, at: 0 };
+            let timestamp = cursor.time();
+            assert_eq!(cursor.u32(), Some(42));
+            timestamp
+        }
+
+        #[test]
+        fn minimum_seconds_with_fraction_stays_in_range() {
+            let minimum = UNIX_EPOCH.checked_sub(Duration::from_secs(i64::MIN.unsigned_abs())).unwrap();
+            assert_eq!(read_time(i64::MIN, 1), Some(minimum + Duration::from_nanos(1)));
+        }
+
+        #[test]
+        fn timespec_fraction_is_added_to_signed_seconds() {
+            assert_eq!(read_time(-1, 500_000_000), Some(UNIX_EPOCH - Duration::from_millis(500)));
+            assert_eq!(read_time(1, 5), Some(UNIX_EPOCH + Duration::new(1, 5)));
+        }
     }
 }
 
