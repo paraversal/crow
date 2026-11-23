@@ -9543,6 +9543,114 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn path_completion_draws_control_characters_without_panicking(cx: &mut TestAppContext) {
+    let root = fixture("control-in-suffix");
+    for (parent, name) in [("lf", "a\nb"), ("cr", "a\rb")] {
+        std::fs::create_dir_all(root.join(parent).join(name)).unwrap();
+    }
+    let (view, mut cx) = open(cx, &root);
+    for (parent, name) in [("lf", "a\nb"), ("cr", "a\rb")] {
+        let path = root.join(parent);
+        cx.simulate_keystrokes("cmd-l cmd-a");
+        cx.simulate_input(&format!("{}/a", path.display()));
+        settle(&view, &mut cx);
+        assert_eq!(path_edit_completion(&view, &cx), Some(format!("{}/", &name[1..])));
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        assert_eq!(path_edit_text(&view, &cx), Some(format!("{}/", path.join(name).display())));
+        cx.simulate_keystrokes("escape");
+    }
+}
+
+#[gpui::test]
+fn text_input_normalizes_inverted_utf16_queries(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+
+    let root = fixture("utf16-ranges");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    let field = view.read_with(&cx, |w, _| w.path_edit.as_ref().unwrap().input.clone());
+    cx.update(|window, cx| {
+        field.update(cx, |input, cx| {
+            let inverted = std::ops::Range { start: 4, end: 1 };
+            input.set_text("Aé🙂z", window, cx);
+            let mut actual = None;
+            assert_eq!(input.text_for_range(inverted.clone(), &mut actual, window, cx).as_deref(), Some("é🙂"));
+            assert_eq!(actual, Some(1..4));
+            input.replace_text_in_range(Some(inverted.clone()), "x", window, cx);
+            assert_eq!(input.text(), "Axz");
+            input.set_text("Aé🙂z", window, cx);
+            let marked_selection = std::ops::Range { start: 8, end: 0 };
+            input.replace_and_mark_text_in_range(Some(inverted), "é", Some(marked_selection), window, cx);
+            assert_eq!(input.text(), "Aéz");
+            assert_eq!(input.selected_text_range(false, window, cx).unwrap().range, 1..2);
+        });
+    });
+}
+
+#[gpui::test]
+fn text_input_snaps_byte_selections_to_character_boundaries(cx: &mut TestAppContext) {
+    let root = fixture("utf8-boundary");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    let field = view.read_with(&cx, |w, _| w.path_edit.as_ref().unwrap().input.clone());
+    cx.update(|window, cx| {
+        field.update(cx, |input, cx| {
+            input.set_text("Aé🙂z", window, cx);
+            input.select_range(2..5, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("cmd-c cmd-x alt-right");
+    assert_eq!(path_edit_text(&view, &cx).as_deref(), Some("A🙂z"));
+}
+
+#[gpui::test]
+fn palette_rejects_the_first_a_listing_after_a_b_a(cx: &mut TestAppContext) {
+    use crate::window::palette_view::PaletteDir;
+
+    let root = fixture("palette-generation");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let a = root.join("alpha");
+    let b = root.join("beta");
+    cx.update(|window, cx| {
+        view.update(cx, |w, cx| {
+            let input = w.palette.as_ref().unwrap().input.clone();
+            let query_a = format!("{}/", a.display());
+            let query_b = format!("{}/", b.display());
+            let mut generations = Vec::new();
+            for query in [&query_a, &query_b, &query_a] {
+                input.update(cx, |input, cx| input.set_text(query.to_owned(), window, cx));
+                w.refresh_palette(query, cx);
+                generations.push(w.palette.as_ref().unwrap().path_generation());
+            }
+            let listing = |name: &str| PaletteDir {
+                folders: vec![crate::palette::PathEntry::new(a.join(name), name.to_owned(), false)],
+                files: Vec::new(),
+                missing: false,
+            };
+            w.apply_path_listing(a.clone(), generations[2], listing("current"), cx);
+            w.apply_path_listing(a.clone(), generations[0], listing("stale"), cx);
+            assert!(w.palette.as_ref().unwrap().listing.items.iter().any(|item| {
+                matches!(item, crate::palette::Item::Folder { path, .. } if *path == a.join("current"))
+            }));
+        });
+    });
+}
+
+#[gpui::test]
+fn bottom_bar_measures_multiline_status_text(cx: &mut TestAppContext) {
+    let root = fixture("multiline-status");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        cx.global_mut::<Operations>().message = Some(("operation finished\nwith details".into(), false));
+        view.update(cx, |_, cx| cx.notify());
+    });
+    settle(&view, &mut cx);
+    assert!(matches!(bar_state(&view, &mut cx).primary, Primary::Message(_)));
+}
+
+#[gpui::test]
 fn path_bar_return_reveals_files_and_refuses_missing_paths(cx: &mut TestAppContext) {
     let root = fixture("path-edit-return");
     let (view, mut cx) = open(cx, &root);

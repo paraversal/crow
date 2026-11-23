@@ -448,6 +448,7 @@ pub fn fit(bar: Pixels, fixed: Pixels, segments: &[Pixels], ellipsis: Pixels, ot
 pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
     let font = window.text_style().font();
     let measure = |text: &str| {
+        let text = crate::style::display_text(text);
         let run = TextRun {
             len: text.len(),
             font: font.clone(),
@@ -456,7 +457,7 @@ pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
             underline: None,
             strikethrough: None,
         };
-        window.text_system().shape_line(SharedString::from(text.to_owned()), px(12.), &[run], None).width
+        window.text_system().shape_line(text.into_owned().into(), px(12.), &[run], None).width
     };
     let cap = |keys: &str| (measure(keys) + px(12.)).max(px(18.));
     // The sibling separator: 6 px on both sides and "›".

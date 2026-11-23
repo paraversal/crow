@@ -40,6 +40,8 @@ pub(super) struct Palette {
     here: String,
     /// Path mode's parent listing, while the query is a path.
     pub(super) path: Option<PathState>,
+    /// Increments for each new path listing, even after leaving path mode.
+    path_generation: u64,
     pub(super) cursor: usize,
     /// Bumped whenever the rows change under the cursor (typing, a folder
     /// listing arriving): the highlight snaps then instead of gliding.
@@ -58,6 +60,10 @@ pub(super) struct Palette {
 
 #[cfg(test)]
 impl Palette {
+    pub(super) fn path_generation(&self) -> u64 {
+        self.path_generation
+    }
+
     /// The shortcut shown on row `i`, from the live keymap; the layer test reads it.
     pub(super) fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
         match self.listing.items.get(i)? {
@@ -113,15 +119,13 @@ pub(super) struct PathState {
     files: Vec<palette::PathEntry>,
     /// The parent is not a folder, or cannot be read.
     missing: bool,
-    /// Dropped listings carry an older number.
-    generation: u64,
 }
 
 /// One folder for the palette, listed off the main thread with hidden entries.
 pub(super) struct PaletteDir {
-    folders: Vec<palette::PathEntry>,
-    files: Vec<palette::PathEntry>,
-    missing: bool,
+    pub(super) folders: Vec<palette::PathEntry>,
+    pub(super) files: Vec<palette::PathEntry>,
+    pub(super) missing: bool,
 }
 
 /// List a folder for the palette. Hidden entries are always included; the
@@ -297,6 +301,7 @@ impl CrowWindow {
             path: None,
             cursor: 0,
             listing_generation: 0,
+            path_generation: 0,
             folders,
             here_dir: None,
             file_narrow: None,
@@ -435,15 +440,13 @@ impl CrowWindow {
                             children: None,
                             files: Vec::new(),
                             missing: false,
-                            generation: 0,
                         });
                         true
                     }
                 };
-                let state = palette.path.as_mut().expect("set above");
                 if relist {
-                    state.generation += 1;
-                    spawn = Some((parent.clone(), state.generation));
+                    palette.path_generation += 1;
+                    spawn = Some((parent, palette.path_generation));
                 }
                 let hidden = palette::hidden_match(&partial, show_hidden, search_includes_hidden);
                 let state = palette.path.as_ref().expect("set above");
@@ -495,30 +498,37 @@ impl CrowWindow {
     /// List a path-mode parent off the main thread; drop the result if the palette
     /// has moved to another parent meanwhile.
     fn spawn_path_listing(&mut self, parent: PathBuf, generation: u64, cx: &mut Context<Self>) {
+        let input_id = self.palette.as_ref().expect("path mode").input.entity_id();
         let task = list_palette_dir(parent.clone(), cx);
         cx.spawn(async move |this, cx| {
             let dir = task.await;
             this.update(cx, |this, cx| {
-                let applied = match &mut this.palette {
-                    Some(palette) => match &mut palette.path {
-                        Some(state) if state.parent == parent && state.generation == generation => {
-                            state.children = Some(dir.folders);
-                            state.files = dir.files;
-                            state.missing = dir.missing;
-                            true
-                        }
-                        _ => false,
-                    },
-                    None => false,
-                };
-                if applied {
-                    let query = this.palette.as_ref().map(|p| p.input.read(cx).text().to_owned()).unwrap_or_default();
-                    this.refresh_palette(&query, cx);
+                if this.palette.as_ref().is_some_and(|palette| palette.input.entity_id() == input_id) {
+                    this.apply_path_listing(parent, generation, dir, cx);
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    pub(super) fn apply_path_listing(
+        &mut self,
+        parent: PathBuf,
+        generation: u64,
+        dir: PaletteDir,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(palette) = self.palette.as_mut() else { return };
+        let Some(state) = palette.path.as_mut() else { return };
+        if state.parent != parent || palette.path_generation != generation {
+            return;
+        }
+        state.children = Some(dir.folders);
+        state.files = dir.files;
+        state.missing = dir.missing;
+        let query = palette.input.read(cx).text().to_owned();
+        self.refresh_palette(&query, cx);
     }
 
     /// Tab: put the highlighted folder (and a `/`) in the field, or complete the
