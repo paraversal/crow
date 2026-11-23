@@ -3184,12 +3184,8 @@ impl CrowWindow {
         let Some(picker) = self.picker.as_ref().filter(|picker| picker.choice.index) else { return };
         let chosen = picker.choice.entries.get(picker.choice.cursor).cloned();
         retire!(self, cx, picker);
-        let dir = cx.global::<Ui>().themes_dir.clone();
         match chosen {
-            Some(Some(info)) => match crow_theme::load_theme(&dir, &info.id) {
-                Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
-                Err(e) => operations::message(e, true, cx),
-            },
+            Some(Some(info)) => ui::apply_theme_everywhere(info.id, cx),
             _ => ui::choose_theme("system", cx),
         }
         self.focus_center(window, cx);

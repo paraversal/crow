@@ -4874,6 +4874,8 @@ fn theme_index(cx: &mut VisualTestContext) -> TestRoot {
         ui.themes_state_dir = state;
         crate::ui::reload_theme(cx);
     });
+    // The reload reads the theme in the background.
+    cx.run_until_parked();
     root
 }
 
@@ -7773,6 +7775,39 @@ fn picker_move_to(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, id: &st
 }
 
 #[gpui::test]
+fn two_quick_theme_previews_end_on_the_second(cx: &mut TestAppContext) {
+    let root = fixture("themes-quick");
+    let (_view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
+    // Both reloads start before either reply is applied: the first reply is stale.
+    cx.update(|_, cx| {
+        crate::theme_choice::preview("paper", cx);
+        crate::theme_choice::preview("firebox", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), "FireBox", "the older reply is dropped");
+}
+
+#[gpui::test]
+fn a_second_config_edit_wins_and_the_reload_waits_for_the_background(cx: &mut TestAppContext) {
+    use crow_core::motion::MotionMode;
+    let root = fixture("config-two-edits");
+    let (_view, mut cx) = open(cx, &root);
+    let dir = cx.read(|cx| cx.global::<Ui>().config_dir.clone());
+    std::fs::write(dir.join("settings.toml"), "motion = \"low\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    assert_ne!(
+        cx.read(|cx| cx.global::<Ui>().settings.motion),
+        MotionMode::Low,
+        "nothing is read or applied before the background task finishes"
+    );
+    std::fs::write(dir.join("settings.toml"), "motion = \"full\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.motion), MotionMode::Full, "the second edit is the one applied");
+}
+
+#[gpui::test]
 fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
     let root = fixture("themes");
     let (view, mut cx) = open(cx, &root);
@@ -9403,6 +9438,7 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
     assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the theme picker is open");
     assert_ne!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "a theme is previewed");
     click_scrim(&mut cx);
+    cx.run_until_parked();
     assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
     assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "the preview is reverted");
     assert!(focused(&mut cx));
@@ -10398,6 +10434,49 @@ fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn new_folder_in_column_view_lands_in_the_focused_column_only(cx: &mut TestAppContext) {
+    let root = fixture("newfolder-columns");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    let focused = pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx));
+    assert_eq!(focused, root.join("alpha"), "right opened alpha as the focused column");
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let names = |dir: &Path| {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert!(
+        root.join("alpha/untitled folder").is_dir(),
+        "created in the focused column: {:?}",
+        names(&root.join("alpha"))
+    );
+    assert!(!root.join("untitled folder").exists(), "not in the root column: {:?}", names(&root));
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "its rename starts"
+    );
+    cx.simulate_input("Projects");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/Projects").is_dir(), "renamed in place: {:?}", names(&root.join("alpha")));
+    assert!(!root.join("alpha/untitled folder").exists());
+    assert!(!root.join("untitled folder").exists() && !root.join("Projects").exists());
+    let message = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+    assert!(!message.as_ref().is_some_and(|(_, error)| *error), "no error in the status line: {message:?}");
+}
+
+#[gpui::test]
 fn a_new_folder_clears_a_filter_that_hides_it(cx: &mut TestAppContext) {
     let root = fixture("newfolder-filter");
     let (view, mut cx) = open(cx, &root);
@@ -11383,6 +11462,8 @@ fn set_motion(cx: &mut VisualTestContext, mode: &str) {
         std::fs::write(dir.join("settings.toml"), format!("motion = \"{mode}\"\n")).expect("write settings");
         crate::ui::reload_config(cx);
     });
+    // The reload reads the file in the background.
+    cx.run_until_parked();
 }
 
 fn trash_in_mode(mode: &str, cx: &mut TestAppContext) {
