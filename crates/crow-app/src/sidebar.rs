@@ -1659,21 +1659,34 @@ impl Sidebar {
             Row::PluginItem { section, .. } => section.clone(),
             _ => return,
         };
-        let scope = if self.plugin_dirs_dir.as_os_str().is_empty() {
-            self.current.as_folder().map(Path::to_path_buf).unwrap_or_default()
+        let is_project = section == crate::git::PROJECTS_SECTION;
+        let scope = if is_project {
+            let ui = cx.global::<Ui>();
+            ui.sidebar.project_root(&ui.home)
+        } else if self.plugin_dirs_dir.as_os_str().is_empty() {
+            self.current.as_folder().map(Path::to_path_buf)
         } else {
-            self.plugin_dirs_dir.clone()
+            Some(self.plugin_dirs_dir.clone())
         };
         let revision = self.section_revision();
         let expected_path = path.clone();
         let task = cx.background_spawn(async move {
+            let in_scope = scope.is_some_and(|scope| {
+                if is_project {
+                    // Discovery publishes canonical worktrees at the root or one level below it.
+                    // io-ok: inside background_spawn
+                    scope.canonicalize().is_ok_and(|root| path == root || path.parent() == Some(root.as_path()))
+                } else {
+                    path.parent() == Some(scope.as_path())
+                }
+            });
+            if !in_scope {
+                return false;
+            }
             // io-ok: inside background_spawn
             std::fs::symlink_metadata(&path).ok().is_some_and(|meta| {
                 // io-ok: inside background_spawn
-                meta.file_type().is_dir()
-                    && !meta.file_type().is_symlink()
-                    && (meta.dev(), meta.ino()) == identity
-                    && path.parent() == Some(scope.as_path())
+                meta.file_type().is_dir() && !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == identity
             })
         });
         cx.spawn(async move |this, cx| {
@@ -2246,6 +2259,7 @@ impl Render for Sidebar {
                     .child(crate::pane::chevron_glyph(open, color(muted)));
                 let lead = div()
                     .flex()
+                    .min_w_0()
                     .items_center()
                     .gap_1()
                     .min_h(px(14.))
@@ -2269,7 +2283,7 @@ impl Render for Sidebar {
                                 .child(text),
                         )
                     })
-                    .child(title.clone());
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.clone()));
                 kinds.push((group.map(DropTarget::Group), None));
                 let i = index;
                 index += 1;
@@ -2348,6 +2362,7 @@ impl Render for Sidebar {
                             header.child(
                                 div()
                                     .ml_auto()
+                                    .flex_none()
                                     .font_weight(FontWeight::NORMAL)
                                     .text_color(color(muted))
                                     .child(section_count.to_string()),

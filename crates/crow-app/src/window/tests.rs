@@ -17762,18 +17762,20 @@ fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut T
 }
 
 #[gpui::test]
-fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestAppContext) {
+fn sidebar_projects_row_accepts_drops_and_opens_from_another_folder(cx: &mut TestAppContext) {
     let root = fixture("audit-projects-drop");
     let source = fixture("audit-projects-source");
     let repo = root.join("beta").canonicalize().unwrap();
     let output = std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let (view, mut cx) = open(cx, &root);
+    let alias = source.join("projects-alias");
+    std::os::unix::fs::symlink(&root.path, &alias).unwrap();
+    let (view, mut cx) = open(cx, &source);
     cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
     let config = format!(
         "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
-        root.display()
+        alias.display()
     );
     write_config(&view, &mut cx, "sidebar.toml", &config);
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
@@ -17792,6 +17794,11 @@ fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestApp
     finder_drop(&view, &mut cx, at, source.join("notes.txt"));
     assert!(repo.join("notes.txt").is_file());
     assert!(!root.join("alpha/notes.txt").exists());
+
+    let at = cx.update(|window, _| window.debug_bounds(&selector)).expect("Projects row after drop").center();
+    cx.simulate_click(at, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), repo);
 }
 
 #[gpui::test]
@@ -19245,6 +19252,30 @@ fn a_sidebar_heading_slides_its_title_over_when_the_chevron_shows_on_hover(cx: &
     cx.simulate_mouse_move(point(px(900.), px(400.)), None, gpui::Modifiers::none());
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("sidebar-heading-favorites-group-0"), Some(rest), "leaving puts it back");
+}
+
+#[gpui::test]
+fn a_long_sidebar_heading_stays_inside_its_header_in_every_style(cx: &mut TestAppContext) {
+    let root = fixture("long-sidebar-heading");
+    let (view, mut cx) = open_sized(cx, &root, 640., 540.);
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        "[[group]]\nname = \"A long group title with the same length as a deep Projects root\"\nitems = [{ path = \"/tmp\" }]\n",
+    );
+    for style in ["ledger", "cards", "accordion", "floating-panel", "pills"] {
+        write_config(&view, &mut cx, "settings.toml", &format!("sidebar_style = \"{style}\"\nmotion = \"off\"\n"));
+        settle(&view, &mut cx);
+        let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("heading row");
+        let lead = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("heading content");
+        assert!(lead.right() <= header.right() - px(8.), "{style}: {lead:?} exceeds {header:?}");
+        cx.simulate_mouse_move(header.center(), None, gpui::Modifiers::none());
+        settle(&view, &mut cx);
+        let hovered = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("hovered heading content");
+        assert!(hovered.right() <= header.right() - px(8.), "{style} on hover: {hovered:?} exceeds {header:?}");
+        assert_eq!(cx.debug_bounds("sidebar-header-favorites-group-0"), Some(header));
+    }
 }
 
 #[gpui::test]
