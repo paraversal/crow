@@ -118,6 +118,7 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .rows { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 48px; }
 .rows li { display: flex; align-items: baseline; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .rows .k { flex: none; width: 7.5em; display: inline-flex; flex-wrap: wrap; gap: 4px; font-weight: 600; }
+.rows .k code { white-space: nowrap; }
 .rows li > span:last-child { color: var(--muted); }
 .pair + .rows { margin-top: 56px; }
 
@@ -133,6 +134,8 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
 .split h2 { margin-bottom: 28px; }
 .split .rows { grid-template-columns: 1fr; }
+.sub { margin: -24px 0 40px; color: var(--muted); }
+.split .sub { margin: -16px 0 28px; }
 
 /* Themes */
 .themes-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 18px 32px; margin-bottom: 40px; }
@@ -151,8 +154,8 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 @media (prefers-color-scheme: dark) { .dots i { background: var(--d); } }
 .dots i:first-child { margin-left: 0; }
 .stage { display: grid; }
-.stage > picture { display: block; grid-area: 1 / 1; transition: opacity .3s ease, transform .3s ease, visibility .3s; }
-.stage > picture[hidden] { display: block; opacity: 0; visibility: hidden; }
+.stage > div { display: block; grid-area: 1 / 1; transition: opacity .3s ease, transform .3s ease, visibility .3s; }
+.stage > div[hidden] { display: block; opacity: 0; visibility: hidden; }
 /* The hero settles in on load: a short rise and fade, one element after another. */
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
 .hero h1, .hero .lede, .hero .get, .hero-shot { animation: rise .6s cubic-bezier(.2, .7, .2, 1) both; }
@@ -160,7 +163,7 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .hero .get { animation-delay: .16s; }
 .hero-shot { animation-delay: .26s; }
 @media (prefers-reduced-motion: reduce) {
-  .stage > picture { transition: none; }
+  .stage > div { transition: none; }
   .hero h1, .hero .lede, .hero .get, .hero-shot { animation: none; }
 }
 .after { margin: 28px 0 0; color: var(--muted); font-size: 15px; }
@@ -174,6 +177,7 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .zoom { display: block; width: 100%; padding: 0; border: 0; background: none; color: inherit; cursor: zoom-in; border-radius: 10px; }
 .zoom .shot { transition: transform .2s ease-out; }
 .zoom:hover .shot { transform: translateY(-3px); }
+.zoom picture { display: block; }
 .also { margin: 32px 0 0; color: var(--muted); }
 
 /* Enlarged view shot: ←/→ step through the four views, Esc or a click outside closes. */
@@ -190,6 +194,7 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .viewer button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(255, 255, 255, .08); color: inherit; font-size: 20px; line-height: 1; cursor: pointer; }
 .viewer button:hover { background: rgba(255, 255, 255, .18); }
 .viewer :focus-visible { outline-color: #f3f3f5; }
+.viewer[data-single] .bar { display: none; }
 .viewer .close { position: fixed; top: 16px; right: 16px; }
 @media (prefers-reduced-motion: reduce) { .zoom .shot { transition: none; } .zoom:hover .shot { transform: none; } .viewer[open] img { animation: none; } }
 .also b { color: var(--ink); font-weight: 400; }
@@ -251,10 +256,12 @@ footer nav { gap: 22px; }
       </div>
       <p class="meta">v0.1.0 · macOS 14+ · Apple Silicon &amp; Intel · free and open source · <a href="https://github.com/paraversal/crow/blob/main/docs/install.md">first open</a></p>
       <div class="hero-shot">
-        <picture>
-          <source srcset="media/hero-dark.webp" media="(prefers-color-scheme: dark)">
-          <img class="shot" src="media/hero-light.webp" width="2560" height="1600" alt="Crow in column view: the Pictures folder, its Wallpapers subfolder and a photo of a fog-filled valley in the preview pane.">
-        </picture>
+        <button class="zoom" type="button" aria-label="Enlarge the column view shot">
+          <picture>
+            <source srcset="media/hero-dark.webp" media="(prefers-color-scheme: dark)">
+            <img class="shot" src="media/hero-light.webp" width="2560" height="1600" alt="Crow in column view: the Pictures folder, its Wallpapers subfolder and a photo of a fog-filled valley in the preview pane.">
+          </picture>
+        </button>
         <img class="peek" src="media/icon-256.png" alt="" width="112" height="112">
       </div>
     </div>
@@ -266,21 +273,19 @@ footer nav { gap: 22px; }
       <div class="pair">
         <figure>
           <div class="key"><kbd>⌘K</kbd>Folders, files, every command</div>
-          <picture><source srcset="media/palette-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/palette-light.webp" width="2560" height="1600" alt="The command palette listing folders that match “pro”."></picture>
+          <button class="zoom" type="button" aria-label="Enlarge the command palette shot"><picture><source srcset="media/palette-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/palette-light.webp" width="2560" height="1600" alt="The command palette listing folders that match “pro”."></picture></button>
         </figure>
         <figure>
           <div class="key"><kbd>⌘F</kbd>Names and contents, as you type</div>
-          <picture><source srcset="media/search-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/search-light.webp" width="2560" height="1600" alt="Search for “raven” listing file names and matching lines inside files, with skipped folders counted."></picture>
+          <button class="zoom" type="button" aria-label="Enlarge the search shot"><picture><source srcset="media/search-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/search-light.webp" width="2560" height="1600" alt="Search for “raven” listing file names and matching lines inside files, with skipped folders counted."></picture></button>
         </figure>
       </div>
       <ul class="rows">
-        <li><span class="k"><kbd>/</kbd></span><span>Filter the folder you’re in</span></li>
-        <li><span class="k"><kbd>⌘L</kbd></span><span>Type a path, Tab completes it</span></li>
-        <li><span class="k"><code>node_modules</code> <code>target</code> <code>.git</code></span><span>Search skips dev folders by default, and counts what it skipped</span></li>
-        <li><span class="k"><kbd>⇧⌘A</kbd></span><span>Search past every skip rule</span></li>
-        <li><span class="k"><kbd>⌘J</kbd></span><span>Why does this folder look like this?</span></li>
-        <li><span class="k"><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span>A Vim layer, with marks</span></li>
-        <li><span class="k"><kbd>⌘,</kbd></span><span>Rebind any command</span></li>
+        <li><span class="k"><kbd>/</kbd></span><span>Filter this folder</span></li>
+        <li><span class="k"><kbd>⌘L</kbd></span><span>Type a path; Tab completes it</span></li>
+        <li><span class="k"><code>📁 node_modules</code> <code>📁 target</code> <code>📁 .git</code></span><span>skipped in search by default, with a count of what was left out</span></li>
+        <li><span class="k"><kbd>⇧⌘A</kbd></span><span>Search everything, skip nothing</span></li>
+        <li><span class="k"><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span>Vim motions and marks, if you want them</span></li>
       </ul>
     </div>
   </section>
@@ -290,13 +295,13 @@ footer nav { gap: 22px; }
       <h2 id="fixes-h">The things you stopped asking Finder for.</h2>
       <ul class="rows">
         <li><span class="k">New File</span><span>right in the context menu</span></li>
-        <li><span class="k">Copies</span><span>pause them; a conflict waits while the rest finishes</span></li>
+        <li><span class="k">Copies</span><span>Pause one. A name conflict waits and the rest keeps going.</span></li>
         <li><span class="k">Replace</span><span>the old file goes to the Trash, so ⌘Z brings it back</span></li>
         <li><span class="k">Undo</span><span>an older step from Activity, not just the last one</span></li>
-        <li><span class="k">Folder views</span><span>rules you can read, not .DS_Store luck</span></li>
-        <li><span class="k">Terminal</span><span>opens in the folder you’re looking at</span></li>
-        <li><span class="k">Customisable</span><span>keys, themes, icons and sidebar, down to the emoji</span></li>
-        <li><span class="k">Compare</span><span>two files side by side in the gallery</span></li>
+        <li><span class="k">Folder views</span><span>Set per folder, or use the same view everywhere</span></li>
+        <li><span class="k">Terminal</span><span>Open the terminal you choose in the focused folder</span></li>
+        <li><span class="k">Customisable</span><span>Keys, themes, icon packs, and sidebar groups with icons of your own</span></li>
+        <li><span class="k">Compare</span><span>View two photos side by side in the Gallery view</span></li>
       </ul>
     </div>
   </section>
@@ -316,30 +321,50 @@ footer nav { gap: 22px; }
     </div>
   </section>
 
+  <section class="block" id="plugins" aria-labelledby="plugins-h">
+    <div class="wrap">
+      <h2 id="plugins-h">Add what’s missing.</h2>
+      <p class="sub">Plugins are small Rhai scripts. You approve what each one may touch.</p>
+      <ul class="rows">
+        <li><span class="k">Sidebar</span><span>A section of folders in the left sidebar</span></li>
+        <li><span class="k">Columns</span><span>Extra columns in List and Columns views</span></li>
+        <li><span class="k">Badges</span><span>Badges and tints on files and folders</span></li>
+        <li><span class="k">Commands</span><span>In the File menu, the palette and the context menu</span></li>
+        <li><span class="k">Preview</span><span>Your own preview for a kind of file</span></li>
+        <li><span class="k">Info</span><span>More fields in the Info tab</span></li>
+        <li><span class="k">Status</span><span>A value in the bottom bar</span></li>
+        <li><span class="k">Hooks</span><span>React when the folder, the selection or the files change</span></li>
+        <li><span class="k">Icon packs</span><span>File and folder icons</span></li>
+        <li><span class="k">Permissions</span><span>Approved once; a changed plugin asks again</span></li>
+        <li><span class="k">Settings</span><span>Turn each plugin on or off in Settings ▸ Plugins</span></li>
+        <li><span class="k">Git</span><span>The first one shipped</span></li>
+      </ul>
+    </div>
+  </section>
+
   <section class="block" id="git" aria-labelledby="git-h">
     <div class="wrap split">
       <div>
         <h2 id="git-h">Your repos, right in the listing.</h2>
+        <p class="sub">A bundled plugin. Turn it on in Settings ▸ Plugins, or leave it off.</p>
         <ul class="rows">
-          <li><span class="k">M&ensp;?</span><span>changed and new files, badged</span></li>
-          <li><span class="k">main&ensp;2</span><span>branch and changes per project</span></li>
-          <li><span class="k">Git Diff</span><span>staged and unstaged, beside the file</span></li>
-          <li><span class="k">Optional</span><span>a bundled plugin: approve it once, disable it any time in Settings ▸ Plugins</span></li>
-          <li><span class="k">Plugins</span><span>write your own in Rhai</span></li>
+          <li><span class="k">M&ensp;?</span><span>Modified and untracked files get a badge in the listing</span></li>
+          <li><span class="k">main&ensp;2</span><span>The sidebar shows each project’s branch and number of changed files</span></li>
+          <li><span class="k">Git Diff</span><span>Staged and unstaged changes, in the right sidebar.</span></li>
         </ul>
       </div>
-      <picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch."></picture>
+      <button class="zoom" type="button" aria-label="Enlarge the Git list shot"><picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch."></picture></button>
     </div>
   </section>
 
   <section class="block" id="sidebars" aria-labelledby="sidebars-h">
     <div class="wrap split">
-      <picture><source srcset="media/sidebars-closed-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/sidebars-closed-light.webp" width="2560" height="1600" alt="Crow with both sidebars closed: a folder of photos in gallery view fills the whole window."></picture>
+      <button class="zoom" type="button" aria-label="Enlarge the closed sidebars shot"><picture><source srcset="media/sidebars-closed-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/sidebars-closed-light.webp" width="2560" height="1600" alt="Crow with both sidebars closed: a folder of photos in gallery view fills the whole window."></picture></button>
       <div>
         <h2 id="sidebars-h">Two sidebars. Close either, or both.</h2>
         <ul class="rows">
-          <li><span class="k">Left</span><span>favorites, Recent, Projects, tags, drives; a chevron at its edge hides it</span></li>
-          <li><span class="k">Right</span><span>Preview, Info and Git Diff; its chevron hides it too</span></li>
+          <li><span class="k">Left</span><span>Favorites, Recent, Projects, tags and drives</span></li>
+          <li><span class="k">Right</span><span>Preview, Info and Git Diff</span></li>
           <li><span class="k">Keys</span><span><kbd>⌃⌘S</kbd> and <kbd>⇧⌘P</kbd>, or the View menu</span></li>
         </ul>
       </div>
@@ -358,10 +383,10 @@ footer nav { gap: 22px; }
         </div>
       </div>
       <div class="stage">
-        <picture id="t-dev" role="tabpanel"><source srcset="media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-developer-light.webp" width="2560" height="1600" alt="A developer’s Crow in Catppuccin: a Rust project in list view with Git badges, sidebar groups for work servers, toy projects and external drives, and Lucide file icons."></picture>
-        <picture id="t-photo" role="tabpanel" hidden><source srcset="media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-photographer-light.webp" width="2560" height="1600" alt="A photographer’s Crow in Rosé Pine: a Lofoten shoot in gallery view, sidebar groups for shoots, clients and camera cards."></picture>
-        <picture id="t-writer" role="tabpanel" hidden><source srcset="media/persona-writer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-writer-light.webp" width="2560" height="1600" alt="A writer’s Crow in Gruvbox: the chapters of a novel in list view, with groups for what is being written and read."></picture>
-        <picture id="t-producer" role="tabpanel" hidden><source srcset="media/persona-producer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-producer-light.webp" width="2560" height="1600" alt="A music producer’s Crow in Solarized: a sample library in column view, with groups for sessions, sounds and drives."></picture>
+        <div id="t-dev" role="tabpanel"><button class="zoom" type="button" aria-label="Enlarge the developer setup"><picture><source srcset="media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-developer-light.webp" width="2560" height="1600" alt="A developer’s Crow in Catppuccin: a Rust project in list view with Git badges, sidebar groups for work servers, toy projects and external drives, and Lucide file icons."></picture></button></div>
+        <div id="t-photo" role="tabpanel" hidden><button class="zoom" type="button" aria-label="Enlarge the photographer setup"><picture><source srcset="media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-photographer-light.webp" width="2560" height="1600" alt="A photographer’s Crow in Rosé Pine: a Lofoten shoot in gallery view, sidebar groups for shoots, clients and camera cards."></picture></button></div>
+        <div id="t-writer" role="tabpanel" hidden><button class="zoom" type="button" aria-label="Enlarge the writer setup"><picture><source srcset="media/persona-writer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-writer-light.webp" width="2560" height="1600" alt="A writer’s Crow in Gruvbox: the chapters of a novel in list view, with groups for what is being written and read."></picture></button></div>
+        <div id="t-producer" role="tabpanel" hidden><button class="zoom" type="button" aria-label="Enlarge the producer setup"><picture><source srcset="media/persona-producer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-producer-light.webp" width="2560" height="1600" alt="A music producer’s Crow in Solarized: a sample library in column view, with groups for sessions, sounds and drives."></picture></button></div>
       </div>
       <p class="after">Base24 themes from <code>~/.config/themes</code> show up live. Icon packs, sidebar groups and emoji do the rest.</p>
     </div>
@@ -371,13 +396,13 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="finder-h">And all the Finder you know.</h2>
       <ul class="views">
-        <li><figure><button class="zoom" type="button" aria-label="Enlarge Icon view"><picture><source srcset="media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-icons-light.webp" width="2560" height="1600" alt="Icon view"></picture></button><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
-        <li><figure><button class="zoom" type="button" aria-label="Enlarge List view"><picture><source srcset="media/view-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-list-light.webp" width="2560" height="1600" alt="List view"></picture></button><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
-        <li><figure><button class="zoom" type="button" aria-label="Enlarge Column view"><picture><source srcset="media/view-columns-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-columns-light.webp" width="2560" height="1600" alt="Column view"></picture></button><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
-        <li><figure><button class="zoom" type="button" aria-label="Enlarge Gallery view"><picture><source srcset="media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-gallery-light.webp" width="2560" height="1600" alt="Gallery view"></picture></button><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" data-group="views" aria-label="Enlarge Icon view"><picture><source srcset="media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-icons-light.webp" width="2560" height="1600" alt="Icon view"></picture></button><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" data-group="views" aria-label="Enlarge List view"><picture><source srcset="media/view-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-list-light.webp" width="2560" height="1600" alt="List view"></picture></button><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" data-group="views" aria-label="Enlarge Column view"><picture><source srcset="media/view-columns-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-columns-light.webp" width="2560" height="1600" alt="Column view"></picture></button><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
+        <li><figure><button class="zoom" type="button" data-group="views" aria-label="Enlarge Gallery view"><picture><source srcset="media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-gallery-light.webp" width="2560" height="1600" alt="Gallery view"></picture></button><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
       </ul>
-      <dialog class="viewer" id="viewer" aria-label="View shots">
-        <figure><img alt=""><div class="bar"><button class="prev" type="button" aria-label="Previous view">‹</button><figcaption></figcaption><button class="next" type="button" aria-label="Next view" autofocus>›</button></div></figure>
+      <dialog class="viewer" id="viewer" aria-label="Enlarged shot">
+        <figure><img alt=""><div class="bar"><button class="prev" type="button" aria-label="Previous view">‹</button><figcaption></figcaption><button class="next" type="button" aria-label="Next view">›</button></div></figure>
         <button class="close" type="button" aria-label="Close">×</button>
       </dialog>
       <p class="also"><b>Sidebar</b> · <b>Tabs</b> · <b>Quick Look</b> · <b>Finder tags</b> · <b>Trash by default</b> · <b>Spring-loaded folders</b> · <b>iCloud status</b> · <b>Drag and drop</b></p>
@@ -458,29 +483,38 @@ buttons.forEach((b, i) => {
     if (d) { e.preventDefault(); select(buttons[(i + d + buttons.length) % buttons.length], true); }
   });
 });
-// The four view shots open large; the arrows (or ←/→) step through them.
-const zooms = [...document.querySelectorAll('.views .zoom')];
+// Every small shot opens large. The four views step with the arrows (or ←/→); the rest stand alone.
+const zooms = [...document.querySelectorAll('.zoom')];
 const viewer = document.getElementById('viewer');
 const large = viewer.querySelector('img');
+let group = [];
 let shown = 0;
 const show = i => {
-  shown = (i + zooms.length) % zooms.length;
-  const img = zooms[shown].querySelector('img');
+  shown = (i + group.length) % group.length;
+  const z = group[shown];
+  const img = z.querySelector('img');
   large.src = img.currentSrc || img.src;
   large.alt = img.alt;
-  viewer.querySelector('figcaption').innerHTML = zooms[shown].nextElementSibling.innerHTML;
+  const cap = z.nextElementSibling;
+  viewer.querySelector('figcaption').innerHTML = cap ? cap.innerHTML : '';
 };
-zooms.forEach((z, i) => z.addEventListener('click', () => { show(i); viewer.showModal(); }));
+zooms.forEach(z => z.addEventListener('click', () => {
+  group = z.dataset.group ? zooms.filter(x => x.dataset.group === z.dataset.group) : [z];
+  viewer.toggleAttribute('data-single', group.length < 2);
+  show(group.indexOf(z));
+  viewer.showModal();
+  (group.length < 2 ? viewer.querySelector('.close') : viewer.querySelector('.next')).focus();
+}));
 viewer.querySelector('.prev').addEventListener('click', () => show(shown - 1));
 viewer.querySelector('.next').addEventListener('click', () => show(shown + 1));
 viewer.querySelector('.close').addEventListener('click', () => viewer.close());
 viewer.addEventListener('keydown', e => {
   const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-  if (d) { e.preventDefault(); show(shown + d); }
+  if (d && group.length > 1) { e.preventDefault(); show(shown + d); }
 });
 // A click on the shot or the dark area closes; the bar's buttons don't.
 viewer.addEventListener('click', e => { if (e.target === viewer || e.target === large) viewer.close(); });
-viewer.addEventListener('close', () => zooms[shown].focus());
+viewer.addEventListener('close', () => group[shown].focus());
 document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
