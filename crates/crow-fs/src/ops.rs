@@ -246,51 +246,91 @@ impl Record {
         results
     }
 
-    /// Every old path → new path this record's moves and renames applied, in order.
-    fn moves(&self) -> impl Iterator<Item = (&Path, &Path)> {
-        self.steps.iter().flat_map(|step| -> Box<dyn Iterator<Item = (&Path, &Path)> + '_> {
+    /// Where `path` went in this record: `Some(Some(new))` when a move or rename
+    /// carried it (or a folder above it), `Some(None)` when it (or a folder above
+    /// it) was trashed or deleted, `None` when the record did not touch it. A batch
+    /// rename is one simultaneous mapping, so at most one entry applies (a shift
+    /// 1→2, 2→3 sends 1 to 2, not 3). With `ancestors_only`, only a folder above
+    /// `path` counts: a vacated path follows its parent but not a new item that
+    /// later took its name.
+    fn carries(&self, path: &Path, ancestors_only: bool) -> Option<Option<PathBuf>> {
+        let under = |base: &Path| -> Option<PathBuf> {
+            let rest = path.strip_prefix(base).ok()?;
+            if rest.as_os_str().is_empty() { (!ancestors_only).then(PathBuf::new) } else { Some(rest.to_path_buf()) }
+        };
+        let land =
+            |to: &Path, rest: PathBuf| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+        for step in &self.steps {
             match step {
-                Step::Moved { from, to } => Box::new(std::iter::once((from.as_path(), to.as_path()))),
-                Step::BatchRenamed { moves } => {
-                    Box::new(moves.iter().map(|entry| (entry.source.as_path(), entry.target.as_path())))
-                }
-                _ => Box::new(std::iter::empty()),
-            }
-        })
-    }
-
-    /// This record with the paths of the items it left behind carried through the
-    /// moves and renames of `later` records, oldest first, so undoing an older
-    /// entry ("New File", then "Rename") finds the item where it is now. Items a
-    /// later record trashed are not followed into the Trash.
-    pub fn forwarded<'a>(&self, later: impl IntoIterator<Item = &'a Record> + Clone) -> Record {
-        let forward = |path: &Path| -> PathBuf {
-            let mut path = path.to_path_buf();
-            for record in later.clone() {
-                for (from, to) in record.moves() {
-                    if let Ok(rest) = path.strip_prefix(from) {
-                        path = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+                Step::Moved { from, to } => {
+                    if let Some(rest) = under(from) {
+                        return Some(Some(land(to, rest)));
                     }
                 }
+                Step::BatchRenamed { moves } => {
+                    for entry in moves {
+                        if let Some(rest) = under(&entry.source) {
+                            return Some(Some(land(&entry.target, rest)));
+                        }
+                    }
+                }
+                Step::Trashed { original: gone, .. } | Step::Deleted(gone) => {
+                    if under(gone).is_some() {
+                        return Some(None);
+                    }
+                }
+                Step::Created(_) => {}
             }
-            path
+        }
+        None
+    }
+
+    /// This record with its paths carried through the moves and renames of
+    /// `later` records, oldest first, so undoing an older entry ("New File", then
+    /// "Rename") finds the item where it is now. Items it left behind follow their
+    /// own renames; the places it vacated (a move's source, a trashed item's
+    /// original) follow only renames of the folders above them. An item a later
+    /// record trashed or deleted is not followed: that is `NotFound`, so a new
+    /// item that later took the same name is never touched.
+    pub fn forwarded<'a>(&self, later: impl IntoIterator<Item = &'a Record> + Clone) -> Result<Record, OpError> {
+        let forward = |path: &Path, ancestors_only: bool| -> Result<PathBuf, OpError> {
+            let mut current = path.to_path_buf();
+            for record in later.clone() {
+                match record.carries(&current, ancestors_only) {
+                    Some(Some(next)) => current = next,
+                    Some(None) if !ancestors_only => return Err(OpError::NotFound(current)),
+                    _ => {}
+                }
+            }
+            Ok(current)
         };
         let steps = self
             .steps
             .iter()
-            .map(|step| match step {
-                Step::Created(path) => Step::Created(forward(path)),
-                Step::Moved { from, to } => Step::Moved { from: from.clone(), to: forward(to) },
-                Step::BatchRenamed { moves } => Step::BatchRenamed {
-                    moves: moves
-                        .iter()
-                        .map(|entry| BatchRenameEntry { target: forward(&entry.target), ..entry.clone() })
-                        .collect(),
-                },
-                other => other.clone(),
+            .map(|step| {
+                Ok(match step {
+                    Step::Created(path) => Step::Created(forward(path, false)?),
+                    Step::Moved { from, to } => Step::Moved { from: forward(from, true)?, to: forward(to, false)? },
+                    Step::Trashed { original, trashed } => {
+                        Step::Trashed { original: forward(original, true)?, trashed: trashed.clone() }
+                    }
+                    Step::BatchRenamed { moves } => Step::BatchRenamed {
+                        moves: moves
+                            .iter()
+                            .map(|entry| {
+                                Ok(BatchRenameEntry {
+                                    source: forward(&entry.source, true)?,
+                                    target: forward(&entry.target, false)?,
+                                    ..entry.clone()
+                                })
+                            })
+                            .collect::<Result<_, OpError>>()?,
+                    },
+                    other => other.clone(),
+                })
             })
-            .collect();
-        Record { label: self.label.clone(), steps }
+            .collect::<Result<_, OpError>>()?;
+        Ok(Record { label: self.label.clone(), steps })
     }
 
     /// Old path → new path for every item a batch rename step in this record moved.

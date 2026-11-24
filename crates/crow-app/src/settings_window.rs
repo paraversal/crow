@@ -1603,8 +1603,15 @@ impl SettingsWindow {
     }
 
     fn commit_exclude_names(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names.clone();
+        // An untouched field writes nothing: the comma-joined text can't round-trip a
+        // name that has a comma in it (a glob like `*.{a,b}` from exclude.toml).
+        if self.exclude_names.read(cx).text() == names_text(&current) {
+            cx.notify();
+            return;
+        }
         let names = parse_names(self.exclude_names.read(cx).text());
-        if names != cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names {
+        if names != current {
             ui::set_exclude_names(crow_core::SetName::Dev, names, cx);
         }
         // Show the list as it is saved (trimmed, without blanks and repeats).

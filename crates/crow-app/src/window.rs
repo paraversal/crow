@@ -1385,15 +1385,27 @@ impl CrowWindow {
         // The folder menu's button, then what is pinned from it. A narrow window keeps the
         // button alone: its menu still reaches every pin.
         let folder_group = {
-            let (has_folder, state) = {
-                let pane = self.pane().read(cx);
-                let has_folder = pane.folder().is_some();
-                (has_folder, if has_folder { pane.menu_state(cx) } else { Default::default() })
-            };
             let items = crow_core::toolbar::folder_group(&cx.global::<Ui>().settings.toolbar_pins);
             let items = if narrow { crow_core::toolbar::collapsed(&items) } else { items };
             // The group gives way before Search does in a very narrow toolbar; ⌃⌘M still opens the menu.
             let items = if width < px(420.) { Vec::new() } else { items };
+            // Only pins need the menu state, and only a shown Paste pin reads the system
+            // pasteboard (this runs every frame, scrolling included).
+            let (has_folder, state) = {
+                let pane = self.pane().read(cx);
+                let has_folder = pane.folder().is_some();
+                let pinned = |id: &str| {
+                    items.iter().any(|item| matches!(item, crow_core::toolbar::ToolbarItem::Pinned(p) if *p == id))
+                };
+                let state = if has_folder
+                    && items.iter().any(|item| matches!(item, crow_core::toolbar::ToolbarItem::Pinned(_)))
+                {
+                    pane.menu_state_with_paste(pinned("paste"), cx)
+                } else {
+                    Default::default()
+                };
+                (has_folder, state)
+            };
             let pins = crate::context_menu::pinnable();
             let mut group = div().id("toolbar-folder-group").flex().flex_none().gap(px(2.));
             for item in items {

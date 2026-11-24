@@ -2103,9 +2103,11 @@ impl Folder {
             }
             let (hidden, sort) = (self.show_hidden, self.sort);
             let child = cx.new(|cx| Folder::new(path.clone(), hidden, sort, false, cx));
-            let subscription = cx.subscribe(&child, |this, _, event, cx| match event {
+            let subscription = cx.subscribe(&child, |this, child, event, cx| match event {
                 FolderEvent::Loaded | FolderEvent::Changed => {
-                    this.child_loaded |= matches!(event, FolderEvent::Loaded);
+                    // A folder that loaded deeper down counts too: it passes up level by level.
+                    let deeper = child.update(cx, |child, _| child.take_child_loaded());
+                    this.child_loaded |= deeper || matches!(event, FolderEvent::Loaded);
                     this.child_changed(cx)
                 }
                 FolderEvent::WatcherApplied { paths } => cx.emit(FolderEvent::WatcherApplied { paths: paths.clone() }),

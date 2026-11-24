@@ -12,7 +12,9 @@ pub(super) struct RowSpace {
     pub row_height: f32,
     /// Space above the first row inside the list's bounds.
     pub top_inset: f32,
-    /// Space left and right of the rows inside the list's bounds.
+    /// Space left and right of the rows inside the list's bounds (the fuzzer's
+    /// `*-margin` targets; rows are hit by height alone).
+    #[cfg_attr(not(any(test, feature = "fuzz")), allow(dead_code))]
     pub side_inset: f32,
 }
 
@@ -34,10 +36,10 @@ impl RowStrip {
 
     /// The row indices a content-space rectangle touches, for `count` rows.
     pub fn rows_touched(&self, a: Point<Pixels>, b: Point<Pixels>, count: usize) -> std::ops::Range<usize> {
-        let (x0, x1) = (f32::from(a.x.min(b.x)), f32::from(a.x.max(b.x)));
+        // Rows are selected by the rectangle's height alone: in a full list the side
+        // gutter is the only place to start, and a straight drag down from it is zero wide.
         let (y0, y1) = (f32::from(a.y.min(b.y)) - self.space.top_inset, f32::from(a.y.max(b.y)) - self.space.top_inset);
-        let width = f32::from(self.bounds.size.width);
-        if count == 0 || y1 < 0.0 || x1 < self.space.side_inset || x0 > width - self.space.side_inset {
+        if count == 0 || y1 < 0.0 {
             return 0..0;
         }
         let first = (y0.max(0.0) / self.space.row_height).floor() as usize;
@@ -90,5 +92,24 @@ impl Pane {
         let right = anchor.x.max(pointer.x).max(left + px(1.)).min(bounds.right());
         let bottom = anchor.y.max(pointer.y).max(top + px(1.)).min(bounds.bottom());
         (right > left && bottom > top).then(|| Bounds::new(point(left, top), size(right - left, bottom - top)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_straight_drag_down_the_side_gutter_selects_the_rows_it_spans() {
+        let strip = RowStrip {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+            offset: 0.,
+            space: RowSpace { row_height: 24., top_inset: 0., side_inset: 8. },
+            scroll: UniformListScrollHandle::new(),
+        };
+        // Pressed at x = 3 (left gutter) and x = 397 (right gutter), dragged straight down.
+        assert_eq!(strip.rows_touched(point(px(3.), px(5.)), point(px(3.), px(60.)), 10), 0..3);
+        assert_eq!(strip.rows_touched(point(px(397.), px(5.)), point(px(397.), px(60.)), 10), 0..3);
+        assert_eq!(strip.rows_touched(point(px(3.), px(5.)), point(px(3.), px(60.)), 0), 0..0);
     }
 }

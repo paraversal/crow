@@ -9671,6 +9671,81 @@ fn expanded_subfolders_follow_the_size_sort(cx: &mut TestAppContext) {
     assert_eq!(inside, ["zz", "mm", "aa"], "{again:?}");
 }
 
+/// A folder opened two levels down is sorted by the sizes already known too.
+#[gpui::test]
+fn a_folder_opened_two_levels_down_follows_the_size_sort(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-two-levels");
+    let e = root.join("d").join("e");
+    for dir in ["aa", "zz", "mm"] {
+        std::fs::create_dir_all(e.join(dir)).expect("create fixture");
+    }
+    std::fs::write(e.join("file.txt"), "x").expect("create fixture");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 700.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, cx| folder.expand(root.join("d"), cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(e.clone(), cx));
+    settle(&view, &mut cx);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    measure_visible_folders(&view, &mut cx);
+    let inside = |all: &[String]| -> Vec<String> {
+        all.iter().skip_while(|n| *n != "e").skip(1).take_while(|n| *n != "file.txt").cloned().collect()
+    };
+    assert_eq!(inside(&names(&view, &cx)), ["zz", "mm", "aa"]);
+    folder.update(&mut cx, |folder, cx| folder.collapse(&e, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(e.clone(), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let again = names(&view, &cx);
+    assert_eq!(inside(&again), ["zz", "mm", "aa"], "{again:?}");
+}
+
+/// An open subfolder re-sorting as its sizes arrive does not scroll the list to the cursor.
+#[gpui::test]
+fn an_open_subfolder_resorting_does_not_scroll_the_view(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-sub-no-scroll");
+    let d = root.join("a-dir");
+    for dir in ["aa", "mm", "zz"] {
+        std::fs::create_dir_all(d.join(dir)).expect("create fixture");
+    }
+    for i in 0..40 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 400.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    // Select a file far below the open folder, then scroll back to the top so the
+    // open folder's rows are on screen and the cursor is not.
+    cx.simulate_keystrokes(&["down"; 30].join(" "));
+    let picked = selected(&view, &cx);
+    let offset = |cx: &VisualTestContext| {
+        folder.read_with(cx, |folder, _| f32::from(folder.scroll().0.borrow().base_handle.offset().y))
+    };
+    folder.update(&mut cx, |folder, _| {
+        folder.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(0.)));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let scrolled = offset(&cx);
+    assert_eq!(scrolled, 0.);
+    measure_visible_folders(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let rows = names(&view, &cx);
+    let inside: Vec<&str> = rows.iter().skip_while(|n| *n != "a-dir").skip(1).take(3).map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "the open folder re-sorted: {rows:?}");
+    assert_eq!(selected(&view, &cx), picked);
+    assert_eq!(offset(&cx), scrolled, "the view does not scroll");
+}
+
 /// Sizes arriving re-sort the list without moving the selection or the view.
 #[gpui::test]
 fn sizes_arriving_resort_and_keep_selection_and_view(cx: &mut TestAppContext) {

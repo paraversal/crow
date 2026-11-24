@@ -1240,7 +1240,14 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
         let Some(entry) = ops.log.get(index).filter(|e| !e.undone && e.record.is_undoable()) else { return };
         // An older entry's items may have been renamed or moved since: follow them.
         let later = ops.log[index + 1..].iter().filter(|e| !e.undone).map(|e| e.record.as_ref());
-        (index, Arc::new(entry.record.forwarded(later)), ops.trash.clone())
+        match entry.record.forwarded(later) {
+            Ok(record) => (index, Arc::new(record), ops.trash.clone()),
+            Err(e) => {
+                message(e.to_string(), true, cx);
+                cx.refresh_windows();
+                return;
+            }
+        }
     };
     cx.global_mut::<Operations>().maintenance = Some(Maintenance::Undo);
     cx.spawn(async move |cx| {
