@@ -1961,6 +1961,12 @@ impl Sidebar {
         ui::edit_sidebar(SidebarEdit::AddMany { paths: folders, at }, cx);
     }
 
+    /// The path-bar menu's Add to Sidebar: the end of the first group.
+    pub(crate) fn add_to_first_group(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let at = self.group_end(0, cx);
+        self.add_folders(at, vec![path], cx);
+    }
+
     /// The folders among paths dropped from another app: ask the disk off the main
     /// thread, then add them on it.
     pub(crate) fn add_dropped_folders(&mut self, at: Slot, paths: Vec<PathBuf>, cx: &mut Context<Self>) {

@@ -232,6 +232,70 @@ pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App)
         .collect()
 }
 
+/// A path-bar segment's menu: the folder it names, which is the shown one for
+/// the last segment, so only that one offers New Folder, New File and Paste.
+const PATH_FOLDER: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    Some((CommandId::OpenTerminal, None)),
+    None,
+    Some((CommandId::AddToSidebar, None)),
+];
+
+const PATH_SHOWN_FOLDER: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::NewFolder, None)),
+    Some((CommandId::NewFile, None)),
+    Some((CommandId::Paste, None)),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    Some((CommandId::OpenTerminal, None)),
+    None,
+    Some((CommandId::AddToSidebar, None)),
+];
+
+const PATH_FILE: &[TitledSlot] =
+    &[Some((CommandId::Open, None)), None, Some((CommandId::CopyPath, None)), Some((CommandId::ShowInFinder, None))];
+
+/// The lines for a path segment: a file, a folder, or the folder shown.
+pub fn path_slots(is_dir: bool, shown: bool) -> &'static [TitledSlot] {
+    match (is_dir, shown) {
+        (false, _) => PATH_FILE,
+        (true, false) => PATH_FOLDER,
+        (true, true) => PATH_SHOWN_FOLDER,
+    }
+}
+
+/// The native menu's lines for a path segment. Only the shown folder's lines carry
+/// keys, since the keys act on the list; Open is dimmed there, as the click does nothing.
+pub fn path_entries(slots: &[TitledSlot], shown: bool, can_paste: bool, cx: &App) -> Vec<ContextMenuEntry> {
+    slots
+        .iter()
+        .map(|slot| match slot {
+            None => ContextMenuEntry::Separator,
+            Some((id, own_title)) => {
+                let command = command(*id);
+                let list_key = matches!(id, CommandId::NewFolder | CommandId::NewFile | CommandId::Paste);
+                ContextMenuEntry::Item {
+                    title: own_title.unwrap_or_else(|| title(command)).to_owned(),
+                    shortcut: (shown && list_key).then(|| shortcut(command, KeyScope::List, cx)).flatten(),
+                    enabled: match id {
+                        CommandId::Open => !shown,
+                        CommandId::Paste => can_paste,
+                        _ => true,
+                    },
+                }
+            }
+        })
+        .collect()
+}
+
 /// Search results: the row's own menu. Reveal is the search panel's ⌘R, which
 /// closes search and shows the result in its folder.
 const SEARCH: &[TitledSlot] = &[

@@ -55,6 +55,10 @@ pub struct PathHit {
     pub is_dir: bool,
 }
 
+/// Opens the menu for a segment: its path and whether it is a folder. The window
+/// owns the menu, since its lines act on tabs, the sidebar and the shown folder.
+pub type PathMenu = Rc<dyn Fn(PathBuf, bool, &mut Window, &mut App)>;
+
 /// The path hits from the last painted bar, shared with the drop router.
 pub type PathHits = Rc<RefCell<Vec<PathHit>>>;
 
@@ -733,7 +737,12 @@ fn shrinking_text(text: impl Into<SharedString>) -> gpui::Div {
 
 /// The "…" standing for folded path segments: goes to the deepest of them; the
 /// tooltip names them all.
-fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui::Rgba) -> impl IntoElement {
+fn folded_segment(
+    parts: &[(String, PathBuf)],
+    pane: &Entity<Pane>,
+    path_menu: &PathMenu,
+    hover: gpui::Rgba,
+) -> impl IntoElement {
     let names = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" › ");
     let (deepest, target) = parts.last().cloned().unwrap_or_default();
     let pane = pane.clone();
@@ -762,11 +771,25 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
         .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
             promote_drag(selection, &handoff, window, cx)
         })
-        .on_click(move |_, _, cx| {
-            // The "…" is not empty path space: a double-click must not edit the path.
-            cx.stop_propagation();
-            let target = target.clone();
-            pane.update(cx, |pane, cx| pane.navigate(target, cx));
+        .on_mouse_down(gpui::MouseButton::Right, {
+            let (target, menu) = (target.clone(), path_menu.clone());
+            move |_, window, cx| {
+                cx.stop_propagation();
+                menu(target.clone(), true, window, cx);
+            }
+        })
+        .on_click({
+            let menu = path_menu.clone();
+            move |event, window, cx| {
+                // The "…" is not empty path space: a double-click must not edit the path.
+                cx.stop_propagation();
+                if event.modifiers().control {
+                    menu(target.clone(), true, window, cx);
+                    return;
+                }
+                let target = target.clone();
+                pane.update(cx, |pane, cx| pane.navigate(target, cx));
+            }
         });
     with_tooltip(part, names, None)
 }
@@ -789,6 +812,7 @@ fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
 pub fn render(
     state: BarState,
     pane: Entity<Pane>,
+    path_menu: PathMenu,
     hovered: bool,
     path_hits: &PathHits,
     drop_hover: Option<&std::path::Path>,
@@ -830,7 +854,7 @@ pub fn render(
                         deepest,
                         true,
                         false,
-                        folded_segment(folded, &pane, hover).into_any_element(),
+                        folded_segment(folded, &pane, &path_menu, hover).into_any_element(),
                         outline,
                     ));
                     children.push(separator().into_any_element());
@@ -882,9 +906,22 @@ pub fn render(
                 });
             let hit_target = target.clone();
             let target = target.clone();
-            let part = part.on_click(move |_, _, cx| {
+            let menu_target = target.clone();
+            let part = part.on_mouse_down(gpui::MouseButton::Right, {
+                let (target, menu) = (target.clone(), path_menu.clone());
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    menu(target.clone(), is_dir, window, cx);
+                }
+            });
+            let menu = path_menu.clone();
+            let part = part.on_click(move |event, window, cx| {
                 // A segment is not empty space: a double-click must not edit the path.
                 cx.stop_propagation();
+                if event.modifiers().control {
+                    menu(menu_target.clone(), is_dir, window, cx);
+                    return;
+                }
                 let target = target.clone();
                 pane.update(cx, |pane, cx| {
                     if is_dir {

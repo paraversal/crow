@@ -3678,6 +3678,11 @@ impl Pane {
                 None => self.current_dir(cx),
             }
         };
+        self.open_terminal_in(folder, cx);
+    }
+
+    /// Open the configured terminal at `folder`.
+    pub fn open_terminal_in(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let app = cx.global::<Ui>().settings.terminal.trim().to_owned();
         let app = if app.is_empty() { "Terminal".to_owned() } else { app };
         let effects = crate::effects::effects(cx);

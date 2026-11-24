@@ -4437,6 +4437,93 @@ fn open_terminal_failure_shows_the_status_line(cx: &mut TestAppContext) {
     );
 }
 
+/// The titles of the last context menu built, `"—"` for a separator, with `(off)` after a dimmed line.
+fn last_menu_titles(cx: &mut VisualTestContext) -> Vec<String> {
+    use crow_macos::ContextMenuEntry;
+    let entries = effect_calls(cx)
+        .into_iter()
+        .rev()
+        .find_map(|call| match call {
+            crate::effects::Call::ContextMenu(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("a context menu was built");
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            ContextMenuEntry::Separator => "—".to_owned(),
+            ContextMenuEntry::Item { title, enabled: true, .. } => title,
+            ContextMenuEntry::Item { title, .. } => format!("{title} (off)"),
+        })
+        .collect()
+}
+
+/// Right-click a path-bar segment: the menu of the folder it names.
+#[gpui::test]
+fn path_segments_open_the_menu_of_their_folder(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("path-segment-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().settings.terminal = "Ghostty".into());
+    // The last segment is the cursor item (alpha); the one before is the folder shown.
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    let parent = root.parent().expect("the fixture has a parent").to_path_buf();
+    let script = |cx: &mut VisualTestContext, choice: Option<usize>| {
+        cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(choice));
+    };
+    let segment = |cx: &mut VisualTestContext, i: usize| {
+        cx.debug_bounds(Box::leak(format!("path-segment-{i}").into_boxed_str()) as &'static str)
+            .expect("the segment is laid out")
+            .center()
+    };
+
+    // An ancestor: no New Folder (it would land in the folder shown), Open is live.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    let titles = last_menu_titles(&mut cx);
+    assert_eq!(
+        titles,
+        ["Open", "Open in New Tab", "—", "Copy Path", "Show in Finder", "Open Terminal Here", "—", "Add to Sidebar"],
+        "{titles:?}"
+    );
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), root, "opening a menu goes nowhere");
+
+    // The shown folder: its New Folder, New File and Paste, and Open dimmed.
+    let at = segment(&mut cx, shown);
+    right_click(&mut cx, at);
+    let titles = last_menu_titles(&mut cx);
+    assert!(titles.contains(&"New Folder".to_owned()) && titles.contains(&"Open (off)".to_owned()), "{titles:?}");
+
+    // Choosing runs on the segment's folder, not the shown one.
+    script(&mut cx, Some(5));
+    effect_calls(&mut cx);
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), parent.clone())),
+        "Open Terminal Here uses the ancestor"
+    );
+    script(&mut cx, Some(1));
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "Open in New Tab");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), parent);
+    script(&mut cx, Some(0));
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)),
+        parent.parent().expect("a grandparent").to_path_buf(),
+        "Open goes to the segment's folder"
+    );
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+}
+
 #[gpui::test]
 fn terminal_menu_follows_the_selection(cx: &mut TestAppContext) {
     use crow_macos::ContextMenuEntry;

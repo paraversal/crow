@@ -1962,7 +1962,99 @@ impl CrowWindow {
             .as_ref()
             .filter(|hit| hit.surface == DropSurface::PathBar)
             .and_then(|hit| hit.path().cloned());
-        bottom_bar::render(state, self.pane().clone(), self.path_hovered, &self.path_hits, drop_hover.as_deref(), cx)
+        let this = cx.entity().downgrade();
+        let path_menu: bottom_bar::PathMenu = std::rc::Rc::new(move |path, is_dir, window, cx| {
+            this.update(cx, |this, cx| this.open_path_menu(path, is_dir, window, cx)).ok();
+        });
+        bottom_bar::render(
+            state,
+            self.pane().clone(),
+            path_menu,
+            self.path_hovered,
+            &self.path_hits,
+            drop_hover.as_deref(),
+            cx,
+        )
+    }
+
+    /// A right-click on a path-bar segment: the menu for the folder (or file) it names.
+    fn open_path_menu(&mut self, target: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_open() || self.path_edit.is_some() {
+            return;
+        }
+        let shown = is_dir && self.pane().read(cx).folder().is_some_and(|dir| dir == target);
+        let slots = crate::context_menu::path_slots(is_dir, shown);
+        let can_paste = !operations::pasteboard_paths(cx).0.is_empty();
+        let entries = crate::context_menu::path_entries(slots, shown, can_paste, cx);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = receiver.await.ok().flatten();
+            this.update_in(cx, |this, window, cx| {
+                this.path_menu_closed(target, is_dir, slots, chosen, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The path menu closed with the line at `chosen` picked, or none.
+    fn path_menu_closed(
+        &mut self,
+        target: PathBuf,
+        is_dir: bool,
+        slots: &'static [crate::context_menu::TitledSlot],
+        chosen: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((id, _)) = chosen.and_then(|ix| slots.get(ix).copied().flatten()) else { return };
+        match id {
+            palette::CommandId::Open => {
+                self.focus_center(window, cx);
+                self.pane().update(cx, |pane, cx| {
+                    if !is_dir {
+                        pane.open_file(target, cx);
+                    } else if pane.current_dir(cx) != target {
+                        pane.navigate(target, cx);
+                    }
+                });
+            }
+            palette::CommandId::NewTab => self.open_tab_at(target, window, cx),
+            palette::CommandId::CopyPath => {
+                crate::effects::write_text(target.to_string_lossy().into_owned(), cx);
+                operations::message("Copied path", false, cx);
+                cx.notify();
+            }
+            palette::CommandId::ShowInFinder => {
+                let effects = crate::effects::effects(cx);
+                if is_dir {
+                    effects.open_folder_in_finder(&target);
+                } else {
+                    effects.reveal_in_finder(&[target]);
+                }
+            }
+            palette::CommandId::OpenTerminal => self.pane().update(cx, |pane, cx| pane.open_terminal_in(target, cx)),
+            palette::CommandId::AddToSidebar => {
+                self.sidebar.update(cx, |sidebar, cx| sidebar.add_to_first_group(target, cx))
+            }
+            // These act on the folder shown, which only that segment offers.
+            palette::CommandId::NewFolder | palette::CommandId::NewFile | palette::CommandId::Paste => {
+                self.focus_center(window, cx);
+                window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+            }
+            _ => {}
+        }
     }
 
     // ----- external drag routing and spring-loaded folders -----
