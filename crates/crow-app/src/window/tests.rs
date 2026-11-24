@@ -11328,9 +11328,11 @@ fn option_command_p_opens_the_right_sidebar_then_cycles_its_tabs(cx: &mut TestAp
     finish_motion(&view, &mut cx);
     assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⌥⌘P opens it");
     assert_eq!(tab(&view, &cx), InfoTab::Preview, "on the tab it had");
-    // Open: each press steps to the next tab and wraps (Git is off, so two tabs).
+    // Open: each press steps to the next tab and wraps (Git is off, so three tabs).
     cx.simulate_keystrokes("cmd-alt-p");
     assert_eq!(tab(&view, &cx), InfoTab::Info);
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Activity);
     cx.simulate_keystrokes("cmd-alt-p");
     assert_eq!(tab(&view, &cx), InfoTab::Preview);
     assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "cycling never closes it");
@@ -14067,9 +14069,7 @@ fn tip_never_shows_while_busy(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
 
-    for (open_keys, close_keys, open) in
-        [("cmd-f", "escape", "search"), ("cmd-k", "escape", "palette"), ("cmd-alt-l", "cmd-alt-l", "activity")]
-    {
+    for (open_keys, close_keys, open) in [("cmd-f", "escape", "search"), ("cmd-k", "escape", "palette")] {
         cx.simulate_keystrokes(open_keys);
         settle(&view, &mut cx);
         offer(&view, TipId::Filter, &mut cx);

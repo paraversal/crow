@@ -1387,10 +1387,13 @@ impl CrowWindow {
         let folder_group = {
             let (has_folder, state) = {
                 let pane = self.pane().read(cx);
-                (pane.folder().is_some(), pane.menu_state(cx))
+                let has_folder = pane.folder().is_some();
+                (has_folder, if has_folder { pane.menu_state(cx) } else { Default::default() })
             };
             let items = crow_core::toolbar::folder_group(&cx.global::<Ui>().settings.toolbar_pins);
             let items = if narrow { crow_core::toolbar::collapsed(&items) } else { items };
+            // The group gives way before Search does in a very narrow toolbar; ⌃⌘M still opens the menu.
+            let items = if width < px(420.) { Vec::new() } else { items };
             let pins = crate::context_menu::pinnable();
             let mut group = div().id("toolbar-folder-group").flex().flex_none().gap(px(2.));
             for item in items {
