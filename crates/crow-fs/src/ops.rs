@@ -215,6 +215,13 @@ pub enum Step {
     },
     /// Permanently deleted; cannot be undone.
     Deleted(PathBuf),
+    /// Put back from the Trash by an undo. Undoing this (a redo) trashes `original`
+    /// through the system Trash again rather than moving it by hand, so the new
+    /// Trash entry keeps its Put Back metadata and never collides with a reused name.
+    Restored {
+        original: PathBuf,
+        trashed: PathBuf,
+    },
     /// A batch rename committed as a group. Undo stages the inverse graph.
     BatchRenamed {
         moves: Vec<BatchRenameEntry>,
@@ -238,7 +245,9 @@ impl Record {
         let mut results = Vec::new();
         for step in &self.steps {
             match step {
-                Step::Created(path) | Step::Moved { to: path, .. } => results.push(path.clone()),
+                Step::Created(path) | Step::Moved { to: path, .. } | Step::Restored { original: path, .. } => {
+                    results.push(path.clone())
+                }
                 Step::BatchRenamed { moves } => results.extend(moves.iter().map(|entry| entry.target.clone())),
                 _ => {}
             }
@@ -265,6 +274,11 @@ impl Record {
                 Step::Moved { from, to } => {
                     if let Some(rest) = under(from) {
                         return Some(Some(land(to, rest)));
+                    }
+                }
+                Step::Restored { original, trashed } => {
+                    if let Some(rest) = under(trashed) {
+                        return Some(Some(land(original, rest)));
                     }
                 }
                 Step::BatchRenamed { moves } => {
@@ -313,6 +327,9 @@ impl Record {
                     Step::Moved { from, to } => Step::Moved { from: forward(from, true)?, to: forward(to, false)? },
                     Step::Trashed { original, trashed } => {
                         Step::Trashed { original: forward(original, true)?, trashed: trashed.clone() }
+                    }
+                    Step::Restored { original, trashed } => {
+                        Step::Restored { original: forward(original, false)?, trashed: trashed.clone() }
                     }
                     Step::BatchRenamed { moves } => Step::BatchRenamed {
                         moves: moves
@@ -927,7 +944,16 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
                     return Err(OpError::WouldOverwrite(original.clone()));
                 }
                 job::move_item(trashed, original, &never, &mut |_| {})?;
-                reversed.steps.push(Step::Moved { from: trashed.clone(), to: original.clone() });
+                reversed.steps.push(Step::Restored { original: original.clone(), trashed: trashed.clone() });
+            }
+            Step::Restored { original, .. } => {
+                // The redo of a restore: trash the item again through the Trash, so
+                // it gets a fresh entry (Put Back keeps working) at whatever name is free.
+                if !exists(original) {
+                    return Err(OpError::NotFound(original.clone()));
+                }
+                let trashed = trash.trash(original).map_err(io_err(original))?;
+                reversed.steps.push(Step::Trashed { original: original.clone(), trashed });
             }
             Step::Deleted(path) => return Err(OpError::NotFound(path.clone())),
         }

@@ -143,6 +143,64 @@ fn copy_keeps_contents_and_undo_trashes_the_copies() {
     assert_eq!(f.snapshot(), after);
 }
 
+/// Counts how many times the Trash interface is used.
+struct CountingTrash {
+    inner: FolderTrash,
+    calls: AtomicU64,
+}
+
+impl Trash for CountingTrash {
+    fn trash(&self, path: &Path) -> io::Result<PathBuf> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.trash(path)
+    }
+}
+
+#[test]
+fn redoing_an_undone_trash_goes_through_the_trash_again() {
+    let f = Fixture::new("redo-trash");
+    f.file("t.txt", "keep");
+    let before = f.snapshot();
+    let trash = CountingTrash { inner: FolderTrash(f.root.join(".trash")), calls: AtomicU64::new(0) };
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
+    ok(&out);
+    let restored = undo(&out.record, &trash).expect("undo");
+    assert_eq!(f.snapshot(), before);
+    assert_eq!(trash.calls.load(Ordering::Relaxed), 0, "putting back is not a trash call");
+    let redone = undo(&restored, &trash).expect("redo");
+    assert_eq!(trash.calls.load(Ordering::Relaxed), 1, "redo trashes through the Trash, not a raw rename");
+    assert!(!f.path("t.txt").exists());
+    assert!(matches!(redone.steps.as_slice(), [Step::Trashed { original, .. }] if *original == f.path("t.txt")));
+    // And the redo is undoable again.
+    undo(&redone, &trash).expect("undo the redo");
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn redoing_a_trash_works_when_its_old_trash_name_was_reused() {
+    let f = Fixture::new("redo-trash-reused");
+    f.file("t.txt", "mine");
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
+    ok(&out);
+    let old_name = match out.record.steps.as_slice() {
+        [Step::Trashed { trashed, .. }] => trashed.clone(),
+        other => panic!("{other:?}"),
+    };
+    let restored = undo(&out.record, &f.trash).expect("undo");
+    // A different item takes the vacated name inside the Trash.
+    std::fs::write(&old_name, "someone else").unwrap();
+    let redone = undo(&restored, &f.trash).expect("redo");
+    assert!(!f.path("t.txt").exists());
+    assert_eq!(std::fs::read_to_string(&old_name).unwrap(), "someone else", "the other item is untouched");
+    match redone.steps.as_slice() {
+        [Step::Trashed { trashed, .. }] => {
+            assert_ne!(*trashed, old_name);
+            assert_eq!(std::fs::read_to_string(trashed).unwrap(), "mine");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn copying_into_the_same_folder_duplicates() {
     let f = Fixture::new("copy-self");
