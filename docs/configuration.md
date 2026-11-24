@@ -130,7 +130,7 @@ sidebar_width = 210
 
 ## views.toml
 
-How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns and `[folder."..."]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (⌘J) shows which layer decided what. An `icon_source` in any layer overrides the icon pack for that folder.
+How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns and `[folder."..."]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. An `icon_source` in any layer overrides the icon pack for that folder.
 
 <!-- defaults:views.toml -->
 ```toml
@@ -141,7 +141,6 @@ How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns a
 #   2. [[rule]]                   folders matching a path pattern (later rules win)
 #   3. [folder."~/Some/Folder"]   one folder; Crow writes these when you change
 #                                 a folder's view or sort
-# View ▸ Why This View? (Cmd-J) shows which layer decided what.
 #
 # Keys, in any layer:
 #   view = "icons" | "list" | "columns" | "gallery"

@@ -24,8 +24,7 @@ use crate::actions::{
     MoveShelfHere, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
     PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch, SearchEverything,
     SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
-    TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
-    WhyThisView, Zoom,
+    TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -214,17 +213,10 @@ fn slide_look(mode: crow_core::motion::Effective, opening: bool, t: f32) -> Slid
     }
 }
 
-struct WhySheet {
-    focus: FocusHandle,
-    buttons: [FocusHandle; 4],
-    scroll: gpui::ScrollHandle,
-}
-
 /// Closed overlays whose last picture is still fading out.
 #[derive(Default)]
 struct Exits {
     sheet: Option<crate::motion_ui::Leaving<Sheet>>,
-    why: Option<crate::motion_ui::Leaving<WhySheet>>,
     picker: Option<crate::motion_ui::Leaving<ThemePicker>>,
     palette: Option<crate::motion_ui::Leaving<palette_view::Palette>>,
     git_review: Option<crate::motion_ui::Leaving<git_review::GitReview>>,
@@ -269,8 +261,6 @@ pub struct CrowWindow {
     activity_ghost: Option<(String, std::time::Instant)>,
     activity_focus: FocusHandle,
     activity_controls: HashMap<(&'static str, u64), FocusHandle>,
-    /// "Why this view?", while open.
-    why: Option<WhySheet>,
     picker: Option<ThemePicker>,
     /// Cmd-K, while open.
     palette: Option<palette_view::Palette>,
@@ -462,7 +452,6 @@ impl CrowWindow {
             activity_ghost: None,
             activity_focus: cx.focus_handle(),
             activity_controls: HashMap::new(),
-            why: None,
             picker: None,
             palette: None,
             search: None,
@@ -533,7 +522,6 @@ impl CrowWindow {
     /// way of opening one checks this, so two never stack and none steals focus.
     pub(crate) fn overlay_open(&self) -> bool {
         self.sheet.is_some()
-            || self.why.is_some()
             || self.picker.is_some()
             || self.palette.is_some()
             || self.git_review.is_some()
@@ -570,17 +558,6 @@ impl CrowWindow {
             allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
         } else if let Some(picker) = &self.picker {
             allowed.push(("picker", picker.focus.clone()));
-        } else if let Some(why) = &self.why {
-            allowed.push(("why", why.focus.clone()));
-            let has_override =
-                self.pane().read(cx).folder().is_some_and(|dir| cx.global::<Ui>().views.has_folder_override(dir));
-            allowed.extend(
-                why.buttons
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != 1 || has_override)
-                    .map(|(_, focus)| ("why button", focus.clone())),
-            );
         } else if let Some(picker) = &self.column_picker {
             allowed.push(("column picker", picker.focus.clone()));
             allowed.extend(picker.buttons.iter().cloned().map(|focus| ("column picker button", focus)));
@@ -978,7 +955,7 @@ impl CrowWindow {
         if !visible || tab != InfoTab::Info {
             return;
         }
-        if self.sheet.is_some() || self.palette.is_some() || self.picker.is_some() || self.why.is_some() {
+        if self.sheet.is_some() || self.palette.is_some() || self.picker.is_some() {
             return;
         }
         let (target, key) = if let Some(search) = &active_search {
@@ -1807,7 +1784,7 @@ impl CrowWindow {
 
     /// Which element owns the keys, for the bar's hints.
     fn bar_focus(&self, window: &Window, pane: &Pane, cx: &App) -> BarFocus {
-        let overlay = self.sheet.is_some() || self.why.is_some() || self.picker.is_some() || self.palette.is_some();
+        let overlay = self.sheet.is_some() || self.picker.is_some() || self.palette.is_some();
         if overlay || pane.is_renaming() {
             return BarFocus::Overlay;
         }
@@ -2010,7 +1987,6 @@ impl CrowWindow {
     ) -> Option<DropHit> {
         if self.sheet.is_some()
             || self.palette.is_some()
-            || self.why.is_some()
             || self.picker.is_some()
             || self.git_review.is_some()
             || self.column_picker.is_some()
@@ -2486,7 +2462,6 @@ impl CrowWindow {
     /// States a tip must not appear over, and that close one already up.
     fn tip_blocked(&self, cx: &App) -> bool {
         self.sheet.is_some()
-            || self.why.is_some()
             || self.picker.is_some()
             || self.palette.is_some()
             || self.search.is_some()
@@ -2864,30 +2839,6 @@ impl CrowWindow {
 
     // ----- view settings -----
 
-    fn why_this_view(&mut self, _: &WhyThisView, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pane().read(cx).folder().is_none() {
-            return;
-        }
-        if retire!(self, cx, why) {
-            self.focus_center(window, cx);
-        } else {
-            let focus = cx.focus_handle();
-            window.focus(&focus, cx);
-            self.why = Some(WhySheet {
-                focus,
-                buttons: std::array::from_fn(|_| cx.focus_handle()),
-                scroll: gpui::ScrollHandle::new(),
-            });
-        }
-        cx.notify();
-    }
-
-    fn close_why(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        retire!(self, cx, why);
-        self.focus_center(window, cx);
-        cx.notify();
-    }
-
     fn use_view_as_defaults(&mut self, _: &UseViewAsDefaults, _: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.pane().read(cx).folder().map(Path::to_path_buf) else { return };
         ui::use_view_as_defaults(dir, cx);
@@ -2897,229 +2848,6 @@ impl CrowWindow {
     fn reset_folder_view(&mut self, _: &ResetFolderView, _: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.pane().read(cx).folder().map(Path::to_path_buf) else { return };
         ui::reset_view(dir, cx);
-    }
-
-    fn activate_why(&mut self, button: usize, window: &mut Window, cx: &mut Context<Self>) {
-        match button {
-            0 => {
-                let views_file = cx.global::<Ui>().config_dir.join("views.toml");
-                if let Err(e) = crate::effects::effects(cx).open_text(&views_file) {
-                    tracing::warn!("open views.toml: {e}");
-                }
-                return;
-            }
-            1 => self.reset_folder_view(&ResetFolderView, window, cx),
-            2 => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
-            _ => {}
-        }
-        self.close_why(window, cx);
-    }
-
-    fn render_why(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let why = self.why.as_ref()?;
-        let ui = cx.global::<Ui>();
-        let theme = ui.theme.clone();
-        let dir = self.pane().read(cx).folder()?.to_path_buf();
-        let resolved = ui.views.resolve(&dir);
-        let has_override = ui.views.has_folder_override(&dir);
-        let folder = crate::style::display_path(&dir, &ui.home);
-        let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
-        // With `view_per_folder = false` the window's own view is what shows.
-        let (view, view_source) = if ui.settings.view_per_folder {
-            (resolved.view.0, resolved.view.1.to_string())
-        } else {
-            (self.pane().read(cx).mode(), "this window (view_per_folder = false in settings.toml)".to_owned())
-        };
-        let mode = match view {
-            ViewMode::Icons => "Icons",
-            ViewMode::List => "List",
-            ViewMode::Columns => "Columns",
-            ViewMode::Gallery => "Gallery",
-        };
-        let sort_title = |key: crow_fs::SortKey| match key {
-            crow_fs::SortKey::Name => "Name",
-            crow_fs::SortKey::Size => "Size",
-            crow_fs::SortKey::Kind => "Kind",
-            crow_fs::SortKey::Modified => "Date Modified",
-            crow_fs::SortKey::Added => "Date Added",
-        };
-        let direction = match (resolved.sort.0, resolved.ascending.0) {
-            (crow_fs::SortKey::Name | crow_fs::SortKey::Kind, true) => "A to Z",
-            (crow_fs::SortKey::Name | crow_fs::SortKey::Kind, false) => "Z to A",
-            (crow_fs::SortKey::Size, true) => "smallest first",
-            (crow_fs::SortKey::Size, false) => "largest first",
-            (_, true) => "oldest first",
-            (_, false) => "newest first",
-        };
-        let columns = resolved.columns.0.join(", ");
-        let packs = cx.try_global::<crate::icon_packs::IconPacks>();
-        let (icon_value, icon_source) = match &resolved.icon_source {
-            Some((source, from)) => {
-                (packs.map_or_else(|| source.clone(), |packs| packs.display_name(source)), from.to_string())
-            }
-            None => (
-                packs.map_or_else(|| ui.settings.icon_pack.clone(), |packs| packs.display_name(&ui.settings.icon_pack)),
-                "settings.toml".to_owned(),
-            ),
-        };
-        let pack_error = packs.and_then(|packs| packs.error().cloned());
-        let (icon_size, icon_size_source) = if ui.settings.view_per_folder {
-            (resolved.icon_size.0, resolved.icon_size.1.to_string())
-        } else {
-            (self.pane().read(cx).icon_size(), "this window (view_per_folder = false in settings.toml)".to_owned())
-        };
-        let (caption, caption_source) = if ui.settings.view_per_folder {
-            (resolved.icon_caption.0.clone(), resolved.icon_caption.1.to_string())
-        } else {
-            (
-                self.pane().read(cx).icon_caption().map(str::to_owned),
-                "this window (view_per_folder = false in settings.toml)".to_owned(),
-            )
-        };
-        let caption_value = match caption.as_deref() {
-            None => "Off".to_owned(),
-            Some(id) => crow_core::ExtensionId::parse(id)
-                .ok()
-                .and_then(|id| crate::plugins::column_title(cx, &id))
-                .unwrap_or_else(|| id.to_owned()),
-        };
-        let lines: Vec<(&str, String, String)> = vec![
-            ("View", mode.into(), view_source),
-            ("Icon Size", icon_size.label().into(), icon_size_source),
-            ("Caption", caption_value, caption_source),
-            ("Sort", sort_title(resolved.sort.0).into(), resolved.sort.1.to_string()),
-            ("Order", direction.into(), resolved.ascending.1.to_string()),
-            (
-                "Folders",
-                if resolved.folders_first.0 { "first" } else { "mixed with files" }.into(),
-                resolved.folders_first.1.to_string(),
-            ),
-            ("Columns", columns, resolved.columns.1.to_string()),
-            ("Icons", icon_value, icon_source),
-        ];
-        let rules = if resolved.matched_rules.is_empty() {
-            "No rules in views.toml match this folder.".to_owned()
-        } else {
-            format!("Matching rules, in order: {}", resolved.matched_rules.join(", "))
-        };
-        let button = |index, id, label| {
-            chrome::sheet_button(id, label, false, &theme)
-                .track_focus(&why.buttons[index])
-                .focus_visible(|style| style.shadow(cursor_ring(&theme)))
-                .on_click(cx.listener(move |this, _, window, cx| this.activate_why(index, window, cx)))
-        };
-        Some(chrome::sheet(
-            chrome::sheet_panel("why-this-view", SheetWidth::Wide, &theme)
-                .aria_label(format!("Why this view: {folder}"))
-                .key_context("Sheet")
-                .track_focus(&why.focus)
-                .max_w(window.viewport_size().width - px(24.))
-                .max_h(window.viewport_size().height - px(BAND_HEIGHT + 12.))
-                .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
-                    let Some(why) = &this.why else { return };
-                    let index = why.buttons.iter().position(|button| button.is_focused(window)).unwrap_or(3);
-                    this.activate_why(index, window, cx);
-                }))
-                .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_why(window, cx)))
-                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    let Some(why) = &this.why else { return };
-                    let modifiers = event.keystroke.modifiers;
-                    match event.keystroke.key.as_str() {
-                        "tab" if !modifiers.control && !modifiers.alt && !modifiers.platform => {
-                            let controls: Vec<_> = std::iter::once(why.focus.clone())
-                                .chain(
-                                    why.buttons
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(i, _)| *i != 1 || has_override)
-                                        .map(|(_, button)| button.clone()),
-                                )
-                                .collect();
-                            chrome::cycle_focus(&controls, !modifiers.shift, window, cx);
-                        }
-                        "space" if !modifiers.modified() => {
-                            let Some(index) = why.buttons.iter().position(|button| button.is_focused(window)) else {
-                                return;
-                            };
-                            this.activate_why(index, window, cx);
-                        }
-                        "up" | "down" | "pageup" | "pagedown"
-                            if !modifiers.modified() && why.focus.is_focused(window) =>
-                        {
-                            let step = match event.keystroke.key.as_str() {
-                                "up" => -24.,
-                                "down" => 24.,
-                                "pageup" => -f32::from(why.scroll.bounds().size.height),
-                                _ => f32::from(why.scroll.bounds().size.height),
-                            };
-                            let mut offset = why.scroll.offset();
-                            offset.y = (offset.y - px(step)).clamp(-why.scroll.max_offset().y, px(0.));
-                            why.scroll.set_offset(offset);
-                        }
-                        _ => return,
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .id("why-details")
-                        .debug_selector(|| "why-details".into())
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&why.scroll)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")),
-                                )
-                                .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
-                                    div()
-                                        .id(("why-line", i))
-                                        .role(Role::ListItem)
-                                        .aria_label(format!("{what}: {value}, from {source}"))
-                                        .flex()
-                                        .gap_3()
-                                        .child(div().w(px(70.)).text_color(color(muted)).child(what))
-                                        .child(div().w(px(190.)).text_color(color(fg)).child(value))
-                                        .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
-                                }))
-                                .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
-                                .when_some(pack_error, |details, error| {
-                                    details.child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(color(theme.role("error")))
-                                            .child(format!("{error} (last good icons kept)")),
-                                    )
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .flex_wrap()
-                        .gap_2()
-                        .pt_2()
-                        .child(button(0, "why-open-file", "Edit views.toml"))
-                        .child(div().flex_1())
-                        .when(has_override, |row| row.child(button(1, "why-reset", "Reset This Folder")))
-                        .child(button(2, "why-defaults", "Use as Defaults"))
-                        .child(button(3, "why-close", "Close")),
-                ),
-            &theme,
-            cx.global::<Ui>().feedback.mode,
-            self.exit_fade.get(),
-            cx.listener(|this, _, window, cx| this.close_why(window, cx)),
-        ))
     }
 
     // ----- theme picker -----
@@ -3608,7 +3336,6 @@ impl CrowWindow {
             CommandId::MoveShelfHere => self.move_shelf_here(&MoveShelfHere, window, cx),
             CommandId::CopyShelfHere => self.copy_shelf_here(&CopyShelfHere, window, cx),
             CommandId::ClearShelf => self.clear_shelf(&ClearShelf, window, cx),
-            CommandId::WhyThisView => self.why_this_view(&WhyThisView, window, cx),
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
@@ -3802,9 +3529,6 @@ impl CrowWindow {
 
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.why.is_some() && self.pane().read(cx).folder().is_none() {
-            retire!(self, cx, why);
-        }
         let active = window.is_window_active();
         if active
             && !self.window_was_active
@@ -4104,7 +3828,6 @@ impl Render for CrowWindow {
         }
         let sheet = lend!(sheet, self.render_sheet(window, cx));
         let activity = self.show_activity.then(|| self.render_activity(window, cx));
-        let why = lend!(why, self.render_why(window, cx));
         let picker = lend!(picker, self.render_picker(cx));
         let git_review = lend!(git_review, self.render_git_review(window, cx));
         let column_picker = lend!(column_picker, self.render_column_picker(window, cx));
@@ -4260,7 +3983,6 @@ impl Render for CrowWindow {
                 }
             }))
             .on_action(cx.listener(Self::add_to_sidebar))
-            .on_action(cx.listener(Self::why_this_view))
             .on_action(cx.listener(Self::use_view_as_defaults))
             .on_action(cx.listener(Self::reset_folder_view))
             .on_action(cx.listener(Self::show_theme_picker))
@@ -4310,7 +4032,6 @@ impl Render for CrowWindow {
             .children(behind)
             .children(sheet)
             .children(activity)
-            .children(why)
             .children(picker)
             .children(git_review)
             .children(column_picker)
@@ -4344,9 +4065,6 @@ impl CrowWindow {
         if self.palette.is_some() {
             out.push("palette-commands-token".to_owned());
             out.push("palette-empty".to_owned());
-        }
-        if self.why.is_some() {
-            out.extend(["why-open-file", "why-reset", "why-defaults", "why-close"].map(str::to_owned));
         }
         if self.sheet.is_some() {
             out.extend(["sheet-panel", "sheet-scrim", "sheet-confirm", "sheet-cancel"].map(str::to_owned));

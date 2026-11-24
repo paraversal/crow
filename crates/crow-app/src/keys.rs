@@ -447,7 +447,6 @@ mod tests {
                 (CommandId::Undo, "⌘Z"),
                 (CommandId::Redo, "⇧⌘Z"),
                 (CommandId::AddToSidebar, "⌃⌘T"),
-                (CommandId::WhyThisView, "⌘J"),
                 (CommandId::ShowThemePicker, "⌥⌘T"),
                 (CommandId::OpenSettings, "⌘,"),
                 (CommandId::ToggleActivity, "⌥⌘L"),

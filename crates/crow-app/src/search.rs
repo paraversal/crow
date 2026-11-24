@@ -3656,7 +3656,7 @@ impl SearchView {
         let decoration_ids = crate::plugins::decoration_ids(cx);
         let has_decorations = !decoration_ids.is_empty();
         let plugin_scope = self.plugin_scope_key();
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = crate::icon_packs::Resolver::for_source(cx, &self.icon_source(cx));
         let clipboard = cx.global::<Operations>().clipboard.as_ref();
         let flash = clipboard
@@ -4097,7 +4097,7 @@ impl Render for SearchView {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let idle = self.query(cx).trim().is_empty() && self.predicates.is_empty();
-        let now = Instant::now();
+        let now = crate::clock::now();
         if cx
             .global::<Operations>()
             .clipboard

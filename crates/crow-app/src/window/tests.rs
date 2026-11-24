@@ -4528,24 +4528,6 @@ fn context_menu_records_entries_and_runs_a_scripted_choice(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn why_sheet_edits_views_toml_through_effects(cx: &mut TestAppContext) {
-    use crate::effects::Call;
-    let root = fixture("effects-why");
-    let (view, mut cx) = open(cx, &root);
-    cx.update(|window, cx| {
-        window.draw(cx).clear(cx);
-    });
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "cmd-j opens Why");
-    cx.update(|window, cx| {
-        window.draw(cx).clear(cx);
-    });
-    click_selector(&mut cx, "why-open-file");
-    let calls = effect_calls(&mut cx);
-    assert!(calls.contains(&Call::OpenText(config_dir(&cx).join("views.toml"))), "{calls:?}");
-}
-
-#[gpui::test]
 fn fixing_the_file_clears_the_token(cx: &mut TestAppContext) {
     let root = fixture("bar-error-fixed");
     let (view, mut cx) = open(cx, &root);
@@ -4901,7 +4883,7 @@ fn refocusing_an_open_filter_does_not_count(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
+fn rules_apply_live_and_name_their_layer(cx: &mut TestAppContext) {
     let root = fixture("rules");
     let (view, mut cx) = open(cx, &root);
     let sort = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.sort());
@@ -4912,8 +4894,6 @@ fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
     assert_eq!(sort(&cx).key, crow_fs::SortKey::Size, "an edited views.toml applies to the open folder");
     assert!(!sort(&cx).ascending, "sizes start largest first");
 
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Cmd-J asks why");
     let spoken = cx.update(|window, cx| {
         let _ = window;
         let w = view.read(cx);
@@ -4921,8 +4901,6 @@ fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
         ui.views.resolve(&w.pane().read(cx).current_dir(cx)).sort.1.to_string()
     });
     assert_eq!(spoken, format!("rule \"{}\" in views.toml", root.display()));
-    cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
 
     // A broken file keeps the last good settings and says why.
     write_config(&view, &mut cx, "views.toml", "[defaults]\nsort = \"colour\"\n");
@@ -6825,10 +6803,10 @@ fn closing_an_overlay_over_search_returns_to_the_field(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("cmd-f");
     cx.simulate_input("notes");
     wait_for_search(&view, &mut cx);
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View opens over search");
+    cx.simulate_keystrokes("alt-cmd-t");
+    assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the theme picker opens over search");
     cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none() && w.search.is_some()));
+    assert!(view.read_with(&cx, |w, _| w.picker.is_none() && w.search.is_some()));
     assert!(search_input_focused(&view, &mut cx), "focus goes back to the field, not the hidden pane");
     cx.simulate_keystrokes("escape");
     assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Esc in the field still closes search");
@@ -7782,7 +7760,7 @@ fn palette_typed_query_finds_files_here(cx: &mut TestAppContext) {
 fn palette_lists_recently_used_commands(cx: &mut TestAppContext) {
     let root = fixture("palette-recent-commands");
     let (view, mut cx) = open(cx, &root);
-    for query in ["columns", "why this"] {
+    for query in ["columns", "gallery"] {
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(&format!(">{query}"));
         settle(&view, &mut cx);
@@ -7799,8 +7777,8 @@ fn palette_lists_recently_used_commands(cx: &mut TestAppContext) {
     let recent = rows.iter().position(|row| row == "# Recently used").expect("a Recently used header");
     let all = rows.iter().position(|row| row == "# All commands").expect("an All commands header");
     assert!(recent < all, "{rows:?}");
-    assert_eq!(&rows[recent + 1..all], ["Why This View?", "View as Columns"], "newest first: {rows:?}");
-    let repeated = rows[all + 1..].iter().filter(|row| *row == "Why This View?" || *row == "View as Columns");
+    assert_eq!(&rows[recent + 1..all], ["View as Gallery", "View as Columns"], "newest first: {rows:?}");
+    let repeated = rows[all + 1..].iter().filter(|row| *row == "View as Gallery" || *row == "View as Columns");
     assert_eq!(repeated.count(), 0, "recent commands are not listed again: {rows:?}");
 }
 
@@ -7863,7 +7841,7 @@ fn palette_recent_commands_setting_false_hides_and_stops_recording(cx: &mut Test
 
     write_config(&view, &mut cx, "settings.toml", "palette_recent_commands = false\n");
     cx.simulate_keystrokes("cmd-k");
-    cx.simulate_input(">why this");
+    cx.simulate_input(">gallery");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
@@ -8107,38 +8085,6 @@ fn the_left_sidebar_slides_with_motion_on_and_snaps_with_it_off(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn why_sheet_scrolls_details_and_keeps_the_footer_reachable(cx: &mut TestAppContext) {
-    let root = fixture("why-focus");
-    let folder = root.join("a deep folder with a long name".repeat(5)).join("another long folder".repeat(8));
-    std::fs::create_dir_all(&folder).expect("create the deep fixture");
-    let (view, mut cx) = open_sized(cx, &folder, 760., 400.);
-    settle(&view, &mut cx);
-    cx.simulate_keystrokes("cmd-j");
-    let (details, buttons, scroll) = view.read_with(&cx, |w, _| {
-        let why = w.why.as_ref().expect("Why opens");
-        (why.focus.clone(), why.buttons.clone(), why.scroll.clone())
-    });
-    for selector in ["why-open-file", "why-defaults", "why-close"] {
-        let button = cx.debug_bounds(selector).expect("the footer button is drawn");
-        assert!(button.bottom() <= px(400.), "{selector} must fit: {button:?}");
-    }
-    let details_bottom = cx.debug_bounds("why-details").unwrap().bottom();
-    assert!(details_bottom < cx.debug_bounds("why-close").unwrap().top());
-    assert!(scroll.max_offset().y > px(0.), "the long details overflow");
-    cx.simulate_keystrokes("right down");
-    assert!(scroll.offset().y < px(0.), "the keyboard scrolls the details");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(details));
-    cx.simulate_keystrokes("tab tab");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
-    cx.simulate_keystrokes("shift-tab");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
-    let found = violations(&view, &mut cx);
-    assert!(found.is_empty(), "{found:?}");
-    cx.simulate_keystrokes("shift-tab shift-tab space");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()), "Space activates Close");
-}
-
-#[gpui::test]
 fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext) {
     let root = fixture("overlay-focus-rename");
     let (view, mut cx) = open(cx, &root);
@@ -8147,16 +8093,18 @@ fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext)
     // the state ⌘⇧N/⌥⌘N leaves while a big folder reloads.
     let path = root.join("later.txt");
     pane.update(&mut cx, |pane, cx| pane.show_results(vec![path.clone()], true, cx));
-    cx.simulate_keystrokes("cmd-j");
+    cx.simulate_keystrokes("cmd-k");
     std::fs::write(&path, "x").expect("create the file");
     pane.update(&mut cx, |pane, cx| {
         let folder = pane.test_folder();
         folder.update(cx, |folder, cx| folder.reload(cx));
     });
     settle(&view, &mut cx);
-    let why = view.read_with(&cx, |w, _| w.why.as_ref().map(|why| why.focus.clone())).expect("Why opens");
+    let palette = cx
+        .update(|_, cx| view.read(cx).palette.as_ref().map(|palette| palette.input.read(cx).focus_handle(cx)))
+        .expect("the palette opens");
     cx.simulate_keystrokes("down");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(why), "focus stays in the sheet");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(palette), "focus stays in the palette");
     assert!(violations(&view, &mut cx).is_empty());
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
@@ -9704,13 +9652,6 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
     assert!(root.join("notes.txt").exists(), "cancel runs nothing");
     assert!(focused(&mut cx));
 
-    cx.simulate_keystrokes("cmd-j");
-    settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View? is open");
-    click_scrim(&mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
-    assert!(focused(&mut cx));
-
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("down");
@@ -9734,17 +9675,13 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
 fn clicking_inside_a_sheet_keeps_it_open(cx: &mut TestAppContext) {
     let root = fixture("sheet-inside");
     let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-j");
-    settle(&view, &mut cx);
-    let panel = cx.debug_bounds("sheet-panel").expect("the panel is laid out");
-    cx.simulate_click(panel.center(), Default::default());
-    settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "a click inside does not dismiss");
-
-    cx.simulate_keystrokes("escape");
     cx.simulate_keystrokes("down down cmd-alt-backspace");
     settle(&view, &mut cx);
     assert!(sheet_open(&view, &cx));
+    let panel = cx.debug_bounds("sheet-panel").expect("the panel is laid out");
+    cx.simulate_click(panel.center(), Default::default());
+    settle(&view, &mut cx);
+    assert!(sheet_open(&view, &cx), "a click inside does not dismiss");
     let cancel = cx.debug_bounds("sheet-cancel").expect("the Cancel button is laid out");
     cx.simulate_click(cancel.center(), Default::default());
     settle(&view, &mut cx);
@@ -14860,10 +14797,6 @@ fn static_selector(selector: &str) -> Option<&'static str> {
         "search-idle" => "search-idle",
         "palette-commands-token" => "palette-commands-token",
         "palette-empty" => "palette-empty",
-        "why-open-file" => "why-open-file",
-        "why-reset" => "why-reset",
-        "why-defaults" => "why-defaults",
-        "why-close" => "why-close",
         "sheet-panel" => "sheet-panel",
         "sheet-scrim" => "sheet-scrim",
         "sheet-confirm" => "sheet-confirm",
@@ -18298,7 +18231,7 @@ fn audit_batch_one_ancestor_path_segment_springs(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut TestAppContext) {
+fn audit_batch_one_virtual_tab_refuses_folder_commands(cx: &mut TestAppContext) {
     let root = fixture("audit-virtual-commands");
     let (view, mut cx) = open(cx, &root);
     write_config(
@@ -18314,11 +18247,8 @@ fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut T
     });
     wait_for_pane_search(&view, &mut cx);
     view.update_in(&mut cx, |w, window, cx| w.previous_tab(&PreviousTab, window, cx));
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()));
     view.update_in(&mut cx, |w, window, cx| w.next_tab(&NextTab, window, cx));
     settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
 
     for (command, expected) in [
         (palette::CommandId::Paste, "Open a folder to use this command"),

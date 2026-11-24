@@ -40,7 +40,7 @@ It’s native Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/cra
 - Content search with live results and visible skip rules (`node_modules` never slows you down).
 - Undo for every file operation, trash and batch rename included; a copy queue you can pause, with conflicts shown before it starts.
 - A Vim layer, and every key rebindable.
-- Views that follow the folder (`views.toml`), with Why This View? to explain them.
+- Views that follow the folder (`views.toml`), edited in `views.toml`.
 - Git badges, lines changed, a diff tab and a review sheet; a Projects section for the repositories in one folder.
 - A path bar you can type into, Open Terminal Here, spring-loaded folders with a way back.
 - Themes and looks that go far past light, dark and an accent colour: ten built-in themes plus any Base24 theme, shared with your other apps; five sidebar styles; icon packs layered over Outline or Finder icons; your own font, size and translucency; motion and sound. Almost everything is a setting, so Crow can look the way you want.

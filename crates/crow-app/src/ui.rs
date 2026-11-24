@@ -1766,7 +1766,7 @@ pub fn remove_saved_query(id: SavedQueryId, completion: Option<SavedQueryWriteCo
 pub type SavedQueryWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;
 
 /// Change `[defaults]` in views.toml. The queued reload publishes a new views
-/// generation, so browser panes and Why This View apply it like any edit.
+/// generation, so browser panes apply it like any edit.
 pub fn save_defaults_change(change: crow_core::DefaultsChange, completion: Option<ViewsWriteCompletion>, cx: &mut App) {
     write_config_with_completion(
         VIEWS,

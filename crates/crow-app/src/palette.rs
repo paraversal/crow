@@ -19,7 +19,7 @@ use crate::actions::{
     PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView,
     SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo,
     ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview,
-    ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
+    ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
 };
 use crate::keys::KeyScope;
 
@@ -134,7 +134,6 @@ pub enum CommandId {
     SaveSearch,
     EditSavedSearch,
     RemoveSavedSearch,
-    WhyThisView,
     UseViewAsDefaults,
     ResetFolderView,
     ShowThemePicker,
@@ -251,7 +250,6 @@ impl CommandId {
             CommandId::SaveSearch => "save-search",
             CommandId::EditSavedSearch => "edit-saved-search",
             CommandId::RemoveSavedSearch => "remove-saved-search",
-            CommandId::WhyThisView => "why-this-view",
             CommandId::UseViewAsDefaults => "use-view-as-defaults",
             CommandId::ResetFolderView => "reset-folder-view",
             CommandId::ShowThemePicker => "show-theme-picker",
@@ -642,14 +640,6 @@ pub const COMMANDS: &[Command] = &[
         action: &crate::actions::ChooseListColumns,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 1, title: "Choose List Columns…" }),
-        palette: true,
-    },
-    Command {
-        id: CommandId::WhyThisView,
-        label: "Why This View?",
-        action: &WhyThisView,
-        scope: KeyScope::Window,
-        menu: Some(MenuSlot { menu: MenuName::View, section: 1, title: "Why This View?" }),
         palette: true,
     },
     Command {

@@ -134,7 +134,6 @@ actions!(
         CollapseSection,
         Eject,
         // View settings and themes
-        WhyThisView,
         UseViewAsDefaults,
         ResetFolderView,
         ShowThemePicker,
@@ -342,7 +341,6 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("alt-up", PreviousGroup, Some("Sidebar")),
         KeyBinding::new("alt-down", NextGroup, Some("Sidebar")),
         KeyBinding::new("cmd-e", Eject, Some("Sidebar")),
-        KeyBinding::new("cmd-j", WhyThisView, Some("Crow")),
         KeyBinding::new("cmd-alt-t", ShowThemePicker, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("ThemePicker")),
         KeyBinding::new("down", MoveDown, Some("ThemePicker")),
@@ -413,7 +411,6 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-.", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-p", NoAction {}, Some("Sheet")),
         KeyBinding::new("ctrl-cmd-t", NoAction {}, Some("Sheet")),
-        KeyBinding::new("cmd-j", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-alt-t", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-k", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-f", NoAction {}, Some("Sheet")),

@@ -61,7 +61,7 @@ mod tests {
         let file = dir.path().join("state/palette-commands.json");
         let mut recent = RecentCommands::default();
         recent.push("view-as-columns", 5);
-        recent.push("why-this-view", 5);
+        recent.push("view-as-icons", 5);
         recent.save(&file).unwrap();
         assert_eq!(RecentCommands::load(&file), recent);
     }

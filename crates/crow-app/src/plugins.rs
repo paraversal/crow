@@ -609,11 +609,6 @@ pub struct ColumnValue {
     pub spoken: Option<String>,
 }
 
-pub fn column_title(cx: &App, id: &crow_core::ExtensionId) -> Option<String> {
-    let plugins = cx.try_global::<Plugins>()?;
-    Some(plugins.surfaces.snapshot().extension(id)?.descriptor.title.clone())
-}
-
 pub fn column_value(
     cx: &App,
     id: &crow_core::ExtensionId,

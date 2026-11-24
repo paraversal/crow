@@ -732,6 +732,7 @@ impl Pane {
         self.mode
     }
 
+    #[cfg(test)]
     pub fn icon_size(&self) -> IconSize {
         self.icon_size
     }
@@ -2133,6 +2134,7 @@ impl Pane {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub fn icon_caption(&self) -> Option<&str> {
         self.icon_caption.as_deref()
     }
