@@ -4,7 +4,7 @@ All notable changes to Crow are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Crow uses
 [semantic versioning](https://semver.org/).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-24
 
 The first public release: a Finder-style file explorer for macOS that is fast on very large
 folders, keyboard-first, and themeable. Free software under the GPL-3.0-or-later.
