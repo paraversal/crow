@@ -447,7 +447,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 touch(&folder.join(file), "202603081030")?;
             }
             Ok(Plan {
-                window: (1000.0, 330.0),
+                window: (1000.0, 520.0),
                 folder,
                 extra: Extra {
                     settings: "show_preview = true\n".into(),
@@ -456,7 +456,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                     ..Default::default()
                 },
                 // Duplicate the first file, make a folder (Return keeps its name), trash the second file.
-                keys: "down cmd-d cmd-shift-n enter down cmd-backspace",
+                keys: "down cmd-d cmd-shift-n enter down cmd-backspace cmd-a cmd-d",
                 git_diff: false,
                 activity: true,
                 crop: Crop::of(&["info-tabs", "info-body"]),
@@ -560,7 +560,43 @@ impl Session {
         Ok(())
     }
 
-    fn show_activity(&mut self) -> Result<(), String> {
+    fn show_activity(&mut self, scratch: &Scratch) -> Result<(), String> {
+        // A long move in flight with two transfers behind it. The paths are never touched:
+        // the head is synthesized, so the engine does not run.
+        let archive = scratch.0.join("Old");
+        let paths = |names: &[&str], dir: &str| -> std::sync::Arc<[PathBuf]> {
+            names.iter().map(|name| scratch.0.join(dir).join(name)).collect()
+        };
+        let scans: Vec<String> = (1..=40).map(|n| format!("Scan {n:02}.tiff")).collect();
+        let scans: Vec<&str> = scans.iter().map(String::as_str).collect();
+        self.cx.update(|cx| {
+            operations::test_active_in(
+                cx,
+                crow_fs::ops::Request::Move { paths: paths(&scans, "Scans"), into: archive.clone() },
+                operations::JobPhase::Running,
+                crow_fs::ops::Progress {
+                    done_items: 18,
+                    total_items: 40,
+                    done_bytes: 1_100_000_000,
+                    total_bytes: 2_400_000_000,
+                    ..Default::default()
+                },
+            );
+            operations::enqueue(
+                crow_fs::ops::Request::Copy {
+                    paths: paths(&["Chapter 1.md", "Chapter 2.md"], "Documents"),
+                    into: archive.clone(),
+                },
+                None,
+                cx,
+            );
+            operations::enqueue(
+                crow_fs::ops::Request::Copy { paths: paths(&["Raw"], "Pictures"), into: scratch.0.join("Backup") },
+                None,
+                cx,
+            );
+        });
+        self.pump(100);
         self.cx
             .update_window(self.window.into(), |_, window, cx| {
                 window.dispatch_action(Box::new(crate::actions::ToggleActivity), cx)
@@ -638,7 +674,7 @@ pub fn render_with(name: &str, theme: &str, whole_window: bool, scale: u32) -> R
         session.show_git_diff()?;
     }
     if plan.activity {
-        session.show_activity()?;
+        session.show_activity(&scratch)?;
     }
     let window_image = session.settled_image()?;
     if whole_window {

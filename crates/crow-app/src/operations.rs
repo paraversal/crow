@@ -1364,9 +1364,9 @@ pub fn end_maintenance(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Tests only: install a synthesized head with a stable engine id so event
-/// injection can drive the coordinator without a worker thread.
-#[cfg(test)]
+/// Tests and the component shots: install a synthesized head with a stable engine id so
+/// event injection can drive the coordinator without a worker thread.
+#[cfg(any(test, feature = "component-shots"))]
 pub fn test_active_in(cx: &mut App, request: ops::Request, phase: JobPhase, progress: Progress) -> (RequestId, JobId) {
     let ops = cx.global_mut::<Operations>();
     ops.next_request += 1;

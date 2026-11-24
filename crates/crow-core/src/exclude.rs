@@ -57,7 +57,7 @@ names = [".Trashes"]
 
 [backup-excluded]
 # Folders carrying the Time Machine exclusion mark, whichever tool set it: `tmutil
-# addexclusion`, Finder's Options, or asimeow (https://github.com/paraversal/asimeow),
+# addexclusion`, Finder's Options, or asimeow (https://github.com/mdnmdn/asimeow),
 # which marks dev folders such as node_modules and target. Off by default: "not backed up"
 # does not mean "never search it". Exclusions made with `tmutil addexclusion -p` leave no
 # mark on the folder, so they do not count. Checking costs one attribute read per folder.
