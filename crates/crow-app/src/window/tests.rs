@@ -3410,6 +3410,42 @@ fn gallery_shows_the_same_text_preview_pipeline(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_divider_resizes_the_rail_and_double_click_resets_it(cx: &mut TestAppContext) {
+    let root = fixture("gallery-divider");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    let rail = |cx: &mut VisualTestContext| cx.debug_bounds("gallery-rail").expect("rail").size.width;
+    let before = rail(&mut cx);
+    let start = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(start + gpui::point(px(-20.), px(0.)), Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(start + gpui::point(px(-20.), px(0.)), gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(rail(&mut cx), before - px(20.), "the rail follows the pointer");
+    let far = start + gpui::point(px(2000.), px(0.));
+    let divider = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_mouse_down(divider, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(far, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(far, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    let widest = rail(&mut cx);
+    assert!(widest > before && widest < px(1280.) - px(200.) + px(1.), "the preview keeps room: {widest:?}");
+    let divider = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: divider,
+        modifiers,
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_up(divider, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(rail(&mut cx), before, "a double click restores the default width");
+}
+
+#[gpui::test]
 fn gallery_drops_out_of_order_pair_replies(cx: &mut TestAppContext) {
     let root = fixture("gallery-stale");
     let alpha = root.join("alpha");
@@ -7945,6 +7981,59 @@ fn palette_reveals_a_pasted_file_path_however_it_is_quoted(cx: &mut TestAppConte
         assert_eq!(dir(&view, &cx), root.join("alpha/inner"), "{text:?} goes to the file's folder");
         assert_eq!(selected_names(&view, &cx), ["My File.txt"], "{text:?} selects the file");
     }
+}
+
+#[gpui::test]
+fn palette_dot_paths_are_relative_to_the_focused_folder(cx: &mut TestAppContext) {
+    let root = fixture("palette-dot-paths");
+    std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
+    std::fs::write(root.join(".hidden/inside.txt"), "x").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("alpha"), cx));
+    settle(&view, &mut cx);
+
+    // `./inner/` lists the focused folder's child; Return goes there.
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("./inner/");
+    settle_palette(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.palette.as_ref().is_some_and(|p| p.path.is_some())), "a path query");
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert_eq!(
+        rows.get(1).map(String::as_str),
+        Some(root.join("alpha/inner").display().to_string().as_str()),
+        "{rows:?}"
+    );
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha/inner"), "Return opens the folder the list showed");
+
+    // `../` and a partial: the sibling matching `be`.
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("../../be");
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert!(rows.iter().any(|row| row.ends_with("/beta")), "{rows:?}");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("beta"));
+
+    // A dot name without a slash stays an ordinary query; with a slash it lists the folder.
+    pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.to_path_buf(), cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(".hid");
+    settle_palette(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.palette.as_ref().is_some_and(|p| p.path.is_none())), ".hid is not a path");
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(".hidden/");
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert_eq!(rows.get(1).map(String::as_str), Some(root.join(".hidden").display().to_string().as_str()), "{rows:?}");
+    cx.simulate_input("ins");
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert!(rows.iter().any(|row| row.ends_with("/.hidden/inside.txt")), "a partial finds its files: {rows:?}");
 }
 
 #[gpui::test]

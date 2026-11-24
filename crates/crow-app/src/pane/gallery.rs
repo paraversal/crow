@@ -40,6 +40,9 @@ const SAMPLE_ROWS: usize = 12;
 const SAMPLE_EXAMINED: usize = 256;
 const RAIL_MIN: f32 = 170.0;
 const RAIL_MAX: f32 = 300.0;
+/// Narrowest rail a drag can leave, and the preview width it always keeps.
+const RAIL_DRAG_MIN: f32 = 140.0;
+const PREVIEW_MIN: f32 = 200.0;
 pub(super) const ROW_PADDING: f32 = 10.0;
 pub(super) const ICON_GAP: f32 = 8.0;
 pub(super) const METADATA_LINE_HEIGHT: f32 = 14.0;
@@ -59,6 +62,10 @@ pub(super) struct Gallery {
     second_surface: crate::plugins::SurfaceId,
     samples: [Sample; 2],
     pub reveal: Option<Instant>,
+    /// The rail width the user dragged to; `None` follows the window width.
+    rail_width: Option<f32>,
+    /// Pointer x and rail width when a drag of the divider began.
+    rail_drag: Option<(f32, f32)>,
 }
 
 struct Second {
@@ -113,6 +120,8 @@ impl Gallery {
             second_surface: crate::plugins::new_surface(),
             samples: Default::default(),
             reveal: None,
+            rail_width: None,
+            rail_drag: None,
         }
     }
 
@@ -441,8 +450,11 @@ impl Second {
 }
 
 /// One frame of the Gallery body.
-fn rail_width(width: Pixels) -> f32 {
+fn rail_width(width: Pixels, dragged: Option<f32>) -> f32 {
     let width = f32::from(width).max(1.0);
+    if let Some(dragged) = dragged {
+        return dragged.clamp(RAIL_DRAG_MIN, (width - PREVIEW_MIN).max(RAIL_DRAG_MIN));
+    }
     // Reserve room for the preview. When neither preferred width fits,
     // the rail and preview can share the available space equally.
     let available = (width - 145.0).max(width * 0.5);
@@ -457,7 +469,7 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
     };
     let width = f32::from(pane.content_width).max(1.0);
     let theme = cx.global::<crate::ui::Ui>().theme.clone();
-    let rail_width = rail_width(pane.content_width);
+    let rail_width = rail_width(pane.content_width, pane.gallery.rail_width);
     let preview_width = (width - rail_width - 1.0).max(0.0);
     let entries = &pane.gallery.entries;
     let cursor = pane.cursor_entry(cx).map(|entry| entry.path.clone());
@@ -586,6 +598,48 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
         .on_children_prepainted(move |children, _, _| preview_bounds.set(children.get(1).copied()))
         .child(rail)
         .child(div().flex_1().min_w_0().h_full().flex().flex_col().overflow_hidden().child(preview))
+        .child(
+            div()
+                .id("gallery-divider")
+                .debug_selector(|| "gallery-divider".into())
+                .role(Role::Splitter)
+                .aria_label("Resize file list")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(rail_width - 4.))
+                .w(px(8.))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |pane, event: &MouseDownEvent, _, cx| {
+                        if event.click_count >= 2 {
+                            pane.gallery.rail_width = None;
+                            pane.gallery.rail_drag = None;
+                        } else {
+                            pane.gallery.rail_drag = Some((f32::from(event.position.x), rail_width));
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
+        .when(pane.gallery.rail_drag.is_some(), |gallery| {
+            gallery.child(super::column_resize_tracker(
+                cx.weak_entity(),
+                |pane, x, cx| {
+                    if let Some((start_x, start)) = pane.gallery.rail_drag {
+                        pane.gallery.rail_width = Some(start + x - start_x);
+                        cx.notify();
+                    }
+                },
+                |pane, cx| {
+                    if pane.gallery.rail_drag.take().is_some() {
+                        cx.notify();
+                    }
+                },
+            ))
+        })
         .when(pane.drop_target.as_ref().is_some_and(|target| target.rows.is_none()), |gallery| {
             gallery.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
         })
@@ -632,7 +686,7 @@ fn render_rows(
     let icons = pane.icon_resolver(0, cx);
     let thumbnails = crate::thumbnails::service(cx);
     let gate = crate::thumbnails::readable_gate(cx);
-    let width = rail_width(pane.content_width);
+    let width = rail_width(pane.content_width, pane.gallery.rail_width);
     let wide = width >= 240.0;
     let name_room =
         px((width - 1.0 - 2.0 * LIST_SIDE_INSET - 2.0 * ROW_PADDING - THUMBNAIL_POINTS as f32 - ICON_GAP).max(0.0));
@@ -1205,4 +1259,19 @@ fn folder_heading(
                 ))
                 .child(div().text_size(px(11.)).text_color(muted).child(detail)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dragged_rail_leaves_the_preview_its_room_even_in_a_narrow_window() {
+        let narrow = px(640.);
+        assert_eq!(rail_width(narrow, Some(10_000.0)), 640.0 - PREVIEW_MIN, "never past the preview's room");
+        assert_eq!(rail_width(narrow, Some(-50.0)), RAIL_DRAG_MIN, "never narrower than the floor");
+        assert_eq!(rail_width(narrow, Some(260.0)), 260.0);
+        assert_eq!(rail_width(px(300.), Some(10_000.0)), RAIL_DRAG_MIN, "a tiny pane keeps the rail's floor");
+        assert!((RAIL_MIN..=RAIL_MAX).contains(&rail_width(narrow, None)), "no drag follows the window");
+    }
 }

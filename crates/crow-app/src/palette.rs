@@ -1445,9 +1445,11 @@ pub fn plugin_command_matches(query: &str, commands: &[PluginCommandItem]) -> Ve
 
 /// The path mode's parent and partial, when `query` looks like a path: `/…`,
 /// `~/…` or exactly `~`, also pasted in quotes, shell-escaped or as a `file://` URL.
-/// The text before the last `/` is the parent.
+/// A dot path with a slash (`./x`, `../x`, `.config/themes`) is relative to the
+/// focused folder. The text before the last `/` is the parent.
 pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, String)> {
-    let query = crow_core::clean_pasted_path(query)?;
+    let query = crow_core::clean_pasted_path(query)
+        .or_else(|| Some(query.trim()).filter(|q| q.starts_with('.') && q.contains('/')).map(str::to_owned))?;
     let (parent, partial) = match query.rfind('/') {
         Some(i) => (&query[..=i], &query[i + 1..]),
         None => (query.as_str(), ""),
@@ -1757,6 +1759,11 @@ mod tests {
         assert_eq!(path_query("/home/me/x/", cwd, home), Some((PathBuf::from("/home/me/x"), "".into())));
         assert_eq!(path_query("alpha", cwd, home), None, "a plain query is not a path");
         assert_eq!(path_query("a/b", cwd, home), None);
+        assert_eq!(
+            path_query(".config/themes", cwd, home),
+            Some((PathBuf::from("/home/me/Files/.config"), "themes".into()))
+        );
+        assert_eq!(path_query("../x", cwd, home), Some((PathBuf::from("/home/me"), "x".into())));
     }
 
     #[test]
