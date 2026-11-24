@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crow_core::motion::{self, Effective, Event, MotionMode, SoundSet};
+use crow_core::motion::{self, Effective, MotionMode, SoundSet};
 use crow_core::{
     DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode, ViewMode,
 };
@@ -2975,7 +2975,7 @@ impl Render for SettingsWindow {
             false,
             ControlId::PlaySound.enabled(cx),
             self.style(ControlId::PlaySound, window, &theme),
-            callback(cx, |_, _, cx| crate::feedback::play(Event::Trash, cx)),
+            callback(cx, |_, _, cx| crate::feedback::play_set(cx)),
         );
         let sound_row = controls::segmented(
             self.meta(ControlId::Sound, cx),
@@ -6627,7 +6627,8 @@ permissions = { fs = "none" }
     }
     #[gpui::test]
     fn play_sounds_the_set_in_turn_and_is_off_with_sounds_off(cx: &mut TestAppContext) {
-        let (_view, mut vcx) = open_settings(cx);
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::General);
         let plays = |vcx: &mut VisualTestContext| {
             vcx.update(|_, cx| {
                 crate::effects::recording(cx)
@@ -6641,8 +6642,11 @@ permissions = { fs = "none" }
         vcx.update(|_, cx| {
             cx.global_mut::<Ui>().feedback.sound = SoundSet::Crow;
             assert!(ControlId::PlaySound.enabled(cx));
-            crate::feedback::play_set(cx);
         });
+        draw(&mut vcx);
+        // Through the real button: it once played only the trash sound.
+        let play = vcx.debug_bounds("settings-play-sound").expect("the Play button is drawn").center();
+        vcx.simulate_click(play, gpui::Modifiers::default());
         assert_eq!(plays(&mut vcx), 1, "the first sound is immediate");
         vcx.executor().advance_clock(std::time::Duration::from_secs(5));
         vcx.run_until_parked();
