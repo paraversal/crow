@@ -85,21 +85,15 @@ impl CrowWindow {
         if self.sheet.is_some() {
             return;
         }
-        if self.activity_owns_focus(window, cx) {
-            self.focus_center(window, cx);
-        }
+        // Show Activity: opens the right sidebar on Activity and focuses it. Pressing it
+        // again changes nothing (⇧⌘P or the chevron hides the sidebar).
         let was_visible = self.info.read(cx).visible();
-        let show = !self.activity_open(cx);
         self.info.update(cx, |info, cx| {
-            info.set_visible(show, cx);
-            if show {
-                info.set_tab(InfoTab::Activity, cx);
-            }
+            info.set_visible(true, cx);
+            info.set_tab(InfoTab::Activity, cx);
         });
         self.begin_pane_slide(was_visible, cx);
-        if show {
-            window.focus(&self.activity_focus, cx);
-        }
+        window.focus(&self.activity_focus, cx);
         cx.notify();
     }
 

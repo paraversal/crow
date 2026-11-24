@@ -3266,16 +3266,18 @@ impl Pane {
 
     /// What decides which context-menu lines can act on the focused folder.
     pub fn menu_state(&self, cx: &gpui::App) -> MenuState {
-        self.menu_state_with_paste(true, cx)
-    }
-
-    /// The menu state; `can_paste` reads the system pasteboard only when `paste` is set.
-    pub fn menu_state_with_paste(&self, paste: bool, cx: &gpui::App) -> MenuState {
         let folder = self.focused_folder().read(cx);
         let (_, selected_folders) = folder.selected_bytes();
+        MenuState { selected: folder.selected_count(), selected_folders, ..self.folder_menu_state(true, cx) }
+    }
+
+    /// The folder menu's state (⌃⌘M, the toolbar and its pins): it acts on one
+    /// folder whatever is selected. `can_paste` reads the system pasteboard only
+    /// when `paste` is set (the toolbar draws every frame).
+    pub fn folder_menu_state(&self, paste: bool, cx: &gpui::App) -> MenuState {
         MenuState {
-            selected: folder.selected_count(),
-            selected_folders,
+            selected: 0,
+            selected_folders: 0,
             can_paste: paste && !crate::operations::pasteboard_paths(cx).0.is_empty(),
         }
     }

@@ -389,6 +389,7 @@ impl CrowWindow {
             // Another window coming to the front mid-drag must be able to receive it,
             // even while the pointer stays inside Crow's bounds.
             cx.observe_window_activation(window, |this, window, cx| {
+                crate::input_diag::log_activation(window);
                 if window.is_window_active() {
                     // Tags made in Finder while Crow was in the background.
                     crate::tags::refresh_if_stale(cx);
@@ -1400,7 +1401,7 @@ impl CrowWindow {
                 let state = if has_folder
                     && items.iter().any(|item| matches!(item, crow_core::toolbar::ToolbarItem::Pinned(_)))
                 {
-                    pane.menu_state_with_paste(pinned("paste"), cx)
+                    pane.folder_menu_state(pinned("paste"), cx)
                 } else {
                     Default::default()
                 };
@@ -2105,6 +2106,25 @@ impl CrowWindow {
                 });
             }
             palette::CommandId::NewTab => self.open_tab_at(target, window, cx),
+            palette::CommandId::CopyPath | palette::CommandId::ShowInFinder | palette::CommandId::OpenTerminal => {
+                self.run_on_path(id, target, is_dir, cx);
+            }
+            palette::CommandId::AddToSidebar => {
+                self.sidebar.update(cx, |sidebar, cx| sidebar.add_to_first_group(target, cx))
+            }
+            // These act on the folder shown, which only that segment offers.
+            palette::CommandId::NewFolder | palette::CommandId::NewFile | palette::CommandId::Paste => {
+                self.focus_center(window, cx);
+                window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Copy Path, Show in Finder and Open Terminal on one given item; false for
+    /// any other command.
+    fn run_on_path(&mut self, id: palette::CommandId, target: PathBuf, is_dir: bool, cx: &mut Context<Self>) -> bool {
+        match id {
             palette::CommandId::CopyPath => {
                 crate::effects::write_text(target.to_string_lossy().into_owned(), cx);
                 operations::message("Copied path", false, cx);
@@ -2119,15 +2139,19 @@ impl CrowWindow {
                 }
             }
             palette::CommandId::OpenTerminal => self.pane().update(cx, |pane, cx| pane.open_terminal_in(target, cx)),
-            palette::CommandId::AddToSidebar => {
-                self.sidebar.update(cx, |sidebar, cx| sidebar.add_to_first_group(target, cx))
-            }
-            // These act on the folder shown, which only that segment offers.
-            palette::CommandId::NewFolder | palette::CommandId::NewFile | palette::CommandId::Paste => {
-                self.focus_center(window, cx);
-                window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
-            }
-            _ => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// A folder-menu line or pin: every command acts on the folder that "New items
+    /// go in" names (the shown folder, or the selected one), never on the selection.
+    fn run_folder_command(&mut self, id: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.pane().read(cx).target_folder(cx);
+        if !self.run_on_path(id, target, true, cx) {
+            // New Folder, New File and Paste pick the same folder themselves.
+            self.focus_center(window, cx);
+            window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
         }
     }
 
@@ -2136,7 +2160,7 @@ impl CrowWindow {
         if self.overlay_open() || self.path_edit.is_some() || self.pane().read(cx).folder().is_none() {
             return;
         }
-        let state = self.pane().read(cx).menu_state(cx);
+        let state = self.pane().read(cx).folder_menu_state(true, cx);
         let pins = cx.global::<Ui>().settings.toolbar_pins.clone();
         let entries = crate::context_menu::toolbar_entries(state, &pins, cx);
         self.open_native_menu(entries, window, cx, |this, chosen, window, cx| {
@@ -2184,8 +2208,7 @@ impl CrowWindow {
             return;
         }
         if let Some(id) = slots.get(chosen).copied().flatten() {
-            self.focus_center(window, cx);
-            window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+            self.run_folder_command(id, window, cx);
         }
     }
 
@@ -2196,10 +2219,9 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// A pinned button: run its command on the folder shown, as the menu line does.
+    /// A pinned button: run its command as the folder menu's line does.
     fn run_pinned(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_center(window, cx);
-        window.dispatch_action(crate::context_menu::command(command).action.boxed_clone(), cx);
+        self.run_folder_command(command, window, cx);
     }
 
     /// Right-click on a pinned toolbar button: the one line, Unpin.

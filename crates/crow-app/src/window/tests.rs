@@ -3906,7 +3906,7 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
     clear_running(&mut cx);
 }
 
-/// Activity is a tab of the right sidebar, so it shows in every view and ⌥⌘L toggles it.
+/// Activity is a tab of the right sidebar, so it shows in every view; ⌥⌘L shows it and pressing it again changes nothing.
 #[gpui::test]
 fn activity_is_a_right_sidebar_tab_in_every_view(cx: &mut TestAppContext) {
     use crate::info_pane::InfoTab;
@@ -3928,7 +3928,17 @@ fn activity_is_a_right_sidebar_tab_in_every_view(cx: &mut TestAppContext) {
         assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: Esc leaves it open and returns to the list");
         cx.simulate_keystrokes("alt-cmd-l");
         settle(&view, &mut cx);
-        assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L again closes it");
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L again keeps it open");
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}: and on Activity");
+        cx.simulate_keystrokes("alt-cmd-p");
+        settle(&view, &mut cx);
+        assert_ne!(tab(&view, &cx), InfoTab::Activity, "{name}: another tab");
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}: ⌥⌘L from another tab switches back");
+        cx.simulate_keystrokes("shift-cmd-p");
+        settle(&view, &mut cx);
+        assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⇧⌘P hides the sidebar");
     }
 }
 
@@ -10951,6 +10961,43 @@ fn the_toolbar_folder_menu_pins_commands_as_buttons(cx: &mut TestAppContext) {
     assert_eq!(pins(&cx), Vec::<String>::new());
     assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none());
     cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+}
+
+/// The folder menu's pins act on the folder "New items go in" names, never on
+/// the selection or the cursor row.
+#[gpui::test]
+fn pinned_folder_commands_follow_the_folder_target(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("pins-folder-target");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_resize(size(px(1200.), px(760.)));
+    write_config(&view, &mut cx, "settings.toml", "toolbar_pins = [\"open-terminal\", \"show-in-finder\"]\n");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "a folder row is selected");
+    let click = |cx: &mut VisualTestContext, id: &'static str| {
+        let button = cx.debug_bounds(id).expect("pinned button").center();
+        cx.simulate_click(button, gpui::Modifiers::default());
+        cx.run_until_parked();
+    };
+
+    // Default: the folder shown, though a folder is selected.
+    effect_calls(&mut cx);
+    click(&mut cx, "toolbar-pin-open-terminal");
+    click(&mut cx, "toolbar-pin-show-in-finder");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenTerminal(_, p) if *p == root.to_path_buf())), "{calls:?}");
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenFolderInFinder(p) if *p == root.to_path_buf())), "{calls:?}");
+
+    // "Selected folder": the selected folder.
+    write_config(&view, &mut cx, "settings.toml", "toolbar_pins = [\"open-terminal\"]\nfolder_target = \"selected\"\n");
+    settle(&view, &mut cx);
+    effect_calls(&mut cx);
+    click(&mut cx, "toolbar-pin-open-terminal");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenTerminal(_, p) if *p == root.join("alpha"))), "{calls:?}");
+    let state = pane(&view, &cx).read_with(&cx, |pane, cx| pane.folder_menu_state(false, cx));
+    let enabled = crate::context_menu::enabled(crate::palette::CommandId::OpenTerminal, state);
+    assert!(enabled, "the folder menu's Open Terminal stays enabled with any selection");
 }
 
 #[gpui::test]
