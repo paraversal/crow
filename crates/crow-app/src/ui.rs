@@ -1777,6 +1777,17 @@ pub fn remove_saved_query(id: SavedQueryId, completion: Option<SavedQueryWriteCo
     );
 }
 
+/// Turn a search skip set on or off in `exclude.toml` (Settings ▸ Search). The reload that
+/// follows restarts a running search with the new rules.
+pub fn set_exclude_enabled(set: crow_core::SetName, enabled: bool, cx: &mut App) {
+    write_config(EXCLUDE, move |config, _| crow_core::save_exclude_enabled(config, set, enabled), cx);
+}
+
+/// Replace a skip set's folder names in `exclude.toml`.
+pub fn set_exclude_names(set: crow_core::SetName, names: Vec<String>, cx: &mut App) {
+    write_config(EXCLUDE, move |config, _| crow_core::save_exclude_names(config, set, &names), cx);
+}
+
 pub type SavedQueryWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;
 
 /// Change `[defaults]` in views.toml. The queued reload publishes a new views

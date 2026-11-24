@@ -54,6 +54,15 @@ dot_folders = true
 enabled = false
 paths = ["/System", "/Library/Caches"]
 names = [".Trashes"]
+
+[backup-excluded]
+# Folders carrying the Time Machine exclusion mark, whichever tool set it: `tmutil
+# addexclusion`, Finder's Options, or asimeow (https://github.com/paraversal/asimeow),
+# which marks dev folders such as node_modules and target. Off by default: "not backed up"
+# does not mean "never search it". Exclusions made with `tmutil addexclusion -p` leave no
+# mark on the folder, so they do not count. Checking costs one attribute read per folder.
+enabled = false
+time_machine = true
 "#;
 
 const DEV_NAMES: &[&str] = &[
@@ -87,11 +96,19 @@ pub enum SetName {
     Media,
     Hidden,
     System,
+    /// Folders marked as excluded from Time Machine backups.
+    BackupExcluded,
 }
 
 impl SetName {
-    pub const ALL: [SetName; 5] =
-        [SetName::Dev, SetName::Dependencies, SetName::Media, SetName::Hidden, SetName::System];
+    pub const ALL: [SetName; 6] = [
+        SetName::Dev,
+        SetName::Dependencies,
+        SetName::Media,
+        SetName::Hidden,
+        SetName::System,
+        SetName::BackupExcluded,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -100,6 +117,7 @@ impl SetName {
             SetName::Media => "media",
             SetName::Hidden => "hidden",
             SetName::System => "system",
+            SetName::BackupExcluded => "backup-excluded",
         }
     }
 
@@ -112,6 +130,7 @@ impl SetName {
                 paths: Vec::new(),
                 sentinel: dev_sentinel(),
                 dot_folders: false,
+                time_machine: false,
             },
             SetName::Dependencies => SetRules {
                 enabled: false,
@@ -119,6 +138,7 @@ impl SetName {
                 paths: Vec::new(),
                 sentinel: BTreeMap::new(),
                 dot_folders: false,
+                time_machine: false,
             },
             SetName::Media => SetRules {
                 enabled: false,
@@ -126,6 +146,7 @@ impl SetName {
                 paths: Vec::new(),
                 sentinel: BTreeMap::new(),
                 dot_folders: false,
+                time_machine: false,
             },
             SetName::Hidden => SetRules {
                 enabled: false,
@@ -133,6 +154,7 @@ impl SetName {
                 paths: Vec::new(),
                 sentinel: BTreeMap::new(),
                 dot_folders: true,
+                time_machine: false,
             },
             SetName::System => SetRules {
                 enabled: false,
@@ -140,6 +162,15 @@ impl SetName {
                 paths: names(SYSTEM_PATHS),
                 sentinel: BTreeMap::new(),
                 dot_folders: false,
+                time_machine: false,
+            },
+            SetName::BackupExcluded => SetRules {
+                enabled: false,
+                names: Vec::new(),
+                paths: Vec::new(),
+                sentinel: BTreeMap::new(),
+                dot_folders: false,
+                time_machine: true,
             },
         }
     }
@@ -158,6 +189,8 @@ pub struct ExcludeSet {
     pub sentinel: Option<BTreeMap<String, Vec<String>>>,
     /// Skip every folder whose name starts with a dot.
     pub dot_folders: Option<bool>,
+    /// Skip every folder carrying the Time Machine exclusion mark.
+    pub time_machine: Option<bool>,
 }
 
 /// A set with the file's values and the built-in defaults merged in.
@@ -168,6 +201,7 @@ pub struct SetRules {
     pub paths: Vec<String>,
     pub sentinel: BTreeMap<String, Vec<String>>,
     pub dot_folders: bool,
+    pub time_machine: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -178,6 +212,8 @@ pub struct Exclude {
     pub media: ExcludeSet,
     pub hidden: ExcludeSet,
     pub system: ExcludeSet,
+    #[serde(rename = "backup-excluded")]
+    pub backup_excluded: ExcludeSet,
 }
 
 impl Default for Exclude {
@@ -206,6 +242,7 @@ impl Default for Exclude {
                 paths: Some(SYSTEM_PATHS.iter().map(|p| (*p).to_owned()).collect()),
                 ..ExcludeSet::default()
             },
+            backup_excluded: ExcludeSet { enabled: Some(false), time_machine: Some(true), ..ExcludeSet::default() },
         }
     }
 }
@@ -220,6 +257,7 @@ impl Exclude {
             SetName::Media => &self.media,
             SetName::Hidden => &self.hidden,
             SetName::System => &self.system,
+            SetName::BackupExcluded => &self.backup_excluded,
         };
         SetRules {
             enabled: configured.enabled.unwrap_or(built_in.enabled),
@@ -227,6 +265,7 @@ impl Exclude {
             paths: configured.paths.clone().unwrap_or(built_in.paths),
             sentinel: configured.sentinel.clone().unwrap_or(built_in.sentinel),
             dot_folders: configured.dot_folders.unwrap_or(built_in.dot_folders),
+            time_machine: configured.time_machine.unwrap_or(built_in.time_machine),
         }
     }
 
@@ -278,6 +317,42 @@ fn check_glob(set: &str, pattern: &str) -> Result<(), String> {
         .build()
         .map(|_| ())
         .map_err(|e| format!("set \"{set}\": bad pattern \"{pattern}\": {e}"))
+}
+
+/// Turn a set on or off in `exclude.toml`, keeping the file's comments and the rest of it.
+pub fn save_exclude_enabled(config_dir: &Path, set: SetName, enabled: bool) -> Result<(), String> {
+    edit_set(config_dir, set, |table| {
+        let mut value = toml_edit::Value::from(enabled);
+        if let Some(old) = table.get("enabled").and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        table["enabled"] = toml_edit::Item::Value(value);
+    })
+}
+
+/// Replace a set's folder names in `exclude.toml`, keeping the rest of the file.
+pub fn save_exclude_names(config_dir: &Path, set: SetName, names: &[String]) -> Result<(), String> {
+    edit_set(config_dir, set, |table| {
+        let array: toml_edit::Array = names.iter().map(String::as_str).collect();
+        let mut value = toml_edit::Value::Array(array);
+        if let Some(old) = table.get("names").and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        table["names"] = toml_edit::Item::Value(value);
+    })
+}
+
+fn edit_set(config_dir: &Path, set: SetName, edit: impl FnOnce(&mut toml_edit::Table)) -> Result<(), String> {
+    let path = exclude_path(config_dir);
+    crate::config::edit_toml(&path, DEFAULT_EXCLUDE, |doc| {
+        let table = doc
+            .entry(set.id())
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| format!("{}: `{}` is not a table", path.display(), set.id()))?;
+        edit(table);
+        Ok(())
+    })
 }
 
 pub fn exclude_path(config_dir: &Path) -> PathBuf {
@@ -363,10 +438,45 @@ mod tests {
     }
 
     #[test]
+    fn the_time_machine_set_is_off_by_default_and_marks_folders() {
+        let rules = Exclude::default().set(SetName::BackupExcluded);
+        assert!(!rules.enabled && rules.time_machine && rules.names.is_empty());
+        assert_eq!(SetName::BackupExcluded.id(), "backup-excluded");
+    }
+
+    #[test]
+    fn toggling_a_set_and_editing_its_names_keep_the_rest_of_the_file() {
+        let dir = temp_dir("edit");
+        load_exclude(&dir).unwrap();
+        save_exclude_enabled(&dir, SetName::Dev, false).unwrap();
+        save_exclude_enabled(&dir, SetName::BackupExcluded, true).unwrap();
+        save_exclude_names(&dir, SetName::Dev, &["node_modules".to_owned(), "out".to_owned()]).unwrap();
+        let text = fs::read_to_string(dir.join("exclude.toml")).unwrap();
+        assert!(text.contains("# Build and dependency folders developers rarely want"), "comments stay: {text}");
+        assert!(text.contains("[dev.sentinel]"), "{text}");
+        let exclude = load_exclude(&dir).unwrap();
+        assert!(!exclude.set(SetName::Dev).enabled);
+        assert_eq!(exclude.set(SetName::Dev).names, ["node_modules", "out"]);
+        assert!(exclude.set(SetName::BackupExcluded).enabled);
+        assert!(exclude.set(SetName::BackupExcluded).time_machine, "the mark rule stays on");
+        assert!(!exclude.set(SetName::Media).enabled, "other sets are untouched");
+    }
+
+    #[test]
+    fn editing_a_set_the_file_lacks_adds_its_table() {
+        let dir = temp_dir("edit-missing");
+        fs::write(dir.join("exclude.toml"), "[dev]\nenabled = true\n").unwrap();
+        save_exclude_enabled(&dir, SetName::BackupExcluded, true).unwrap();
+        let exclude = load_exclude(&dir).unwrap();
+        assert!(exclude.set(SetName::BackupExcluded).enabled);
+        assert!(exclude.set(SetName::BackupExcluded).time_machine);
+    }
+
+    #[test]
     fn disabled_sets_stay_off_until_enabled() {
         let exclude = Exclude::default();
         assert!(exclude.set(SetName::Dev).enabled);
-        for name in [SetName::Dependencies, SetName::Media, SetName::Hidden, SetName::System] {
+        for name in [SetName::Dependencies, SetName::Media, SetName::Hidden, SetName::System, SetName::BackupExcluded] {
             assert!(!exclude.set(name).enabled, "{} starts off", name.id());
         }
     }
