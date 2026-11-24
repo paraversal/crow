@@ -405,7 +405,7 @@ eviction) are out of scope for the test platform; check a cloud-backed folder by
 ## Component shots and the isolated Git grant
 
 The website's small shots (`docs/media/<name>-light.webp` and `-dark.webp`: `git-rows`,
-`git-sidebar`, `git-diff`, `compare-gallery`, `plugin-surfaces`) are single components cut out of
+`git-sidebar`, `git-diff`) are single components cut out of
 the real window, so a change to a native component changes its shot:
 
 ```bash

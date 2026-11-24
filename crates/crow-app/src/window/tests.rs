@@ -7808,6 +7808,33 @@ fn a_second_config_edit_wins_and_the_reload_waits_for_the_background(cx: &mut Te
 }
 
 #[gpui::test]
+fn a_theme_edited_in_settings_toml_applies_through_the_watcher_poll(cx: &mut TestAppContext) {
+    let root = fixture("config-theme-edit");
+    let (_view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
+    let dir = cx.read(|cx| cx.global::<Ui>().config_dir.clone());
+    std::fs::write(dir.join("settings.toml"), "theme = \"paper\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), "Paper", "the edited theme is applied");
+}
+
+#[gpui::test]
+fn a_reload_that_read_the_file_before_a_save_cannot_undo_the_save(cx: &mut TestAppContext) {
+    let root = fixture("config-save-race");
+    let (_view, mut cx) = open(cx, &root);
+    let before = cx.read(|cx| cx.global::<Ui>().settings.show_hidden_files);
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::ShowHiddenFiles(!before), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| cx.global::<Ui>().settings.show_hidden_files),
+        !before,
+        "the older reload's reply is dropped"
+    );
+}
+
+#[gpui::test]
 fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
     let root = fixture("themes");
     let (view, mut cx) = open(cx, &root);

@@ -845,16 +845,23 @@ impl ContentSearch {
 const MAX_EXCERPT_BYTES: usize = 4096;
 const MAX_EXCERPT_RANGES: usize = 256;
 
-/// `text` cut to `MAX_EXCERPT_BYTES` at a character boundary.
-fn truncate_excerpt(text: &str) -> &str {
+/// The part of `text` to show: all of it when short, otherwise `MAX_EXCERPT_BYTES`
+/// of it starting a little before the first match (`first`), at character boundaries.
+fn excerpt_window(text: &str, first: Option<usize>) -> std::ops::Range<usize> {
     if text.len() <= MAX_EXCERPT_BYTES {
-        return text;
+        return 0..text.len();
     }
-    let mut end = MAX_EXCERPT_BYTES;
+    let mut start = first.map_or(0, |at| at.saturating_sub(MAX_EXCERPT_BYTES / 16));
+    // Keep the window full when the match is near the end.
+    start = start.min(text.len() - MAX_EXCERPT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = (start + MAX_EXCERPT_BYTES).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    start..end
 }
 
 struct ContentSink<'a> {
@@ -889,22 +896,30 @@ impl Sink for ContentSink<'_> {
         if self.matches > 1 {
             return Ok(true);
         }
-        // One minified line can be megabytes: show a bounded window of it.
-        let text = truncate_excerpt(text);
+        // One minified line can be megabytes: show a bounded window of it, around the
+        // first match. Ranges are found on the whole line (anchors keep their meaning)
+        // and kept when they fall inside the window.
+        let first = self.matcher.find(text.as_bytes()).map_err(|e| io::Error::other(e.to_string()))?.map(|m| m.start());
+        let window = excerpt_window(text, first);
         let mut ranges = Vec::new();
         self.matcher
             .find_iter(text.as_bytes(), |m| {
+                if m.start() >= window.end || ranges.len() >= MAX_EXCERPT_RANGES {
+                    return false;
+                }
                 // `(?-u)` patterns can match half a character; only whole ones are shown.
                 if m.end() > m.start()
+                    && m.start() >= window.start
+                    && m.end() <= window.end
                     && text.is_char_boundary(m.start())
                     && text.is_char_boundary(m.end())
-                    && ranges.len() < MAX_EXCERPT_RANGES
                 {
-                    ranges.push(m.start()..m.end());
+                    ranges.push(m.start() - window.start..m.end() - window.start);
                 }
                 true
             })
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let text = &text[window];
         self.hits.push(Hit {
             path: self.path.to_path_buf(),
             is_dir: false,
@@ -1560,6 +1575,20 @@ mod tests {
         for (_, text, ranges) in content(&hits) {
             assert!(ranges.iter().all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)));
         }
+    }
+
+    #[test]
+    fn a_match_far_into_a_long_line_stays_in_the_excerpt() {
+        let root = root("content-window");
+        let long = format!("{}needle{}", "x".repeat(50_000), "y".repeat(50_000));
+        write(&root, "app.min.js", long.as_bytes());
+        let (hits, _) = run(&root, None, Some("needle"), false, true);
+        let found = content(&hits);
+        assert_eq!(found.len(), 1);
+        let (_, text, ranges) = &found[0];
+        assert!(text.len() <= MAX_EXCERPT_BYTES);
+        assert_eq!(ranges.len(), 1, "the match is highlighted");
+        assert_eq!(&text[ranges[0].clone()], "needle");
     }
 
     fn hit(path: &str) -> Hit {

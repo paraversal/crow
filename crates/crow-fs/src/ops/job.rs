@@ -1094,10 +1094,30 @@ impl Drop for Stage {
         // Only the container this job created, and only when it is ours: create_dir
         // was exclusive, so a pre-existing path never reaches this.
         unregister_staging(&self.container);
-        if let Err(e) = remove_tree(&self.container) {
+        if let Err(e) = remove_tree(&self.container).or_else(|_| remove_unprotected(&self.container)) {
             warn(&format!("could not remove staging folder {}: {e}", self.container.display()));
         }
     }
+}
+
+/// Remove a tree that holds read-only folders (a copied `0555` directory): give the
+/// owner back write access on every real folder first, never following a symlink.
+fn remove_unprotected(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fn open_up(path: &Path) {
+        let Ok(meta) = path.symlink_metadata() else { return };
+        if !meta.is_dir() {
+            return;
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.filter_map(Result::ok) {
+                open_up(&entry.path());
+            }
+        }
+    }
+    open_up(path);
+    remove_tree(path)
 }
 
 fn run_job(
@@ -1367,4 +1387,23 @@ fn copy_tree(
 
     let mut copied = 0;
     copy_entry(source, dest, &mut copied, checkpoint)
+}
+
+#[cfg(test)]
+mod stage_cleanup_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_dropped_stage_removes_a_copied_read_only_folder() {
+        let parent = tempfile::tempdir().expect("temp dir");
+        let stage = Stage::create(&parent.path().join("target"), JobId(1), 0).expect("stage");
+        let locked = stage.item.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file.txt"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let container = stage.container.clone();
+        drop(stage);
+        assert!(!container.exists(), "the staging folder is gone, nothing is stranded");
+    }
 }

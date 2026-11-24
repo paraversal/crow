@@ -537,6 +537,7 @@ impl CrowWindow {
                 .px_3()
                 .py_1()
                 .rounded_md()
+                .cursor_pointer()
                 .text_size(px(12.))
                 .when(selected, |el| el.bg(color(theme.role("surface-raised"))).text_color(fg))
                 .when(!selected, |el| el.text_color(muted))
@@ -612,7 +613,8 @@ impl CrowWindow {
         // The ink bar slides from the tab that was active; Off puts it there at once.
         let (from, to) = (sheet.tab_from as f32 * TAB_WIDTH, sheet.kind as usize as f32 * TAB_WIDTH);
         let ink = div().absolute().bottom(px(-1.)).w(px(TAB_WIDTH)).h(px(2.)).bg(accent);
-        let ink = if mode == crow_core::motion::Effective::Off {
+        // Low never changes position, so the bar jumps like Off.
+        let ink = if mode != crow_core::motion::Effective::Full {
             ink.left(px(to)).into_any_element()
         } else {
             use gpui::{Animation, AnimationExt as _};

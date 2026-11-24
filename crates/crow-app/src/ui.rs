@@ -93,6 +93,9 @@ pub struct Ui {
     pub exclude_generation: u64,
     /// Newest started reload of each kind; a reply from an older one is dropped.
     config_reload_generation: u64,
+    /// Bumped when a write of each config file is queued and again when it lands; a
+    /// reload whose copy of the epoch is older read the file before that write.
+    write_epoch: [u64; KEYS + 1],
     keys_reload_generation: u64,
     theme_reload_generation: u64,
     /// The user's key overrides (`keys.toml`); a broken file keeps the last good set.
@@ -233,6 +236,7 @@ impl Ui {
             exclude: Exclude::default(),
             exclude_generation: 0,
             config_reload_generation: 0,
+            write_epoch: Default::default(),
             keys_reload_generation: 0,
             theme_reload_generation: 0,
             keys: Default::default(),
@@ -623,6 +627,9 @@ pub fn queue_file_write(
     work: impl FnOnce() -> Result<(), String> + Send + 'static,
     cx: &mut App,
 ) -> Shared<Task<Result<(), String>>> {
+    if key == "keys.toml" {
+        cx.global_mut::<Ui>().write_epoch[KEYS] += 1;
+    }
     let previous = cx.global_mut::<Ui>().file_writes.remove(key);
     let task = cx
         .background_spawn(async move {
@@ -739,7 +746,8 @@ fn poll(cx: &mut App) {
         // The index may have appeared or vanished: watch where it is now.
         watcher.refresh();
     }
-    if config_changed || theme_changed {
+    // A config edit that changes the theme reloads it once the new settings are applied.
+    if theme_changed {
         reload_theme(cx);
     }
     if mounts_changed {
@@ -824,6 +832,8 @@ struct LoadedConfig {
     sidebar: Result<SidebarConfig, String>,
     exclude: Result<crow_core::Exclude, String>,
     keys: Result<crow_core::keymap_edit::KeyOverrides, String>,
+    /// `Ui::write_epoch` when the read started.
+    epochs: [u64; KEYS + 1],
 }
 
 /// Reload every config file: read and parse in the background, apply on the main
@@ -835,6 +845,7 @@ pub fn reload_config(cx: &mut App) {
     ui.config_reload_generation += 1;
     let generation = ui.config_reload_generation;
     let (config, home) = (ui.config_dir.clone(), ui.home.clone());
+    let epochs = ui.write_epoch;
     let task = cx.background_spawn(async move {
         LoadedConfig {
             // io-ok: background task
@@ -845,7 +856,9 @@ pub fn reload_config(cx: &mut App) {
             sidebar: load_sidebar(&config),
             // io-ok: background task
             exclude: crow_core::load_exclude(&config),
+            // io-ok: background task
             keys: read_keys(&config),
+            epochs,
         }
     });
     cx.spawn(async move |cx| {
@@ -862,15 +875,26 @@ pub fn reload_config(cx: &mut App) {
 fn apply_loaded_config(loaded: LoadedConfig, cx: &mut App) {
     let icon_before = cx.global::<Ui>().settings.icon_pack.clone();
     let ui = cx.global_mut::<Ui>();
-    // A queued write of the file owns it until its own snapshot lands.
-    let settings = ui.config_writes[SETTINGS].is_none() && ui.apply_loaded_settings(loaded.settings);
+    // A file written since the read started, or one with a write still queued, is
+    // owned by that write; its own result applies.
+    let LoadedConfig {
+        settings: new_settings,
+        views,
+        sidebar: new_sidebar,
+        exclude: new_exclude,
+        keys: new_keys,
+        epochs,
+    } = loaded;
+    let current = ui.write_epoch;
+    let fresh = |which: usize| current[which] == epochs[which];
+    let settings = fresh(SETTINGS) && ui.config_writes[SETTINGS].is_none() && ui.apply_loaded_settings(new_settings);
     let icon_changed = ui.settings.icon_pack != icon_before;
-    if ui.config_writes[VIEWS].is_none() {
-        ui.apply_loaded_views(loaded.views);
+    if fresh(VIEWS) && ui.config_writes[VIEWS].is_none() {
+        ui.apply_loaded_views(views);
     }
-    let sidebar = ui.apply_loaded_sidebar(loaded.sidebar);
-    let exclude = ui.apply_loaded_exclude(loaded.exclude);
-    let keys = ui.apply_loaded_keys(loaded.keys);
+    let sidebar = fresh(SIDEBAR) && ui.apply_loaded_sidebar(new_sidebar);
+    let exclude = fresh(EXCLUDE) && ui.apply_loaded_exclude(new_exclude);
+    let keys = fresh(KEYS) && ui.apply_loaded_keys(new_keys);
     if settings || sidebar || exclude || keys {
         tracing::info!("config reloaded");
     }
@@ -878,6 +902,8 @@ fn apply_loaded_config(loaded: LoadedConfig, cx: &mut App) {
         refresh_recent(cx);
     }
     if settings {
+        // The theme id may have changed; `reload_theme` reads the settings applied just now.
+        reload_theme(cx);
         crate::menus::refresh(cx);
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
         crate::window::apply_show_hidden(show_hidden, cx);
@@ -908,9 +934,12 @@ fn apply_keys(cx: &mut App) {
 /// the main thread unless a newer reload started.
 pub fn reload_keys(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
+    // The write that called this has landed: a config reload that read keys.toml earlier is stale.
+    ui.write_epoch[KEYS] += 1;
     ui.keys_reload_generation += 1;
     let generation = ui.keys_reload_generation;
     let config = ui.config_dir.clone();
+    // io-ok: background task
     let task = cx.background_spawn(async move { read_keys(&config) });
     cx.spawn(async move |cx| {
         let result = task.await;
@@ -1597,6 +1626,8 @@ fn write_config_with_completion(
     completion: Option<ViewsWriteCompletion>,
     cx: &mut App,
 ) {
+    // A reload that read the file before this write must not apply its older copy.
+    cx.global_mut::<Ui>().write_epoch[which] += 1;
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
     if matches!(which, SETTINGS | VIEWS | SAVED_QUERIES) {
@@ -1617,6 +1648,7 @@ fn write_config_with_completion(
                     SETTINGS => load_settings(&config_dir).map(ConfigSnapshot::Settings).map_err(|e| e.to_string()),
                     // io-ok: background task
                     VIEWS => load_views(&config_dir, &home).map(ConfigSnapshot::Views),
+                    // io-ok: background task
                     SAVED_QUERIES => load_saved_queries(&config_dir, &home).map(ConfigSnapshot::SavedQueries),
                     _ => unreachable!("queued config file"),
                 }
@@ -1630,6 +1662,7 @@ fn write_config_with_completion(
                 if cx.global::<Ui>().config_write_revision[which] == revision {
                     let ui = cx.global_mut::<Ui>();
                     ui.config_writes[which] = None;
+                    ui.write_epoch[which] += 1;
                     match result {
                         Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
                         Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
@@ -1662,6 +1695,7 @@ fn write_config_with_completion(
         let result: Result<Option<Reread>, String> = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
+            ui.write_epoch[which] += 1;
             match result {
                 Ok(Some(Reread::Sidebar(sidebar))) => {
                     ui.apply_loaded_sidebar(sidebar);
@@ -1697,6 +1731,7 @@ fn reload_saved_queries(cx: &mut App) {
     ui.config_write_revision[SAVED_QUERIES] += 1;
     let revision = ui.config_write_revision[SAVED_QUERIES];
     let (config, home) = (ui.config_dir.clone(), ui.home.clone());
+    // io-ok: background task
     let task = cx.background_spawn(async move { load_saved_queries(&config, &home) });
     cx.spawn(async move |cx| {
         let result = task.await;

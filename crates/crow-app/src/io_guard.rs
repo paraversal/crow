@@ -36,6 +36,8 @@ const PATTERNS: &[&str] = &[
     "load_sidebar(",
     "load_exclude(",
     "load_keys(",
+    "read_keys(",
+    "load_saved_queries(",
     "crow_theme::load_theme(",
     "crow_theme::resolve_theme_id(",
     "crow_theme::missing_saved(",

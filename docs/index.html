@@ -148,13 +148,9 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .comps li:nth-child(3) { grid-column: 2; grid-row: 1 / span 2; }
 .comps figure { margin: 0; }
 .comps figcaption { margin-top: 12px; color: var(--muted); font-size: 15px; }
-.comps .zoom, .rows .shotrow .zoom { width: auto; max-width: 100%; }
+.comps .zoom { width: auto; max-width: 100%; }
 .comp { display: block; max-width: 100%; height: auto; border-radius: 14px; filter: drop-shadow(0 8px 16px var(--shadow)); }
 .split .list { grid-template-columns: 1fr; }
-.split.wide { grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); gap: 48px; }
-.rows li.shotrow { grid-column: 1 / -1; align-items: flex-start; }
-.rows .shotrow .k { padding-top: 4px; }
-.rows .shotrow > span:last-child { min-width: 0; }
 .fold { width: 1.05em; height: 1.05em; fill: none; stroke: var(--folder); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -.17em; margin-right: .3em; }
 #keys .rows .k { width: 11em; }
 .rows .k.stack { flex-direction: column; flex-wrap: nowrap; gap: 2px; }
@@ -240,7 +236,7 @@ footer nav { gap: 22px; }
   .clips { grid-template-columns: 1fr; }
   nav a:not(.button) { display: none; }
   .hero { padding-top: 32px; }
-  .pair, .split, .split.wide, .install, .rows, .list { grid-template-columns: 1fr; }
+  .pair, .split, .install, .rows, .list { grid-template-columns: 1fr; }
   .comps { grid-template-columns: minmax(0, 1fr); }
   .comps li:nth-child(3) { grid-column: auto; grid-row: auto; }
   .views { grid-template-columns: 1fr 1fr; }
@@ -349,7 +345,7 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="plugins-h">Add what’s missing.</h2>
       <p class="sub">Plugins are small Rhai scripts. You approve what each one may touch.</p>
-      <div class="split wide">
+      <div>
         <div>
           <ul class="list">
             <li>A section of folders in the left sidebar</li>
@@ -368,7 +364,7 @@ footer nav { gap: 22px; }
       <div class="example" id="git" role="group" aria-labelledby="git-h">
         <h3 id="git-h">Git, included</h3>
         <ul class="comps">
-          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><picture><source srcset="media/git-rows-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-rows-light.webp" width="424" height="144" alt="Three files in list view: harbor.toml with a question mark badge, scratch.log tinted as ignored, tides.rs with an M badge and ten changed lines."></picture></button><figcaption>Badges in the listing</figcaption></figure></li>
+          <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git badges in the listing"><picture><source srcset="media/git-rows-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-rows-light.webp" width="424" height="144" alt="Three files in list view: harbor.toml with a question mark badge, scratch.log tinted as ignored, tides.rs with an M badge and nine changed lines."></picture></button><figcaption>Badges in the listing</figcaption></figure></li>
           <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git projects in the sidebar"><picture><source srcset="media/git-sidebar-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-sidebar-light.webp" width="324" height="187" alt="The sidebar’s Projects section: four repositories with their branch and the number of changed files."></picture></button><figcaption>Branch and changes per project</figcaption></figure></li>
           <li><figure><button class="zoom" type="button" aria-label="Enlarge the Git Diff tab"><picture><source srcset="media/git-diff-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/git-diff-light.webp" width="339" height="360" alt="The Git Diff tab beside a file: the unstaged changes, with removed lines in red and added lines in green."></picture></button><figcaption>Git Diff beside the file</figcaption></figure></li>
         </ul>
