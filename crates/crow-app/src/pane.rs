@@ -63,6 +63,7 @@ use crow_fs::ops::Request;
 
 mod gallery;
 mod pane_filter;
+mod row_marquee;
 mod view_motion;
 
 /// More visible rows than this and a reorder snaps instead of gliding.
@@ -100,6 +101,8 @@ fn first_visible_row(handle: &UniformListScrollHandle) -> usize {
 /// rounded corners don't meet the straight line and leave dark wedges at its ends.
 pub(crate) const LIST_TOP_INSET: f32 = 4.0;
 const LIST_SIDE_INSET: f32 = 8.0;
+/// How long arriving folder sizes are gathered before the rows re-sort.
+const SIZE_RESORT_DELAY: Duration = Duration::from_millis(250);
 /// Left padding before a row's disclosure chevron, and the indent per tree level.
 const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
@@ -361,6 +364,10 @@ struct IconViewport {
 /// One empty-space drag in the icon grid. The anchor stays in content space, so
 /// scrolling grows the rectangle instead of moving its origin.
 struct Marquee {
+    /// The folder (column) being selected in.
+    folder: usize,
+    /// A row view's drag (List, Columns, Gallery); the Icons grid when false.
+    rows: bool,
     anchor: Point<Pixels>,
     pointer: Point<Pixels>,
     base_selection: Vec<PathBuf>,
@@ -449,6 +456,8 @@ pub struct Pane {
     cloud_source: u64,
     /// The service generation whose visible sizes were already sorted (Q3).
     size_sort_generation: u64,
+    /// A batched size re-sort is waiting on its timer.
+    size_resort_pending: bool,
     /// `folder_sizes = "visible"` at the last render; turning it off pauses the service.
     size_enabled: bool,
     strip_scroll: ScrollHandle,
@@ -461,6 +470,8 @@ pub struct Pane {
     applied_view: Option<(u64, u64, PathBuf)>,
     /// List view: the uniform list's viewport, captured at prepaint.
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The pane's whole drawing area: the origin the row-drag rectangle is placed against.
+    root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Icon view: its own scroll position and viewport, kept across mode switches.
     icon_scroll: UniformListScrollHandle,
     icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -619,6 +630,7 @@ impl Pane {
             size_source,
             cloud_source,
             size_sort_generation: 0,
+            size_resort_pending: false,
             size_enabled: cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible,
             strip_scroll: ScrollHandle::new(),
             status: None,
@@ -647,6 +659,7 @@ impl Pane {
             }),
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
+            root_bounds: Rc::new(Cell::new(None)),
             icon_scroll: UniformListScrollHandle::new(),
             icon_bounds: Rc::new(Cell::new(None)),
             icon_viewport: Rc::new(RefCell::new(None)),
@@ -719,6 +732,7 @@ impl Pane {
         self.mode
     }
 
+    #[cfg(test)]
     pub fn icon_size(&self) -> IconSize {
         self.icon_size
     }
@@ -1005,6 +1019,7 @@ impl Pane {
             ViewMode::List => {
                 out.push("file-list".to_owned());
                 out.push("table-header".to_owned());
+                out.push("row-margin".to_owned());
                 if let Some(folder) = self.folders.first() {
                     let folder = folder.read(cx);
                     out.extend(
@@ -1026,6 +1041,7 @@ impl Pane {
             ViewMode::Gallery => {
                 out.push("gallery-rail".to_owned());
                 out.push("gallery-preview".to_owned());
+                out.push("gallery-margin".to_owned());
                 if let Some(folder) = self.folders.first() {
                     let folder = folder.read(cx);
                     out.extend(
@@ -1037,6 +1053,7 @@ impl Pane {
             ViewMode::Columns => {
                 out.push("columns".to_owned());
                 for (k, folder) in self.folders.iter().enumerate().take(8) {
+                    out.push(format!("column-{k}-margin"));
                     let folder = folder.read(cx);
                     out.extend(
                         (0..folder.row_count().min(80))
@@ -1862,14 +1879,7 @@ impl Pane {
                 service.as_ref().map(|service| {
                     let service = service.read(cx);
                     let folder = folder.read(cx);
-                    Arc::new(
-                        folder
-                            .entries()
-                            .iter()
-                            .filter(|entry| entry.is_dir && !entry.is_symlink)
-                            .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
-                            .collect::<HashMap<_, _>>(),
-                    )
+                    Arc::new(folder.dir_sizes(&|path| service.size(path).map(|size| size.bytes), cx))
                 })
             } else {
                 None
@@ -1903,35 +1913,54 @@ impl Pane {
         cx.notify();
     }
 
-    /// The size service changed: once every visible size is in, re-sort by size
-    /// once (Q3). Scrolling in more rows repeats this when their sizes arrive.
+    /// The size service changed. Rows re-sort as measurements arrive, in
+    /// batches: while sizes are still coming in, one re-sort covers what arrived
+    /// in the last `SIZE_RESORT_DELAY`; the last arrival re-sorts at once.
     fn sizes_changed(&mut self, cx: &mut Context<Self>) {
         if cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
             return;
         }
-        let service = cx.global::<SizeService>().0.clone();
-        let generation = service.read(cx).generation();
-        if generation == self.size_sort_generation || self.sort.key != SortKey::Size {
+        self.request_size_resort(cx);
+    }
+
+    fn request_size_resort(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = cx.try_global::<SizeService>().map(|service| service.0.clone()) else { return };
+        if self.sort.key != SortKey::Size || service.read(cx).generation() == self.size_sort_generation {
             return;
         }
-        if !service.read(cx).visible_complete() {
+        if service.read(cx).visible_complete() {
+            self.resort_for_sizes(false, cx);
+            return;
+        }
+        if self.size_resort_pending {
+            return;
+        }
+        self.size_resort_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SIZE_RESORT_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.size_resort_pending = false;
+                this.resort_for_sizes(false, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sort every shown listing, and the folders open in it, with the sizes known now.
+    fn resort_for_sizes(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(service) = cx.try_global::<SizeService>().map(|service| service.0.clone()) else { return };
+        let generation = service.read(cx).generation();
+        if self.sort.key != SortKey::Size || (!force && generation == self.size_sort_generation) {
             return;
         }
         self.size_sort_generation = generation;
         for folder in &self.folders {
             let sizes = {
                 let service = service.read(cx);
-                let folder = folder.read(cx);
-                Arc::new(
-                    folder
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.is_dir && !entry.is_symlink)
-                        .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
-                        .collect::<HashMap<_, _>>(),
-                )
+                Arc::new(folder.read(cx).dir_sizes(&|path| service.size(path).map(|size| size.bytes), cx))
             };
-            folder.update(cx, |f, cx| f.resort_with_sizes(Some(sizes), 0, cx));
+            folder.update(cx, |f, cx| f.resort_with_sizes(Some(sizes), 0, true, cx));
         }
         cx.notify();
     }
@@ -2105,6 +2134,7 @@ impl Pane {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub fn icon_caption(&self) -> Option<&str> {
         self.icon_caption.as_deref()
     }
@@ -2246,7 +2276,14 @@ impl Pane {
 
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
-        if self.marquee.is_some()
+        if matches!(event, FolderEvent::Changed)
+            && self.sort.key == SortKey::Size
+            && folder.update(cx, |folder, _| folder.take_child_loaded())
+        {
+            // A folder opened inside this one: sort it with the sizes already known.
+            self.resort_for_sizes(true, cx);
+        }
+        if self.marquee.as_ref().is_some_and(|marquee| marquee.folder == k)
             && matches!(event, FolderEvent::Loaded | FolderEvent::Changed | FolderEvent::WatcherApplied { .. })
         {
             // The rows under the rectangle changed: indices from the old layout
@@ -2963,12 +3000,25 @@ impl Pane {
         cx.notify();
     }
 
+    /// The folder New Folder, New File and Paste work in: the one shown, or with
+    /// `folder_target = "selected"` the one folder selected in it (never a package).
+    pub fn target_folder(&self, cx: &gpui::App) -> PathBuf {
+        let shown = self.current_dir(cx);
+        if cx.global::<Ui>().settings.folder_target != crow_core::FolderTarget::Selected {
+            return shown;
+        }
+        match self.focused_folder().read(cx).selected_entries().as_slice() {
+            [(path, true)] if !crow_fs::is_package_path(path) => path.clone(),
+            _ => shown,
+        }
+    }
+
     fn new_folder(&mut self, _: &NewFolder, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.current_dir(cx) }));
+        cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.target_folder(cx) }));
     }
 
     fn new_file(&mut self, _: &NewFile, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.current_dir(cx) }));
+        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.target_folder(cx) }));
     }
 
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
@@ -3007,11 +3057,11 @@ impl Pane {
     }
 
     fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: false });
+        cx.emit(PaneEvent::Paste { into: self.target_folder(cx), move_items: false });
     }
 
     fn paste_move_files(&mut self, _: &PasteMoveFiles, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: true });
+        cx.emit(PaneEvent::Paste { into: self.target_folder(cx), move_items: true });
     }
 
     fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
@@ -3140,18 +3190,22 @@ impl Pane {
             self.commit_rename(window, cx);
         }
         window.focus(&self.focus, cx);
-        if event.modifiers.platform || event.modifiers.shift {
-            return;
+        let additive = event.modifiers.platform || event.modifiers.shift;
+        if !additive {
+            if k != self.focused {
+                self.drop_filter(cx);
+                self.cancel_type_select(cx);
+                self.focused = k;
+                self.plugin_scope_changed(cx);
+            }
+            // Clearing emits CursorMoved, which closes the columns right of `k`.
+            self.with_focused(cx, |f, cx| f.clear_selection(cx));
+            self.load_preview(cx);
         }
-        if k != self.focused {
-            self.drop_filter(cx);
-            self.cancel_type_select(cx);
-            self.focused = k;
-            self.plugin_scope_changed(cx);
+        // A drag from here selects the rows it crosses; a plain click ends at release.
+        if k == self.focused {
+            self.begin_row_marquee(k, event, additive, cx);
         }
-        // Clearing emits CursorMoved, which closes the columns right of `k`.
-        self.with_focused(cx, |f, cx| f.clear_selection(cx));
-        self.load_preview(cx);
         cx.notify();
     }
 
@@ -3210,16 +3264,26 @@ impl Pane {
         self.open_context_menu(kind, window, cx);
     }
 
+    /// What decides which context-menu lines can act on the focused folder.
+    pub fn menu_state(&self, cx: &gpui::App) -> MenuState {
+        let folder = self.focused_folder().read(cx);
+        let (_, selected_folders) = folder.selected_bytes();
+        MenuState { selected: folder.selected_count(), selected_folders, ..self.folder_menu_state(true, cx) }
+    }
+
+    /// The folder menu's state (⌃⌘M, the toolbar and its pins): it acts on one
+    /// folder whatever is selected. `can_paste` reads the system pasteboard only
+    /// when `paste` is set (the toolbar draws every frame).
+    pub fn folder_menu_state(&self, paste: bool, cx: &gpui::App) -> MenuState {
+        MenuState {
+            selected: 0,
+            selected_folders: 0,
+            can_paste: paste && !crate::operations::pasteboard_paths(cx).0.is_empty(),
+        }
+    }
+
     fn open_context_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let state = {
-            let folder = self.focused_folder().read(cx);
-            let (_, selected_folders) = folder.selected_bytes();
-            MenuState {
-                selected: folder.selected_count(),
-                selected_folders,
-                can_paste: !crate::operations::pasteboard_paths(cx).0.is_empty(),
-            }
-        };
+        let state = self.menu_state(cx);
         let scope = match (self.mode, self.filtering.is_some()) {
             (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, false) => KeyScope::List,
             (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, true) => KeyScope::ListFiltered,
@@ -3283,6 +3347,8 @@ impl Pane {
             self.load_preview(cx);
         }
         self.marquee = Some(Marquee {
+            folder: self.focused,
+            rows: false,
             anchor: content,
             pointer: event.position,
             base_selection,
@@ -3294,6 +3360,33 @@ impl Pane {
             hits: HashMap::new(),
         });
         cx.notify();
+    }
+
+    /// Arm a drag over a row view's empty space. A plain press already cleared the
+    /// selection, so Esc leaves it cleared; Shift and ⌘ keep what was selected.
+    fn begin_row_marquee(&mut self, k: usize, event: &MouseDownEvent, additive: bool, cx: &mut Context<Self>) {
+        self.cancel_marquee(cx);
+        let Some(strip) = self.row_strip(k, cx) else { return };
+        let Some(folder) = self.folders.get(k).cloned() else { return };
+        let (base_selection, base_cursor, layout_generation) = {
+            let folder = folder.read(cx);
+            let selection = if additive { folder.selected_paths() } else { Vec::new() };
+            let cursor = if additive { folder.selection_cursor().map(Path::to_path_buf) } else { None };
+            (selection, cursor, folder.layout_generation())
+        };
+        self.marquee = Some(Marquee {
+            folder: k,
+            rows: true,
+            anchor: strip.content_point(event.position),
+            pointer: event.position,
+            base: Arc::new(base_selection.iter().cloned().collect()),
+            base_selection,
+            base_cursor,
+            additive,
+            started: false,
+            layout_generation,
+            hits: HashMap::new(),
+        });
     }
 
     /// The pointer in the grid's content coordinates (x from the content's left,
@@ -3322,28 +3415,41 @@ impl Pane {
                 return;
             }
         }
-        let Some(current) = self.icon_content_point(pointer) else { return };
-        let folder_entity = self.focused_folder().clone();
+        let (rows_view, folder_ix) = self.marquee.as_ref().map_or((false, self.focused), |m| (m.rows, m.folder));
+        let Some(folder_entity) = self.folders.get(folder_ix).cloned() else {
+            self.cancel_marquee(cx);
+            return;
+        };
+        let strip = if rows_view { self.row_strip(folder_ix, cx) } else { None };
+        let current = if rows_view {
+            strip.as_ref().map(|strip| strip.content_point(pointer))
+        } else {
+            self.icon_content_point(pointer)
+        };
+        let Some(current) = current else { return };
         if folder_entity.read(cx).layout_generation() != layout_generation {
             self.cancel_marquee(cx);
             return;
         }
-        let (count, rect) = {
-            let folder = folder_entity.read(cx);
-            (
-                folder.row_count(),
-                GridRect {
-                    x: f32::from(anchor.x.min(current.x)),
-                    y: f32::from(anchor.y.min(current.y)),
-                    width: f32::from((anchor.x - current.x).abs()).max(1.0),
-                    height: f32::from((anchor.y - current.y).abs()).max(1.0),
-                },
-            )
-        };
-        let grid = self.icon_grid(count, cx);
+        let count = folder_entity.read(cx).row_count();
         let mut ordered = Vec::new();
         let mut hits: HashMap<PathBuf, (u64, bool)> = HashMap::new();
-        {
+        if let Some(strip) = &strip {
+            let folder = folder_entity.read(cx);
+            for ix in strip.rows_touched(anchor, current, count) {
+                if let Some((entry, _)) = folder.row(ix) {
+                    hits.insert(entry.path.clone(), (entry.size, entry.is_dir));
+                    ordered.push(entry.path.clone());
+                }
+            }
+        } else if !rows_view {
+            let rect = GridRect {
+                x: f32::from(anchor.x.min(current.x)),
+                y: f32::from(anchor.y.min(current.y)),
+                width: f32::from((anchor.x - current.x).abs()).max(1.0),
+                height: f32::from((anchor.y - current.y).abs()).max(1.0),
+            };
+            let grid = self.icon_grid(count, cx);
             let folder = folder_entity.read(cx);
             grid.tiles_intersecting(&rect, |ix, _| {
                 if let Some((entry, _)) = folder.row(ix) {
@@ -3384,12 +3490,18 @@ impl Pane {
     /// one grid row and schedules the next step; leaving the edge stops it. An
     /// endless timer would keep the test executor from ever parking.
     fn schedule_marquee_scroll(&mut self, pointer: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(bounds) = self.icon_bounds.get() else { return };
+        let Some(marquee) = &self.marquee else { return };
+        let Some(bounds) = (if marquee.rows {
+            self.row_strip(marquee.folder, cx).map(|strip| strip.bounds)
+        } else {
+            self.icon_bounds.get()
+        }) else {
+            return;
+        };
         let edge = px(24.);
         if pointer.y >= bounds.top() + edge && pointer.y <= bounds.bottom() - edge {
             return;
         }
-        let Some(marquee) = &self.marquee else { return };
         if !marquee.started {
             return;
         }
@@ -3405,7 +3517,13 @@ impl Pane {
                 if marquee.pointer != pointer {
                     return;
                 }
-                let Some(bounds) = this.icon_bounds.get() else { return };
+                let (rows_view, folder_ix) = (marquee.rows, marquee.folder);
+                let strip = if rows_view { this.row_strip(folder_ix, cx) } else { None };
+                let Some(bounds) =
+                    (if rows_view { strip.as_ref().map(|strip| strip.bounds) } else { this.icon_bounds.get() })
+                else {
+                    return;
+                };
                 let direction = if pointer.y < bounds.top() + edge {
                     -1.0
                 } else if pointer.y > bounds.bottom() - edge {
@@ -3413,21 +3531,32 @@ impl Pane {
                 } else {
                     return;
                 };
+                let Some(folder) = this.folders.get(folder_ix) else { return };
                 let (layout_changed, count) = {
-                    let folder = this.focused_folder().read(cx);
+                    let folder = folder.read(cx);
                     (folder.layout_generation() != marquee.layout_generation, folder.row_count())
                 };
                 if layout_changed {
                     this.cancel_marquee(cx);
                     return;
                 }
-                let grid = this.icon_grid(count, cx);
+                // (content height, viewport height, one step) of the list being scrolled.
+                let (content, viewport, step, scroll) = match &strip {
+                    Some(strip) => {
+                        let (content, viewport) = strip.heights(count);
+                        (content, viewport, strip.space.row_height, strip.scroll.clone())
+                    }
+                    None => {
+                        let grid = this.icon_grid(count, cx);
+                        (grid.content_height(), grid.viewport_height(), grid.row_pitch(), this.icon_scroll.clone())
+                    }
+                };
                 {
-                    let scroll = &this.icon_scroll.0.borrow().base_handle;
+                    let scroll = &scroll.0.borrow().base_handle;
                     let mut offset = scroll.offset();
                     let top = -f32::from(offset.y);
-                    let max = (grid.content_height() - grid.viewport_height()).max(0.0);
-                    let next = (top + direction * grid.row_pitch()).clamp(0.0, max);
+                    let max = (content - viewport).max(0.0);
+                    let next = (top + direction * step).clamp(0.0, max);
                     if next == top {
                         return;
                     }
@@ -3445,7 +3574,7 @@ impl Pane {
     pub(crate) fn cancel_marquee(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(marquee) = self.marquee.take() else { return false };
         self.marquee_scroll_gen += 1;
-        let folder = self.focused_folder().clone();
+        let folder = self.folders.get(marquee.folder).unwrap_or(&self.folders[self.focused]).clone();
         let mut survivors = Vec::new();
         let mut totals = (0u64, 0usize);
         {
@@ -3477,7 +3606,7 @@ impl Pane {
     }
 
     fn marquee_rect(&self) -> Option<Bounds<Pixels>> {
-        let marquee = self.marquee.as_ref().filter(|marquee| marquee.started)?;
+        let marquee = self.marquee.as_ref().filter(|marquee| marquee.started && !marquee.rows)?;
         let bounds = self.icon_bounds.get()?;
         let offset = self.icon_scroll.0.borrow().base_handle.offset().y;
         let current = point(marquee.pointer.x - bounds.left(), marquee.pointer.y - bounds.top());
@@ -3572,6 +3701,11 @@ impl Pane {
                 None => self.current_dir(cx),
             }
         };
+        self.open_terminal_in(folder, cx);
+    }
+
+    /// Open the configured terminal at `folder`.
+    pub fn open_terminal_in(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let app = cx.global::<Ui>().settings.terminal.trim().to_owned();
         let app = if app.is_empty() { "Terminal".to_owned() } else { app };
         let effects = crate::effects::effects(cx);
@@ -5667,12 +5801,16 @@ impl Pane {
         // the rest of the strip when the columns leave room, and keeps
         // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
         let visible = self.info.read(cx).visible();
-        if visible && let Some((entry, items)) = self.preview_parts(cx) {
+        if visible
+            && self.info.read(cx).tab() != InfoTab::Activity
+            && let Some((entry, items)) = self.preview_parts(cx)
+        {
             let icons = self.icon_resolver(self.focused, cx);
             let tab = self.info.read(cx).tab();
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
                 InfoTab::Info => self.info.read(cx).label(cx),
+                InfoTab::Activity => "Activity".into(),
                 InfoTab::GitDiff => "Git Diff".into(),
             };
             let body = match tab {
@@ -5706,6 +5844,8 @@ impl Pane {
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
+                // The window draws Activity as the right column, whatever the view.
+                InfoTab::Activity => div().into_any_element(),
                 InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, &theme, cx),
             };
             let (preferred_width, splitter_focus) = {
@@ -6488,7 +6628,29 @@ impl Render for Pane {
             self.focus_list_after_filter = false;
             cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         }
-        div().size_full().flex().flex_col().child(list).into_any_element()
+        let root = self.root_bounds.clone();
+        let theme = cx.global::<Ui>().theme.clone();
+        let rows_marquee = self.row_marquee_rect(cx).zip(root.get());
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .on_children_prepainted(move |children, _, _| root.set(children.first().copied()))
+            .child(list)
+            .children(rows_marquee.map(|(rect, root)| {
+                div()
+                    .absolute()
+                    .debug_selector(|| "marquee".into())
+                    .left(rect.left() - root.left())
+                    .top(rect.top() - root.top())
+                    .w(rect.size.width)
+                    .h(rect.size.height)
+                    .bg(color_alpha(theme.role("accent"), 0x24))
+                    .border_1()
+                    .border_color(color_alpha(theme.role("accent"), 0xcc))
+            }))
+            .into_any_element()
     }
 }
 
@@ -6524,6 +6686,17 @@ impl Pane {
             return Some(gpui::Bounds::new(
                 point(bounds.left() + px(rect.x), bounds.top() + px(rect.y) + px(offset)),
                 gpui::size(px(rect.width), px(rect.height)),
+            ));
+        }
+        // The empty strip beside the rows: a press there starts a drag selection.
+        if let Some(k) = match selector {
+            "row-margin" | "gallery-margin" => Some(0),
+            _ => selector.strip_prefix("column-").and_then(|rest| rest.strip_suffix("-margin")?.parse().ok()),
+        } {
+            let strip = self.row_strip(k, cx)?;
+            return Some(gpui::Bounds::new(
+                strip.bounds.origin,
+                size(px(strip.space.side_inset), strip.bounds.size.height),
             ));
         }
         if let Some(name) = selector.strip_prefix("gallery-row-") {

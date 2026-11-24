@@ -51,6 +51,14 @@ pub enum Glyph {
     Drive,
     /// Any other volume in Locations.
     ExternalDrive,
+    /// The toolbar's folder-menu button.
+    More,
+    NewFolder,
+    NewFile,
+    Paste,
+    CopyPath,
+    Reveal,
+    Terminal,
 }
 
 impl Glyph {
@@ -90,6 +98,13 @@ impl Glyph {
         Glyph::Developer,
         Glyph::Drive,
         Glyph::ExternalDrive,
+        Glyph::More,
+        Glyph::NewFolder,
+        Glyph::NewFile,
+        Glyph::Paste,
+        Glyph::CopyPath,
+        Glyph::Reveal,
+        Glyph::Terminal,
     ];
 
     pub fn path(self) -> &'static str {
@@ -127,6 +142,13 @@ impl Glyph {
             Glyph::Library => "icons/library.svg",
             Glyph::Developer => "icons/hammer.svg",
             Glyph::Drive | Glyph::ExternalDrive => "icons/hard-drive.svg",
+            Glyph::More => "icons/ellipsis.svg",
+            Glyph::NewFolder => "icons/folder-plus.svg",
+            Glyph::NewFile => "icons/file-plus.svg",
+            Glyph::Paste => "icons/clipboard-paste.svg",
+            Glyph::CopyPath => "icons/link.svg",
+            Glyph::Reveal => "icons/external-link.svg",
+            Glyph::Terminal => "icons/terminal.svg",
         }
     }
 }
@@ -246,6 +268,13 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/library.svg", include_bytes!("../assets/icons/library.svg")),
     ("icons/hammer.svg", include_bytes!("../assets/icons/hammer.svg")),
     ("icons/hard-drive.svg", include_bytes!("../assets/icons/hard-drive.svg")),
+    ("icons/ellipsis.svg", include_bytes!("../assets/icons/ellipsis.svg")),
+    ("icons/folder-plus.svg", include_bytes!("../assets/icons/folder-plus.svg")),
+    ("icons/file-plus.svg", include_bytes!("../assets/icons/file-plus.svg")),
+    ("icons/clipboard-paste.svg", include_bytes!("../assets/icons/clipboard-paste.svg")),
+    ("icons/link.svg", include_bytes!("../assets/icons/link.svg")),
+    ("icons/external-link.svg", include_bytes!("../assets/icons/external-link.svg")),
+    ("icons/terminal.svg", include_bytes!("../assets/icons/terminal.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 

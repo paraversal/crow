@@ -341,6 +341,36 @@ fn search_count_is_announced(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn back_closes_search_like_escape(cx: &mut TestAppContext) {
+    let root = fixture("search-back");
+    let (view, mut cx) = open(cx, &root);
+    let location = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.location().clone());
+    pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("alpha"), cx));
+    settle(&view, &mut cx);
+    let before = location(&cx);
+    cx.simulate_keystrokes("cmd-f");
+    wait_for_search(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_some()));
+    assert!(cx.debug_bounds("back").is_some());
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Back closes the search");
+    assert_eq!(location(&cx), before, "and stays in the folder the search opened from");
+    // The toolbar button does the same.
+    cx.simulate_keystrokes("cmd-f");
+    wait_for_search(&view, &mut cx);
+    let back = cx.debug_bounds("back").expect("back button");
+    cx.simulate_click(back.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    assert_eq!(location(&cx), before);
+    // With no search open Back walks history as before.
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_ne!(location(&cx), before);
+}
+
+#[gpui::test]
 fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
     let root = fixture("assembled");
     let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
@@ -2496,6 +2526,68 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     );
 }
 
+/// List, Columns and Gallery select by dragging over empty space, like Icons.
+#[gpui::test]
+fn dragging_over_empty_space_selects_rows_in_every_row_view(cx: &mut TestAppContext) {
+    for (mode, prefix) in
+        [(ViewMode::List, "row-"), (ViewMode::Columns, "column-0-row-"), (ViewMode::Gallery, "gallery-row-")]
+    {
+        let root = TestRoot::new("row-marquee");
+        for i in 0..8 {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+        }
+        let (view, mut cx) = open_sized(cx, &root, 900., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        let row = |cx: &VisualTestContext, name: &str| {
+            view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("{prefix}{name}"), cx))
+                .unwrap_or_else(|| panic!("{mode:?}: row {name}"))
+        };
+        let names = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |pane, cx| pane.selected_names(cx));
+        let modifiers = gpui::Modifiers::default();
+        let last = row(&cx, "f7.txt");
+        let start = gpui::point(last.left() + px(30.), last.bottom() + px(40.));
+        let f2 = gpui::point(last.left() + px(30.), row(&cx, "f2.txt").center().y);
+        let f5 = gpui::point(last.left() + px(30.), row(&cx, "f5.txt").center().y);
+
+        // A press without a drag only clears, as before.
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(start, MouseButton::Left, modifiers);
+        assert!(names(&cx).is_empty(), "{mode:?}: an empty click selects nothing");
+
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(f2, Some(MouseButton::Left), modifiers);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: the rectangle is live");
+        assert!(cx.debug_bounds("marquee").is_some(), "{mode:?}: the rectangle is drawn");
+        assert_eq!(
+            names(&cx),
+            vec!["f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"],
+            "{mode:?}: rows the rectangle crosses"
+        );
+        cx.simulate_mouse_move(f5, Some(MouseButton::Left), modifiers);
+        assert_eq!(names(&cx), vec!["f5.txt", "f6.txt", "f7.txt"], "{mode:?}: shrinking drops rows");
+        cx.simulate_mouse_up(f5, MouseButton::Left, modifiers);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: release commits");
+        assert!(cx.debug_bounds("marquee").is_none(), "{mode:?}: rectangle gone");
+        assert_eq!(names(&cx), vec!["f5.txt", "f6.txt", "f7.txt"]);
+
+        // Shift keeps what was selected and adds the rows it crosses.
+        let shift = gpui::Modifiers { shift: true, ..Default::default() };
+        let top = gpui::point(last.left() + px(30.), row(&cx, "f0.txt").center().y);
+        cx.simulate_mouse_down(start, MouseButton::Left, shift);
+        cx.simulate_mouse_move(top, Some(MouseButton::Left), shift);
+        cx.simulate_mouse_up(top, MouseButton::Left, shift);
+        assert_eq!(names(&cx).len(), 8, "{mode:?}: an additive drag keeps the starting selection");
+
+        // Escape ends the drag and returns to the selection before it.
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(f2, Some(MouseButton::Left), modifiers);
+        cx.simulate_keystrokes("escape");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: Esc ends the drag");
+    }
+}
+
 #[gpui::test]
 fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     let root = TestRoot::new("icon-marquee-add");
@@ -2602,6 +2694,43 @@ fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppConte
     assert!(after > before, "edge autoscroll grows the selection ({before} -> {after})");
     cx.simulate_mouse_move(start, Some(gpui::MouseButton::Left), Default::default());
     cx.simulate_mouse_up(start, gpui::MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn a_row_view_drag_scrolls_at_the_edge_and_reaches_rows_below(cx: &mut TestAppContext) {
+    for (mode, selector) in [
+        (ViewMode::List, "row-f05.txt"),
+        (ViewMode::Columns, "column-0-row-f05.txt"),
+        (ViewMode::Gallery, "gallery-row-f05.txt"),
+    ] {
+        let root = TestRoot::new("row-marquee-scroll");
+        for i in 0..60 {
+            std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+        }
+        let (view, mut cx) = open_sized(cx, &root, 700., 500.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        let row = view.read_with(&cx, |window, cx| window.debug_selector_bounds(selector, cx)).expect("a row");
+        // The rows' side margin is empty space: press there, so a full list has a start.
+        // (Column and Gallery row bounds already start inside the margin.)
+        let gutter = if mode == ViewMode::List { 2. } else { -2. };
+        let start = gpui::point(row.left() + px(gutter), row.center().y);
+        let list = cx.debug_bounds("file-list").expect("the list");
+        let bottom = gpui::point(row.left() + px(60.), list.bottom() - px(6.));
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(bottom, Some(MouseButton::Left), modifiers);
+        let before = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+        assert!(before > 0, "{mode:?}: the drag selects rows");
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(40));
+            cx.run_until_parked();
+        }
+        let after = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+        assert!(after > before, "{mode:?}: edge autoscroll grows the selection ({before} -> {after})");
+        cx.simulate_mouse_up(bottom, MouseButton::Left, modifiers);
+    }
 }
 
 #[gpui::test]
@@ -3773,8 +3902,69 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
     assert!(cancel.right() <= transient.right(), "the cancel button fits at the 760 point minimum width");
     let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
+    assert!(view.read_with(&cx, |this, cx| this.activity_open(cx)), "the affordance opens Activity");
     clear_running(&mut cx);
+}
+
+/// Activity is a tab of the right sidebar, so it shows in every view; ⌥⌘L shows it and pressing it again changes nothing.
+#[gpui::test]
+fn activity_is_a_right_sidebar_tab_in_every_view(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("activity-tab");
+    let (view, mut cx) = open(cx, &root);
+    let tab = |view: &Entity<CrowWindow>, cx: &VisualTestContext| view.read_with(cx, |w, cx| w.info.read(cx).tab());
+    for (keys, name) in [("cmd-1", "Icons"), ("cmd-2", "List"), ("cmd-3", "Columns"), ("cmd-4", "Gallery")] {
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L opens Activity");
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}");
+        assert!(cx.debug_bounds("activity").is_some(), "{name}: the list is drawn in the sidebar");
+        assert!(cx.debug_bounds("info-tab-activity").is_some(), "{name}: the tab is in the strip");
+        let found = violations(&view, &mut cx);
+        assert!(found.is_empty(), "{name}: {found:?}");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: Esc leaves it open and returns to the list");
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L again keeps it open");
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}: and on Activity");
+        cx.simulate_keystrokes("alt-cmd-p");
+        settle(&view, &mut cx);
+        assert_ne!(tab(&view, &cx), InfoTab::Activity, "{name}: another tab");
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}: ⌥⌘L from another tab switches back");
+        cx.simulate_keystrokes("shift-cmd-p");
+        settle(&view, &mut cx);
+        assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⇧⌘P hides the sidebar");
+    }
+}
+
+#[gpui::test]
+fn activity_tab_joins_the_cycle_and_the_palette(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("activity-cycle");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-2");
+    // The first press opens a hidden column; each later one steps to the next tab.
+    let presses = if view.read_with(&cx, |w, cx| w.info.read(cx).visible()) { 2 } else { 3 };
+    for _ in 0..presses {
+        cx.simulate_keystrokes("alt-cmd-p");
+    }
+    settle(&view, &mut cx);
+    let tab = view.read_with(&cx, |w, cx| w.info.read(cx).tab());
+    assert_eq!(tab, InfoTab::Activity, "Preview, Info, then Activity");
+    let tab_button = cx.debug_bounds("info-tab-preview").expect("the strip is drawn");
+    cx.simulate_click(tab_button.center(), gpui::Modifiers::default());
+    assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "clicking Preview leaves Activity");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">activity");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "the palette opens it");
 }
 
 #[gpui::test]
@@ -4257,6 +4447,100 @@ fn open_terminal_failure_shows_the_status_line(cx: &mut TestAppContext) {
     );
 }
 
+/// The titles of the last context menu built, `"—"` for a separator, with `(off)` after a dimmed line.
+fn last_menu_titles(cx: &mut VisualTestContext) -> Vec<String> {
+    use crow_macos::ContextMenuEntry;
+    let entries = effect_calls(cx)
+        .into_iter()
+        .rev()
+        .find_map(|call| match call {
+            crate::effects::Call::ContextMenu(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("a context menu was built");
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            ContextMenuEntry::Separator => "—".to_owned(),
+            ContextMenuEntry::Item { title, enabled: true, .. } => title,
+            ContextMenuEntry::Item { title, .. } => format!("{title} (off)"),
+            ContextMenuEntry::Submenu { title, lines } => {
+                let lines: Vec<_> = lines
+                    .into_iter()
+                    .map(|(line, checked)| format!("{}{line}", if checked { "✓ " } else { "" }))
+                    .collect();
+                format!("{title} ▸ {}", lines.join(" | "))
+            }
+        })
+        .collect()
+}
+
+/// Right-click a path-bar segment: the menu of the folder it names.
+#[gpui::test]
+fn path_segments_open_the_menu_of_their_folder(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("path-segment-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().settings.terminal = "Ghostty".into());
+    // The last segment is the cursor item (alpha); the one before is the folder shown.
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    let parent = root.parent().expect("the fixture has a parent").to_path_buf();
+    let script = |cx: &mut VisualTestContext, choice: Option<usize>| {
+        cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(choice));
+    };
+    let segment = |cx: &mut VisualTestContext, i: usize| {
+        cx.debug_bounds(Box::leak(format!("path-segment-{i}").into_boxed_str()) as &'static str)
+            .expect("the segment is laid out")
+            .center()
+    };
+
+    // An ancestor: no New Folder (it would land in the folder shown), Open is live.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    let titles = last_menu_titles(&mut cx);
+    assert_eq!(
+        titles,
+        ["Open", "Open in New Tab", "—", "Copy Path", "Show in Finder", "Open Terminal Here", "—", "Add to Sidebar"],
+        "{titles:?}"
+    );
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), root, "opening a menu goes nowhere");
+
+    // The shown folder: its New Folder, New File and Paste, and Open dimmed.
+    let at = segment(&mut cx, shown);
+    right_click(&mut cx, at);
+    let titles = last_menu_titles(&mut cx);
+    assert!(titles.contains(&"New Folder".to_owned()) && titles.contains(&"Open (off)".to_owned()), "{titles:?}");
+
+    // Choosing runs on the segment's folder, not the shown one.
+    script(&mut cx, Some(5));
+    effect_calls(&mut cx);
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), parent.clone())),
+        "Open Terminal Here uses the ancestor"
+    );
+    script(&mut cx, Some(1));
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "Open in New Tab");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), parent);
+    script(&mut cx, Some(0));
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    let at = segment(&mut cx, shown - 1);
+    right_click(&mut cx, at);
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)),
+        parent.parent().expect("a grandparent").to_path_buf(),
+        "Open goes to the segment's folder"
+    );
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+}
+
 #[gpui::test]
 fn terminal_menu_follows_the_selection(cx: &mut TestAppContext) {
     use crow_macos::ContextMenuEntry;
@@ -4396,24 +4680,6 @@ fn context_menu_records_entries_and_runs_a_scripted_choice(cx: &mut TestAppConte
         "{calls:?}"
     );
     cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
-}
-
-#[gpui::test]
-fn why_sheet_edits_views_toml_through_effects(cx: &mut TestAppContext) {
-    use crate::effects::Call;
-    let root = fixture("effects-why");
-    let (view, mut cx) = open(cx, &root);
-    cx.update(|window, cx| {
-        window.draw(cx).clear(cx);
-    });
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "cmd-j opens Why");
-    cx.update(|window, cx| {
-        window.draw(cx).clear(cx);
-    });
-    click_selector(&mut cx, "why-open-file");
-    let calls = effect_calls(&mut cx);
-    assert!(calls.contains(&Call::OpenText(config_dir(&cx).join("views.toml"))), "{calls:?}");
 }
 
 #[gpui::test]
@@ -4772,7 +5038,7 @@ fn refocusing_an_open_filter_does_not_count(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
+fn rules_apply_live_and_name_their_layer(cx: &mut TestAppContext) {
     let root = fixture("rules");
     let (view, mut cx) = open(cx, &root);
     let sort = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.sort());
@@ -4783,8 +5049,6 @@ fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
     assert_eq!(sort(&cx).key, crow_fs::SortKey::Size, "an edited views.toml applies to the open folder");
     assert!(!sort(&cx).ascending, "sizes start largest first");
 
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Cmd-J asks why");
     let spoken = cx.update(|window, cx| {
         let _ = window;
         let w = view.read(cx);
@@ -4792,8 +5056,6 @@ fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
         ui.views.resolve(&w.pane().read(cx).current_dir(cx)).sort.1.to_string()
     });
     assert_eq!(spoken, format!("rule \"{}\" in views.toml", root.display()));
-    cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
 
     // A broken file keeps the last good settings and says why.
     write_config(&view, &mut cx, "views.toml", "[defaults]\nsort = \"colour\"\n");
@@ -6696,10 +6958,10 @@ fn closing_an_overlay_over_search_returns_to_the_field(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("cmd-f");
     cx.simulate_input("notes");
     wait_for_search(&view, &mut cx);
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View opens over search");
+    cx.simulate_keystrokes("alt-cmd-t");
+    assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the theme picker opens over search");
     cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none() && w.search.is_some()));
+    assert!(view.read_with(&cx, |w, _| w.picker.is_none() && w.search.is_some()));
     assert!(search_input_focused(&view, &mut cx), "focus goes back to the field, not the hidden pane");
     cx.simulate_keystrokes("escape");
     assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Esc in the field still closes search");
@@ -6924,9 +7186,9 @@ fn menu_items_dispatch(cx: &mut TestAppContext) {
     assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "Go to opens the palette");
     cx.simulate_keystrokes("escape");
 
-    let activity = view.read_with(&cx, |w, _| w.show_activity);
+    let activity = view.read_with(&cx, |w, cx| w.activity_open(cx));
     dispatch_menu("View", "Show Activity", &mut cx);
-    assert_ne!(view.read_with(&cx, |w, _| w.show_activity), activity, "Show Activity flips");
+    assert_ne!(view.read_with(&cx, |w, cx| w.activity_open(cx)), activity, "Show Activity flips");
 
     dispatch_menu("File", "New Tab", &mut cx);
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "New Tab opens a tab");
@@ -7653,7 +7915,7 @@ fn palette_typed_query_finds_files_here(cx: &mut TestAppContext) {
 fn palette_lists_recently_used_commands(cx: &mut TestAppContext) {
     let root = fixture("palette-recent-commands");
     let (view, mut cx) = open(cx, &root);
-    for query in ["columns", "why this"] {
+    for query in ["columns", "gallery"] {
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(&format!(">{query}"));
         settle(&view, &mut cx);
@@ -7670,8 +7932,8 @@ fn palette_lists_recently_used_commands(cx: &mut TestAppContext) {
     let recent = rows.iter().position(|row| row == "# Recently used").expect("a Recently used header");
     let all = rows.iter().position(|row| row == "# All commands").expect("an All commands header");
     assert!(recent < all, "{rows:?}");
-    assert_eq!(&rows[recent + 1..all], ["Why This View?", "View as Columns"], "newest first: {rows:?}");
-    let repeated = rows[all + 1..].iter().filter(|row| *row == "Why This View?" || *row == "View as Columns");
+    assert_eq!(&rows[recent + 1..all], ["View as Gallery", "View as Columns"], "newest first: {rows:?}");
+    let repeated = rows[all + 1..].iter().filter(|row| *row == "View as Gallery" || *row == "View as Columns");
     assert_eq!(repeated.count(), 0, "recent commands are not listed again: {rows:?}");
 }
 
@@ -7734,7 +7996,7 @@ fn palette_recent_commands_setting_false_hides_and_stops_recording(cx: &mut Test
 
     write_config(&view, &mut cx, "settings.toml", "palette_recent_commands = false\n");
     cx.simulate_keystrokes("cmd-k");
-    cx.simulate_input(">why this");
+    cx.simulate_input(">gallery");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
@@ -7978,38 +8240,6 @@ fn the_left_sidebar_slides_with_motion_on_and_snaps_with_it_off(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn why_sheet_scrolls_details_and_keeps_the_footer_reachable(cx: &mut TestAppContext) {
-    let root = fixture("why-focus");
-    let folder = root.join("a deep folder with a long name".repeat(5)).join("another long folder".repeat(8));
-    std::fs::create_dir_all(&folder).expect("create the deep fixture");
-    let (view, mut cx) = open_sized(cx, &folder, 760., 400.);
-    settle(&view, &mut cx);
-    cx.simulate_keystrokes("cmd-j");
-    let (details, buttons, scroll) = view.read_with(&cx, |w, _| {
-        let why = w.why.as_ref().expect("Why opens");
-        (why.focus.clone(), why.buttons.clone(), why.scroll.clone())
-    });
-    for selector in ["why-open-file", "why-defaults", "why-close"] {
-        let button = cx.debug_bounds(selector).expect("the footer button is drawn");
-        assert!(button.bottom() <= px(400.), "{selector} must fit: {button:?}");
-    }
-    let details_bottom = cx.debug_bounds("why-details").unwrap().bottom();
-    assert!(details_bottom < cx.debug_bounds("why-close").unwrap().top());
-    assert!(scroll.max_offset().y > px(0.), "the long details overflow");
-    cx.simulate_keystrokes("right down");
-    assert!(scroll.offset().y < px(0.), "the keyboard scrolls the details");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(details));
-    cx.simulate_keystrokes("tab tab");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
-    cx.simulate_keystrokes("shift-tab");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
-    let found = violations(&view, &mut cx);
-    assert!(found.is_empty(), "{found:?}");
-    cx.simulate_keystrokes("shift-tab shift-tab space");
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()), "Space activates Close");
-}
-
-#[gpui::test]
 fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext) {
     let root = fixture("overlay-focus-rename");
     let (view, mut cx) = open(cx, &root);
@@ -8018,16 +8248,18 @@ fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext)
     // the state ⌘⇧N/⌥⌘N leaves while a big folder reloads.
     let path = root.join("later.txt");
     pane.update(&mut cx, |pane, cx| pane.show_results(vec![path.clone()], true, cx));
-    cx.simulate_keystrokes("cmd-j");
+    cx.simulate_keystrokes("cmd-k");
     std::fs::write(&path, "x").expect("create the file");
     pane.update(&mut cx, |pane, cx| {
         let folder = pane.test_folder();
         folder.update(cx, |folder, cx| folder.reload(cx));
     });
     settle(&view, &mut cx);
-    let why = view.read_with(&cx, |w, _| w.why.as_ref().map(|why| why.focus.clone())).expect("Why opens");
+    let palette = cx
+        .update(|_, cx| view.read(cx).palette.as_ref().map(|palette| palette.input.read(cx).focus_handle(cx)))
+        .expect("the palette opens");
     cx.simulate_keystrokes("down");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(why), "focus stays in the sheet");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(palette), "focus stays in the palette");
     assert!(violations(&view, &mut cx).is_empty());
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
@@ -9361,6 +9593,204 @@ fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
     assert_eq!(selected(&view, &cx), picked, "the selection follows the item, not the row");
 }
 
+/// Folder sizes by name: `zz` is the biggest, `aa` the smallest, the rest in between.
+struct NamedSizer;
+
+impl crate::folder_sizes::Sizer for NamedSizer {
+    fn measure(&self, path: &Path, _: &crow_fs::sizes::Cancel) -> Option<crow_fs::sizes::Measured> {
+        let bytes = match path.file_name().and_then(|name| name.to_str()) {
+            Some("zz" | "f03") => 9_000_000,
+            Some("aa" | "f00") => 20,
+            _ => 5_000,
+        };
+        Some(crow_fs::sizes::Measured { bytes, ..Default::default() })
+    }
+}
+
+fn measure_visible_folders(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    // One draw reports the visible rows, the queued measure runs, the next draw sees it.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| service.measure_now(cx));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    settle(view, cx);
+}
+
+fn size_sorted_fixture(name: &str) -> TestRoot {
+    let root = TestRoot::new(name);
+    let d = root.join("d");
+    for dir in ["aa", "zz", "mm"] {
+        std::fs::create_dir_all(d.join(dir)).expect("create fixture");
+        std::fs::write(d.join(dir).join("x"), "x").expect("create fixture");
+    }
+    std::fs::write(d.join("file.txt"), "x").expect("create fixture");
+    for dir in ["aa", "zz"] {
+        std::fs::create_dir_all(root.join(dir)).expect("create fixture");
+    }
+    root
+}
+
+/// A window whose size service runs `NamedSizer` and measures on demand.
+fn open_with_sizes(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    width: f32,
+    height: f32,
+) -> (Entity<CrowWindow>, VisualTestContext) {
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(width), px(height)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    open_with_before(cx, dir, options, |cx| {
+        crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(NamedSizer));
+        cx.global_mut::<Ui>().settings.folder_sizes = crow_core::FolderSizesMode::Visible;
+    })
+}
+
+/// Rows inside an expanded folder sort like the rows above them, by size too.
+#[gpui::test]
+fn expanded_subfolders_follow_the_size_sort(cx: &mut TestAppContext) {
+    let root = size_sorted_fixture("sort-subfolders");
+    let d = root.join("d");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 700.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    measure_visible_folders(&view, &mut cx);
+    let all = names(&view, &cx);
+    let inside: Vec<&str> =
+        all.iter().skip_while(|n| *n != "d").skip(1).take_while(|n| *n != "file.txt").map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "{all:?}");
+    // A folder opened after the sizes are known is sorted by them as soon as it lists.
+    folder.update(&mut cx, |folder, cx| folder.collapse(&d, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let again = names(&view, &cx);
+    let inside: Vec<&str> =
+        again.iter().skip_while(|n| *n != "d").skip(1).take_while(|n| *n != "file.txt").map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "{again:?}");
+}
+
+/// A folder opened two levels down is sorted by the sizes already known too.
+#[gpui::test]
+fn a_folder_opened_two_levels_down_follows_the_size_sort(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-two-levels");
+    let e = root.join("d").join("e");
+    for dir in ["aa", "zz", "mm"] {
+        std::fs::create_dir_all(e.join(dir)).expect("create fixture");
+    }
+    std::fs::write(e.join("file.txt"), "x").expect("create fixture");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 700.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, cx| folder.expand(root.join("d"), cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(e.clone(), cx));
+    settle(&view, &mut cx);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    measure_visible_folders(&view, &mut cx);
+    let inside = |all: &[String]| -> Vec<String> {
+        all.iter().skip_while(|n| *n != "e").skip(1).take_while(|n| *n != "file.txt").cloned().collect()
+    };
+    assert_eq!(inside(&names(&view, &cx)), ["zz", "mm", "aa"]);
+    folder.update(&mut cx, |folder, cx| folder.collapse(&e, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(e.clone(), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let again = names(&view, &cx);
+    assert_eq!(inside(&again), ["zz", "mm", "aa"], "{again:?}");
+}
+
+/// An open subfolder re-sorting as its sizes arrive does not scroll the list to the cursor.
+#[gpui::test]
+fn an_open_subfolder_resorting_does_not_scroll_the_view(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-sub-no-scroll");
+    let d = root.join("a-dir");
+    for dir in ["aa", "mm", "zz"] {
+        std::fs::create_dir_all(d.join(dir)).expect("create fixture");
+    }
+    for i in 0..40 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 400.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    // Select a file far below the open folder, then scroll back to the top so the
+    // open folder's rows are on screen and the cursor is not.
+    cx.simulate_keystrokes(&["down"; 30].join(" "));
+    let picked = selected(&view, &cx);
+    let offset = |cx: &VisualTestContext| {
+        folder.read_with(cx, |folder, _| f32::from(folder.scroll().0.borrow().base_handle.offset().y))
+    };
+    folder.update(&mut cx, |folder, _| {
+        folder.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(0.)));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let scrolled = offset(&cx);
+    assert_eq!(scrolled, 0.);
+    measure_visible_folders(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let rows = names(&view, &cx);
+    let inside: Vec<&str> = rows.iter().skip_while(|n| *n != "a-dir").skip(1).take(3).map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "the open folder re-sorted: {rows:?}");
+    assert_eq!(selected(&view, &cx), picked);
+    assert_eq!(offset(&cx), scrolled, "the view does not scroll");
+}
+
+/// Sizes arriving re-sort the list without moving the selection or the view.
+#[gpui::test]
+fn sizes_arriving_resort_and_keep_selection_and_view(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-sizes-arrive");
+    for i in 0..40 {
+        std::fs::create_dir_all(root.join(format!("f{i:02}"))).expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("zz")).expect("create fixture");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 400.);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    let before = names(&view, &cx);
+    assert_eq!(before.first().map(String::as_str), Some("f00"), "unmeasured folders stay in name order: {before:?}");
+    // Select a row, scroll past it.
+    cx.simulate_keystrokes("down down down");
+    let picked = selected(&view, &cx);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let offset = |cx: &VisualTestContext| {
+        folder.read_with(cx, |folder, _| f32::from(folder.scroll().0.borrow().base_handle.offset().y))
+    };
+    folder.update(&mut cx, |folder, _| {
+        folder.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(-48.)));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let scrolled = offset(&cx);
+    assert_eq!(scrolled, -48., "the list is scrolled two rows");
+    measure_visible_folders(&view, &mut cx);
+    let after = names(&view, &cx);
+    assert_ne!(before, after, "the rows re-sorted");
+    assert_eq!(selected(&view, &cx), picked, "the selected item stays selected and is the cursor");
+    assert_eq!(offset(&cx), scrolled, "the view does not scroll");
+}
+
 #[gpui::test]
 fn sorting_while_a_folder_loads_keeps_its_listing(cx: &mut TestAppContext) {
     let root = fixture("sort-while-loading");
@@ -9452,13 +9882,6 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
     assert!(root.join("notes.txt").exists(), "cancel runs nothing");
     assert!(focused(&mut cx));
 
-    cx.simulate_keystrokes("cmd-j");
-    settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View? is open");
-    click_scrim(&mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
-    assert!(focused(&mut cx));
-
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("down");
@@ -9482,17 +9905,13 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
 fn clicking_inside_a_sheet_keeps_it_open(cx: &mut TestAppContext) {
     let root = fixture("sheet-inside");
     let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-j");
-    settle(&view, &mut cx);
-    let panel = cx.debug_bounds("sheet-panel").expect("the panel is laid out");
-    cx.simulate_click(panel.center(), Default::default());
-    settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "a click inside does not dismiss");
-
-    cx.simulate_keystrokes("escape");
     cx.simulate_keystrokes("down down cmd-alt-backspace");
     settle(&view, &mut cx);
     assert!(sheet_open(&view, &cx));
+    let panel = cx.debug_bounds("sheet-panel").expect("the panel is laid out");
+    cx.simulate_click(panel.center(), Default::default());
+    settle(&view, &mut cx);
+    assert!(sheet_open(&view, &cx), "a click inside does not dismiss");
     let cancel = cx.debug_bounds("sheet-cancel").expect("the Cancel button is laid out");
     cx.simulate_click(cancel.center(), Default::default());
     settle(&view, &mut cx);
@@ -10460,6 +10879,164 @@ fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
     assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
 }
 
+/// `folder_target = "selected"`: New Folder, New File and Paste work in the one folder selected.
+/// The toolbar's folder menu, its pins, and the 640 px fold.
+#[gpui::test]
+fn the_toolbar_folder_menu_pins_commands_as_buttons(cx: &mut TestAppContext) {
+    let root = fixture("toolbar-pins");
+    let (view, mut cx) = open(cx, &root);
+    let script = |cx: &mut VisualTestContext, choice: Option<usize>| {
+        cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(choice));
+    };
+    let pins = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().settings.toolbar_pins.clone());
+    let submenu_line = |line: usize| {
+        let slots = crate::context_menu::slots(crate::context_menu::MenuKind::Folder).len();
+        crow_macos::SUBMENU_BASE + (slots + 1) * crow_macos::SUBMENU_STRIDE + line
+    };
+    assert!(cx.debug_bounds("toolbar-folder-menu").is_some(), "the menu button is on the toolbar");
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none(), "nothing is pinned by default");
+
+    // The menu: the folder's lines, then Pin to Toolbar with a check beside what is pinned.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("ctrl-cmd-m");
+    let titles = last_menu_titles(&mut cx);
+    assert_eq!(titles[0], "New Folder", "{titles:?}");
+    assert_eq!(
+        titles.last().map(String::as_str),
+        Some("Pin to Toolbar ▸ New Folder | New File | Paste | Copy Path | Show in Finder | Open Terminal Here"),
+        "{titles:?}"
+    );
+
+    // Pin New Folder from the submenu: the button appears and the file keeps the choice.
+    script(&mut cx, Some(submenu_line(0)));
+    let button = cx.debug_bounds("toolbar-folder-menu").expect("menu button").center();
+    cx.simulate_click(button, gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert_eq!(pins(&cx), ["new-folder"]);
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_some(), "the pinned button is drawn");
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "every pinned button has a role and a label: {found:?}");
+    for _ in 0..40 {
+        cx.run_until_parked();
+        if std::fs::read_to_string(config_dir(&cx).join("settings.toml"))
+            .is_ok_and(|text| text.contains("toolbar_pins = [\"new-folder\"]"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let saved = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).unwrap();
+    assert!(saved.contains("toolbar_pins = [\"new-folder\"]"), "{saved}");
+    assert!(saved.contains("# Buttons pinned to the toolbar"), "the comments survive the edit");
+
+    // The pinned submenu line is checked, and the button runs the command on the folder shown.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("ctrl-cmd-m");
+    assert!(last_menu_titles(&mut cx).last().is_some_and(|line| line.contains("✓ New Folder")));
+    let button = cx.debug_bounds("toolbar-pin-new-folder").expect("pinned button").center();
+    cx.simulate_click(button, gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled folder").is_dir(), "the pinned button made a folder");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+
+    // A narrow window folds the pins into the menu button.
+    cx.simulate_resize(size(px(640.), px(640.)));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none(), "640 px keeps only the menu button");
+    assert!(cx.debug_bounds("toolbar-folder-menu").is_some());
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+    cx.simulate_resize(size(px(1200.), px(760.)));
+    settle(&view, &mut cx);
+
+    // Right-click a pinned button to unpin it.
+    script(&mut cx, Some(0));
+    let button = cx.debug_bounds("toolbar-pin-new-folder").expect("pinned button").center();
+    right_click(&mut cx, button);
+    settle(&view, &mut cx);
+    assert_eq!(pins(&cx), Vec::<String>::new());
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none());
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+}
+
+/// The folder menu's pins act on the folder "New items go in" names, never on
+/// the selection or the cursor row.
+#[gpui::test]
+fn pinned_folder_commands_follow_the_folder_target(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("pins-folder-target");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_resize(size(px(1200.), px(760.)));
+    write_config(&view, &mut cx, "settings.toml", "toolbar_pins = [\"open-terminal\", \"show-in-finder\"]\n");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "a folder row is selected");
+    let click = |cx: &mut VisualTestContext, id: &'static str| {
+        let button = cx.debug_bounds(id).expect("pinned button").center();
+        cx.simulate_click(button, gpui::Modifiers::default());
+        cx.run_until_parked();
+    };
+
+    // Default: the folder shown, though a folder is selected.
+    effect_calls(&mut cx);
+    click(&mut cx, "toolbar-pin-open-terminal");
+    click(&mut cx, "toolbar-pin-show-in-finder");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenTerminal(_, p) if *p == root.to_path_buf())), "{calls:?}");
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenFolderInFinder(p) if *p == root.to_path_buf())), "{calls:?}");
+
+    // "Selected folder": the selected folder.
+    write_config(&view, &mut cx, "settings.toml", "toolbar_pins = [\"open-terminal\"]\nfolder_target = \"selected\"\n");
+    settle(&view, &mut cx);
+    effect_calls(&mut cx);
+    click(&mut cx, "toolbar-pin-open-terminal");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.iter().any(|c| matches!(c, Call::OpenTerminal(_, p) if *p == root.join("alpha"))), "{calls:?}");
+    let state = pane(&view, &cx).read_with(&cx, |pane, cx| pane.folder_menu_state(false, cx));
+    let enabled = crate::context_menu::enabled(crate::palette::CommandId::OpenTerminal, state);
+    assert!(enabled, "the folder menu's Open Terminal stays enabled with any selection");
+}
+
+#[gpui::test]
+fn new_items_follow_the_folder_target_setting(cx: &mut TestAppContext) {
+    let root = fixture("folder-target");
+    std::fs::write(root.join("alpha/inner/x.txt"), "x").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the first row is selected");
+
+    // The default is Finder's: the folder shown, whatever is selected.
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("untitled folder").is_dir(), "shown by default");
+
+    write_config(&view, &mut cx, "settings.toml", "folder_target = \"selected\"\n");
+    cx.simulate_keystrokes("home");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("cmd-alt-n");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/untitled").is_file(), "New File lands in the selected folder");
+    assert!(
+        cx.read(|cx| cx.global::<Operations>().message.as_ref().is_some_and(|(text, _)| text.contains("in alpha"))),
+        "the status says where it went"
+    );
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)), None, "no rename waits for a row not shown");
+
+    // A file, or two rows, selects no single folder: back to the folder shown.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx).len(), 2);
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("untitled folder 2").is_dir(), "a multi-selection uses the shown folder");
+}
+
 #[gpui::test]
 fn new_folder_in_column_view_lands_in_the_focused_column_only(cx: &mut TestAppContext) {
     let root = fixture("newfolder-columns");
@@ -10570,6 +11147,34 @@ fn undo_arrives_in_full_motion(cx: &mut TestAppContext) {
         effects.iter().any(|(name, fx)| name == "notes.txt" && *fx == Fx::Arrive),
         "the restored row arrives: {effects:?}"
     );
+}
+
+/// Activity bug: New File, rename it, then Undo on the New File entry in Activity
+/// did nothing but still marked the entry undone.
+#[gpui::test]
+fn activity_undo_of_a_renamed_new_file_trashes_it(cx: &mut TestAppContext) {
+    let root = fixture("activity-undo-renamed");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-alt-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    cx.simulate_input("Notes");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("Notes").is_file());
+    let labels: Vec<String> =
+        cx.read(|cx| cx.global::<Operations>().log.iter().map(|e| e.record.label.clone()).collect());
+    assert_eq!(labels.len(), 2, "New File and Rename: {labels:?}");
+
+    cx.simulate_keystrokes("cmd-alt-l");
+    cx.run_until_parked();
+    let undo = cx.debug_bounds("activity-undo-0").expect("the New File entry offers Undo").center();
+    cx.simulate_click(undo, Default::default());
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!root.join("Notes").exists(), "the renamed file went to the Trash");
+    assert!(!root.join("untitled").exists());
+    assert!(cx.read(|cx| cx.global::<Operations>().log[0].undone), "the entry reads undone");
 }
 
 #[gpui::test]
@@ -10873,9 +11478,11 @@ fn option_command_p_opens_the_right_sidebar_then_cycles_its_tabs(cx: &mut TestAp
     finish_motion(&view, &mut cx);
     assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "⌥⌘P opens it");
     assert_eq!(tab(&view, &cx), InfoTab::Preview, "on the tab it had");
-    // Open: each press steps to the next tab and wraps (Git is off, so two tabs).
+    // Open: each press steps to the next tab and wraps (Git is off, so three tabs).
     cx.simulate_keystrokes("cmd-alt-p");
     assert_eq!(tab(&view, &cx), InfoTab::Info);
+    cx.simulate_keystrokes("cmd-alt-p");
+    assert_eq!(tab(&view, &cx), InfoTab::Activity);
     cx.simulate_keystrokes("cmd-alt-p");
     assert_eq!(tab(&view, &cx), InfoTab::Preview);
     assert!(view.read_with(&cx, |w, cx| w.info.read(cx).visible()), "cycling never closes it");
@@ -11731,7 +12338,10 @@ fn transfers_queue_in_submission_order_and_activity_is_app_wide(cx: &mut TestApp
     let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
     assert_eq!(cx_b.read(|cx| cx.global::<Operations>().queue.len()), 1, "the queue is app-wide");
     view_b.update(&mut cx_b, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx_b.update(|window, cx| {
@@ -11794,7 +12404,10 @@ fn closing_the_origin_window_rehosts_a_conflict(cx: &mut TestAppContext) {
     assert!(!view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))));
     assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_some()), "the job is still waiting");
     view_b.update(&mut cx_b, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx_b.update(|window, cx| {
@@ -11952,7 +12565,10 @@ fn a_paused_head_keeps_the_queue_and_activity_actions_follow_it(cx: &mut TestApp
     );
 
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -12283,7 +12899,10 @@ fn a_cancelled_terminal_keeps_its_committed_prefix_undoable(cx: &mut TestAppCont
     assert!(cx.read(|cx| cx.global::<Operations>().log[0].cancelled));
 
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -13600,9 +14219,7 @@ fn tip_never_shows_while_busy(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
 
-    for (open_keys, close_keys, open) in
-        [("cmd-f", "escape", "search"), ("cmd-k", "escape", "palette"), ("cmd-alt-l", "cmd-alt-l", "activity")]
-    {
+    for (open_keys, close_keys, open) in [("cmd-f", "escape", "search"), ("cmd-k", "escape", "palette")] {
         cx.simulate_keystrokes(open_keys);
         settle(&view, &mut cx);
         offer(&view, TipId::Filter, &mut cx);
@@ -14608,10 +15225,6 @@ fn static_selector(selector: &str) -> Option<&'static str> {
         "search-idle" => "search-idle",
         "palette-commands-token" => "palette-commands-token",
         "palette-empty" => "palette-empty",
-        "why-open-file" => "why-open-file",
-        "why-reset" => "why-reset",
-        "why-defaults" => "why-defaults",
-        "why-close" => "why-close",
         "sheet-panel" => "sheet-panel",
         "sheet-scrim" => "sheet-scrim",
         "sheet-confirm" => "sheet-confirm",
@@ -15569,7 +16182,7 @@ fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext
     assert!(!root.join("line\nbreak.txt").exists(), "the rename applied");
     cx.simulate_keystrokes("alt-cmd-l");
     settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.show_activity), "the activity sheet is open");
+    assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "the activity sheet is open");
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
@@ -18046,7 +18659,7 @@ fn audit_batch_one_ancestor_path_segment_springs(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut TestAppContext) {
+fn audit_batch_one_virtual_tab_refuses_folder_commands(cx: &mut TestAppContext) {
     let root = fixture("audit-virtual-commands");
     let (view, mut cx) = open(cx, &root);
     write_config(
@@ -18062,11 +18675,8 @@ fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut T
     });
     wait_for_pane_search(&view, &mut cx);
     view.update_in(&mut cx, |w, window, cx| w.previous_tab(&PreviousTab, window, cx));
-    cx.simulate_keystrokes("cmd-j");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()));
     view.update_in(&mut cx, |w, window, cx| w.next_tab(&NextTab, window, cx));
     settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
 
     for (command, expected) in [
         (palette::CommandId::Paste, "Open a folder to use this command"),
@@ -18551,7 +19161,10 @@ fn empty_trash_shows_in_activity_while_running_and_after(cx: &mut TestAppContext
     // The engine slot is claimed while Empty Trash runs; hold it to look.
     cx.update(|_, cx| cx.global_mut::<Operations>().maintenance = Some(crate::operations::Maintenance::EmptyTrash));
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.run_until_parked();
@@ -19188,6 +19801,39 @@ fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContex
         }
     }
     assert!(finals.windows(2).all(|w| w[0] == w[1]), "every mode ends on the same band: {finals:?}");
+}
+
+/// The band's last animated frame is the settled layout, so nothing jumps when the
+/// motion ends (the field once stopped 20 px short and the buttons were 5 px off).
+#[gpui::test]
+fn the_search_band_ends_its_motion_without_a_jump(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for width in [900., 1280.] {
+        let root = fixture("band-jump");
+        let (view, mut cx) = open_sized(cx, &root, width, 700.);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+        cx.simulate_keystrokes("cmd-f");
+        let ids = ["search-field", "search-save", "search-done", "search-match-all"];
+        let sample = |cx: &mut VisualTestContext| -> Vec<(f32, f32)> {
+            ids.iter()
+                .map(|id| {
+                    let b = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} at {width}"));
+                    (f32::from(b.origin.x), f32::from(b.size.width))
+                })
+                .collect()
+        };
+        // Just inside the motion's last frame.
+        step_motion(&view, &mut cx, crow_core::motion::ms::SEARCH_BAND - 4);
+        let last = sample(&mut cx);
+        step_motion(&view, &mut cx, 20);
+        let settled = sample(&mut cx);
+        for ((id, last), settled) in ids.iter().zip(&last).zip(&settled) {
+            assert!(
+                (last.0 - settled.0).abs() < 1.0 && (last.1 - settled.1).abs() < 1.0,
+                "{id} at {width}: last frame {last:?} vs settled {settled:?}"
+            );
+        }
+    }
 }
 
 #[gpui::test]

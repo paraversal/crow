@@ -5,7 +5,7 @@
 //! 3. `[folder."<path>"]` for one folder, which Crow writes when you change that
 //!    folder's view or sort.
 //!
-//! Every resolved value remembers which layer it came from, for "Why this view?".
+//! Every resolved value remembers which layer it came from, so Settings can say where a value is inherited from.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -27,7 +27,6 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 #   2. [[rule]]                   folders matching a path pattern (later rules win)
 #   3. [folder."~/Some/Folder"]   one folder; Crow writes these when you change
 #                                 a folder's view or sort
-# View ▸ Why This View? (Cmd-J) shows which layer decided what.
 #
 # Keys, in any layer:
 #   view = "icons" | "list" | "columns" | "gallery"
@@ -175,9 +174,6 @@ pub struct ResolvedView {
     pub preview_providers: (Vec<String>, Source),
     /// `None`: no layer chose one, so `settings.toml`'s icon pack applies.
     pub icon_source: Option<(String, Source)>,
-    /// Every rule that matched, in order (for the explanation, even those whose
-    /// values were all overridden).
-    pub matched_rules: Vec<String>,
 }
 
 impl ResolvedView {
@@ -291,7 +287,6 @@ impl Views {
             columns: (vec!["modified".into(), "size".into(), "kind".into()], Source::Builtin),
             preview_providers: (Vec::new(), Source::Builtin),
             icon_source: None,
-            matched_rules: Vec::new(),
         };
         let mut apply = |layer: &ViewLayer, source: Source| {
             if let Some(v) = layer.view {
@@ -325,15 +320,12 @@ impl Views {
             }
         };
         apply(&self.defaults, Source::Defaults);
-        let mut matched = Vec::new();
         for rule in self.rules.iter().filter(|r| r.matchers.iter().any(|m| m.is_match(dir))) {
             apply(&rule.layer, Source::Rule(rule.pattern.clone()));
-            matched.push(rule.pattern.clone());
         }
         if let Some(layer) = self.folders.get(dir) {
             apply(layer, Source::Folder);
         }
-        out.matched_rules = matched;
         out
     }
 
@@ -858,7 +850,6 @@ mod tests {
         assert_eq!(v.sort, (SortKey::Name, Source::Defaults));
         assert!(v.ascending.0);
         assert_eq!(v.columns.0, ["modified", "size", "kind"]);
-        assert!(v.matched_rules.is_empty());
     }
 
     #[test]
@@ -887,7 +878,6 @@ view = "list"
         assert_eq!(v.resolve(Path::new("/Users/me/Projects/crow/src")).view.0, ViewMode::Columns);
         let modules = v.resolve(Path::new("/Users/me/Projects/web/node_modules"));
         assert_eq!(modules.view, (ViewMode::List, Source::Rule("**/node_modules".into())));
-        assert_eq!(modules.matched_rules, ["~/Projects/**", "**/node_modules"]);
     }
 
     #[test]

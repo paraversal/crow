@@ -246,6 +246,93 @@ impl Record {
         results
     }
 
+    /// Where `path` went in this record: `Some(Some(new))` when a move or rename
+    /// carried it (or a folder above it), `Some(None)` when it (or a folder above
+    /// it) was trashed or deleted, `None` when the record did not touch it. A batch
+    /// rename is one simultaneous mapping, so at most one entry applies (a shift
+    /// 1→2, 2→3 sends 1 to 2, not 3). With `ancestors_only`, only a folder above
+    /// `path` counts: a vacated path follows its parent but not a new item that
+    /// later took its name.
+    fn carries(&self, path: &Path, ancestors_only: bool) -> Option<Option<PathBuf>> {
+        let under = |base: &Path| -> Option<PathBuf> {
+            let rest = path.strip_prefix(base).ok()?;
+            if rest.as_os_str().is_empty() { (!ancestors_only).then(PathBuf::new) } else { Some(rest.to_path_buf()) }
+        };
+        let land =
+            |to: &Path, rest: PathBuf| if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+        for step in &self.steps {
+            match step {
+                Step::Moved { from, to } => {
+                    if let Some(rest) = under(from) {
+                        return Some(Some(land(to, rest)));
+                    }
+                }
+                Step::BatchRenamed { moves } => {
+                    for entry in moves {
+                        if let Some(rest) = under(&entry.source) {
+                            return Some(Some(land(&entry.target, rest)));
+                        }
+                    }
+                }
+                Step::Trashed { original: gone, .. } | Step::Deleted(gone) => {
+                    if under(gone).is_some() {
+                        return Some(None);
+                    }
+                }
+                Step::Created(_) => {}
+            }
+        }
+        None
+    }
+
+    /// This record with its paths carried through the moves and renames of
+    /// `later` records, oldest first, so undoing an older entry ("New File", then
+    /// "Rename") finds the item where it is now. Items it left behind follow their
+    /// own renames; the places it vacated (a move's source, a trashed item's
+    /// original) follow only renames of the folders above them. An item a later
+    /// record trashed or deleted is not followed: that is `NotFound`, so a new
+    /// item that later took the same name is never touched.
+    pub fn forwarded<'a>(&self, later: impl IntoIterator<Item = &'a Record> + Clone) -> Result<Record, OpError> {
+        let forward = |path: &Path, ancestors_only: bool| -> Result<PathBuf, OpError> {
+            let mut current = path.to_path_buf();
+            for record in later.clone() {
+                match record.carries(&current, ancestors_only) {
+                    Some(Some(next)) => current = next,
+                    Some(None) if !ancestors_only => return Err(OpError::NotFound(current)),
+                    _ => {}
+                }
+            }
+            Ok(current)
+        };
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| {
+                Ok(match step {
+                    Step::Created(path) => Step::Created(forward(path, false)?),
+                    Step::Moved { from, to } => Step::Moved { from: forward(from, true)?, to: forward(to, false)? },
+                    Step::Trashed { original, trashed } => {
+                        Step::Trashed { original: forward(original, true)?, trashed: trashed.clone() }
+                    }
+                    Step::BatchRenamed { moves } => Step::BatchRenamed {
+                        moves: moves
+                            .iter()
+                            .map(|entry| {
+                                Ok(BatchRenameEntry {
+                                    source: forward(&entry.source, true)?,
+                                    target: forward(&entry.target, false)?,
+                                    ..entry.clone()
+                                })
+                            })
+                            .collect::<Result<_, OpError>>()?,
+                    },
+                    other => other.clone(),
+                })
+            })
+            .collect::<Result<_, OpError>>()?;
+        Ok(Record { label: self.label.clone(), steps })
+    }
+
     /// Old path → new path for every item a batch rename step in this record moved.
     pub fn rename_map(&self) -> std::collections::HashMap<PathBuf, PathBuf> {
         self.steps
@@ -799,11 +886,14 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
     }
     let never = AtomicBool::new(false);
     let mut reversed = Record { label: format!("Undo {}", record.label), steps: Vec::new() };
+    let mut missing = None;
     for step in record.steps.iter().rev() {
         match step {
             Step::Created(path) => {
                 // Undoing a creation moves it to the Trash rather than deleting it.
+                // An item already gone is skipped, but an undo that changes nothing fails.
                 if !exists(path) {
+                    missing.get_or_insert_with(|| path.clone());
                     continue;
                 }
                 let trashed = trash.trash(path).map_err(io_err(path))?;
@@ -841,6 +931,11 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
             }
             Step::Deleted(path) => return Err(OpError::NotFound(path.clone())),
         }
+    }
+    if reversed.steps.is_empty()
+        && let Some(path) = missing
+    {
+        return Err(OpError::NotFound(path));
     }
     Ok(reversed)
 }

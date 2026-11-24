@@ -2858,7 +2858,16 @@ impl SearchView {
             .flex()
             .items_center()
             .gap(px(if compact { 4. } else { 10. }))
-            .when(growing, |band| band.justify_end())
+            // The band's free space is split between the field and a spacer that
+            // gives it back (shares sum to exactly 1; taffy lays out a sum under 1 on
+            // another path that lands 20 px short of the settled width, a jump on the
+            // last frame). The spacer's negative margin cancels the row's gap.
+            .when_some(look.filter(|look| look.widen < 1.0), |band, look| {
+                band.child(div().flex_basis(px(0.)).mr(px(-10.)).map(|mut spacer| {
+                    spacer.style().flex_grow = Some(1.0 - look.widen);
+                    spacer
+                }))
+            })
             .child(field);
         let controls = look.map_or(1.0, |look| look.controls);
         let reveal = move |natural: f32| (look.is_some() && controls < 1.0).then(|| px(natural * controls));
@@ -2880,7 +2889,7 @@ impl SearchView {
                 .hover(move |style| style.bg(save_surface))
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Save)))
                 .opacity(controls)
-                .when_some(reveal(64.), |save, width| save.w(width).overflow_hidden().whitespace_nowrap())
+                .when_some(reveal(80.), |save, width| save.max_w(width).overflow_hidden().whitespace_nowrap())
                 .child(save_label),
         );
         let destination = self.saved.is_some() || self.tag.is_some();
@@ -2901,7 +2910,7 @@ impl SearchView {
         if !destination {
             row = row.child(
                 done.opacity(controls)
-                    .when_some(reveal(84.), |done, width| done.w(width).overflow_hidden().whitespace_nowrap()),
+                    .when_some(reveal(100.), |done, width| done.max_w(width).overflow_hidden().whitespace_nowrap()),
             );
         }
         if compact {
@@ -3647,7 +3656,7 @@ impl SearchView {
         let decoration_ids = crate::plugins::decoration_ids(cx);
         let has_decorations = !decoration_ids.is_empty();
         let plugin_scope = self.plugin_scope_key();
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = crate::icon_packs::Resolver::for_source(cx, &self.icon_source(cx));
         let clipboard = cx.global::<Operations>().clipboard.as_ref();
         let flash = clipboard
@@ -4088,7 +4097,7 @@ impl Render for SearchView {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let idle = self.query(cx).trim().is_empty() && self.predicates.is_empty();
-        let now = Instant::now();
+        let now = crate::clock::now();
         if cx
             .global::<Operations>()
             .clipboard

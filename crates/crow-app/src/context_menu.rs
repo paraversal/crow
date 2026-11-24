@@ -232,6 +232,119 @@ pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App)
         .collect()
 }
 
+/// A folder-menu command the toolbar can pin.
+#[derive(Clone, Copy, Debug)]
+pub struct Pin {
+    /// The id in `settings.toml`'s `toolbar_pins` (one of `crow_core::toolbar::PINNABLE`).
+    pub id: &'static str,
+    pub command: CommandId,
+    /// The button's selector, for tests and the fuzzer.
+    pub selector: &'static str,
+    pub glyph: crate::icons::Glyph,
+}
+
+/// The pinnable commands in menu order.
+pub fn pinnable() -> Vec<Pin> {
+    use crate::icons::Glyph;
+    let glyph = |id: &str| match id {
+        "new-folder" => (Glyph::NewFolder, "toolbar-pin-new-folder"),
+        "new-file" => (Glyph::NewFile, "toolbar-pin-new-file"),
+        "paste" => (Glyph::Paste, "toolbar-pin-paste"),
+        "copy-path" => (Glyph::CopyPath, "toolbar-pin-copy-path"),
+        "show-in-finder" => (Glyph::Reveal, "toolbar-pin-show-in-finder"),
+        "open-terminal" => (Glyph::Terminal, "toolbar-pin-open-terminal"),
+        other => unreachable!("{other} is not a pinnable id"),
+    };
+    crow_core::toolbar::PINNABLE
+        .iter()
+        .map(|id| {
+            let command =
+                COMMANDS.iter().find(|command| command.id.key() == *id).expect("every pinnable id is a command");
+            let (glyph, selector) = glyph(id);
+            Pin { id, command: command.id, selector, glyph }
+        })
+        .collect()
+}
+
+/// The toolbar folder menu: the folder's menu (`Folder`) and a Pin to Toolbar submenu with a
+/// check beside what is pinned. Submenu line `n` is `pinnable()[n]`.
+pub fn toolbar_entries(state: MenuState, pins: &[String], cx: &App) -> Vec<ContextMenuEntry> {
+    let mut entries = entries(MenuKind::Folder, state, KeyScope::List, cx);
+    entries.push(ContextMenuEntry::Separator);
+    entries.push(ContextMenuEntry::Submenu {
+        title: "Pin to Toolbar".to_owned(),
+        lines: pinnable()
+            .into_iter()
+            .map(|pin| (title(command(pin.command)).to_owned(), crow_core::toolbar::is_pinned(pins, pin.id)))
+            .collect(),
+    });
+    entries
+}
+
+/// A path-bar segment's menu: the folder it names, which is the shown one for
+/// the last segment, so only that one offers New Folder, New File and Paste.
+const PATH_FOLDER: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    Some((CommandId::OpenTerminal, None)),
+    None,
+    Some((CommandId::AddToSidebar, None)),
+];
+
+const PATH_SHOWN_FOLDER: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::NewFolder, None)),
+    Some((CommandId::NewFile, None)),
+    Some((CommandId::Paste, None)),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    Some((CommandId::OpenTerminal, None)),
+    None,
+    Some((CommandId::AddToSidebar, None)),
+];
+
+const PATH_FILE: &[TitledSlot] =
+    &[Some((CommandId::Open, None)), None, Some((CommandId::CopyPath, None)), Some((CommandId::ShowInFinder, None))];
+
+/// The lines for a path segment: a file, a folder, or the folder shown.
+pub fn path_slots(is_dir: bool, shown: bool) -> &'static [TitledSlot] {
+    match (is_dir, shown) {
+        (false, _) => PATH_FILE,
+        (true, false) => PATH_FOLDER,
+        (true, true) => PATH_SHOWN_FOLDER,
+    }
+}
+
+/// The native menu's lines for a path segment. Only the shown folder's lines carry
+/// keys, since the keys act on the list; Open is dimmed there, as the click does nothing.
+pub fn path_entries(slots: &[TitledSlot], shown: bool, can_paste: bool, cx: &App) -> Vec<ContextMenuEntry> {
+    slots
+        .iter()
+        .map(|slot| match slot {
+            None => ContextMenuEntry::Separator,
+            Some((id, own_title)) => {
+                let command = command(*id);
+                let list_key = matches!(id, CommandId::NewFolder | CommandId::NewFile | CommandId::Paste);
+                ContextMenuEntry::Item {
+                    title: own_title.unwrap_or_else(|| title(command)).to_owned(),
+                    shortcut: (shown && list_key).then(|| shortcut(command, KeyScope::List, cx)).flatten(),
+                    enabled: match id {
+                        CommandId::Open => !shown,
+                        CommandId::Paste => can_paste,
+                        _ => true,
+                    },
+                }
+            }
+        })
+        .collect()
+}
+
 /// Search results: the row's own menu. Reveal is the search panel's ⌘R, which
 /// closes search and shows the result in its folder.
 const SEARCH: &[TitledSlot] = &[

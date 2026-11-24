@@ -374,7 +374,6 @@ mod tests {
                 "Icon Caption: Off",
                 "Icon Caption: Lines Changed",
                 "Choose List Columns…",
-                "Why This View?",
                 "Use as Defaults",
                 "Reset View for This Folder",
                 "—",
@@ -386,6 +385,7 @@ mod tests {
                 "Show Git Diff",
                 "Calculate Folder Sizes",
                 "Show Activity",
+                "Show Folder Menu",
                 "Theme…",
             ]
         );

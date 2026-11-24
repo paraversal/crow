@@ -25,6 +25,7 @@ mod table;
 mod tabs;
 mod tags;
 mod tips;
+pub mod toolbar;
 mod usage;
 mod views;
 
@@ -32,7 +33,10 @@ pub use config::{
     abbreviate_home, cache_dir, edit_toml, expand_home, file_message, home, parse_error, set_value, state_dir,
     write_atomic,
 };
-pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
+pub use exclude::{
+    DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude, save_exclude_enabled,
+    save_exclude_names,
+};
 pub use extensions::{
     Align, Column, ColumnCell, ColumnContext, CommandIntent, CommandTarget, ContributionValues, Descriptor,
     DescriptorSource, EntryData, EntryHandle, EntryValue, Excerpt, ExtensionId, ExtensionKind, Extensions, HookEvent,
@@ -57,9 +61,9 @@ pub use saved_queries::{
 };
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, IconStyle, KeymapLayer, PathBarMode, SearchMatch,
-    Settings, SettingsError, SidebarStyle, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings,
-    save_bool_setting, save_number_setting, save_setting, save_table_number,
+    DEFAULT_SETTINGS, EnterAction, FolderSizesMode, FolderTarget, HintsMode, IconStyle, KeymapLayer, PathBarMode,
+    SearchMatch, Settings, SettingsError, SidebarStyle, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings,
+    save_bool_setting, save_number_setting, save_setting, save_string_list_setting, save_table_number,
 };
 pub use shelf::{Shelf, ShelfItem};
 pub use sidebar::{

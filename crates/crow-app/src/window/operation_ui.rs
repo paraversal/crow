@@ -71,21 +71,29 @@ fn stop_then(intent: StopIntent, handle: Option<gpui::WindowHandle<CrowWindow>>,
 }
 
 impl CrowWindow {
+    /// Whether the right sidebar is open on its Activity tab.
+    pub(super) fn activity_open(&self, cx: &App) -> bool {
+        let info = self.info.read(cx);
+        info.visible() && info.tab() == InfoTab::Activity
+    }
+
     pub(super) fn activity_owns_focus(&self, window: &Window, cx: &App) -> bool {
-        self.sheet.is_none() && self.show_activity && self.activity_focus.contains_focused(window, cx)
+        self.sheet.is_none() && self.activity_open(cx) && self.activity_focus.contains_focused(window, cx)
     }
 
     pub(super) fn toggle_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sheet.is_some() {
             return;
         }
-        if self.activity_owns_focus(window, cx) {
-            self.focus_center(window, cx);
-        }
-        self.show_activity = !self.show_activity;
-        if self.show_activity {
-            window.focus(&self.activity_focus, cx);
-        }
+        // Show Activity: opens the right sidebar on Activity and focuses it. Pressing it
+        // again changes nothing (⇧⌘P or the chevron hides the sidebar).
+        let was_visible = self.info.read(cx).visible();
+        self.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(InfoTab::Activity, cx);
+        });
+        self.begin_pane_slide(was_visible, cx);
+        window.focus(&self.activity_focus, cx);
         cx.notify();
     }
 
@@ -228,6 +236,22 @@ impl CrowWindow {
             // Whatever is still there refuses.
             pane.update(cx, |pane, cx| pane.start_effect(&paths, Fx::Refuse, cx)).ok();
         }
+        // With `folder_target = "selected"` a new item can land in a folder that is not
+        // listed: nothing to select or rename there, so say where it went.
+        let (results, rename) = match request {
+            Request::NewFolder { parent } | Request::NewFile { parent }
+                if !failed && *parent != self.pane().read(cx).current_dir(cx) =>
+            {
+                if let Some(created) = results.first() {
+                    let name = created.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    let folder = parent.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    operations::message(format!("Created “{name}” in {folder}"), false, cx);
+                    cx.notify();
+                }
+                (Vec::new(), false)
+            }
+            _ => (results, rename),
+        };
         pane.update(cx, |pane, cx| {
             pane.show_results(results, rename, cx);
             pane.refresh_saved(cx);
@@ -905,7 +929,9 @@ impl CrowWindow {
                 // Rename labels carry both names; errors carry the path at fault.
                 let label = crate::style::display_text(&e.record.label).into_owned();
                 let state = crate::style::display_text(&state).into_owned();
-                (i, label, format!("{} {state}", when.format("%H:%M")), e.record.is_undoable() && !e.undone)
+                let when = when.format("%H:%M").to_string();
+                let when = if state.is_empty() { when } else { format!("{when} {state}") };
+                (i, label, when, e.record.is_undoable() && !e.undone)
             })
             .collect();
         let mut previous = std::mem::take(&mut self.activity_controls);
@@ -1099,6 +1125,7 @@ impl CrowWindow {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .child(label)
@@ -1114,7 +1141,7 @@ impl CrowWindow {
             .collect();
         if previous.values().any(|focus| focus.is_focused(window)) {
             cx.defer_in(window, |this, window, cx| {
-                if this.show_activity && this.sheet.is_none() {
+                if this.activity_open(cx) && this.sheet.is_none() {
                     window.focus(&this.activity_focus, cx);
                 }
             });
@@ -1135,27 +1162,14 @@ impl CrowWindow {
                 }
             })
             .on_action(cx.listener(|this, _: &crate::actions::CancelOperation, window, cx| {
-                this.toggle_activity(window, cx);
+                this.focus_center(window, cx);
                 cx.stop_propagation();
             }))
             .role(Role::List)
             .aria_label("Activity")
-            .absolute()
-            .top(px(BAND_HEIGHT))
-            .right(px(12.))
-            .w(px(360.))
-            .max_h(px(420.))
-            .overflow_y_scroll()
-            .p_3()
             .flex()
             .flex_col()
             .gap_2()
-            .rounded_lg()
-            .bg(color(theme.role("surface")))
-            .border_1()
-            .border_color(border)
-            .shadow_lg()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
             .when(active_row.is_none() && trash_row.is_none() && queued_rows.is_empty() && !has_history, |list| {
                 list.child(div().text_color(muted).child("Nothing yet"))
             })

@@ -298,6 +298,41 @@ fn renames_check_names_and_handle_case_changes() {
     assert!(f.snapshot().contains_key("Notes.txt"));
 }
 
+/// Activity bug: New File, Rename, then Undo on the older New File entry left the
+/// file in place and still reported the undo as done.
+#[test]
+fn undoing_an_older_creation_follows_later_renames_and_never_succeeds_empty() {
+    let f = Fixture::new("forward");
+    let created = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&created);
+    let folder = f.run(Request::NewFolder { parent: f.root.clone() });
+    ok(&folder);
+    f.file("untitled folder/inner.txt", "i");
+    let renamed = f.run(Request::Rename { path: f.path("untitled"), new_name: "Notes".into() });
+    ok(&renamed);
+    let moved = f.run(Request::Move { paths: paths(vec![f.path("Notes")]), into: f.path("untitled folder") });
+    ok(&moved);
+    let folder_renamed = f.run(Request::Rename { path: f.path("untitled folder"), new_name: "Docs".into() });
+    ok(&folder_renamed);
+    assert!(f.path("Docs/Notes").is_file());
+
+    // Without forwarding the stale path is gone: that is an error, not an empty success.
+    assert!(matches!(undo(&created.record, &f.trash), Err(OpError::NotFound(_))));
+    assert!(f.path("Docs/Notes").is_file(), "the refused undo changed nothing");
+
+    let later = [&renamed.record, &moved.record, &folder_renamed.record];
+    let forwarded = created.record.forwarded(later).unwrap();
+    assert_eq!(forwarded.steps, vec![Step::Created(f.path("Docs/Notes"))]);
+    let reversed = undo(&forwarded, &f.trash).expect("the forwarded undo trashes the file where it is now");
+    assert_eq!(reversed.steps.len(), 1);
+    assert!(!f.path("Docs/Notes").exists());
+    assert_eq!(f.snapshot()["Docs/inner.txt"], "i", "nothing else moved");
+
+    // An older rename follows the later parent rename too.
+    let older_move = moved.record.forwarded([&folder_renamed.record]).unwrap();
+    assert!(matches!(&older_move.steps[..], [Step::Moved { to, .. }] if *to == f.path("Docs/Notes")));
+}
+
 #[test]
 fn new_folder_trash_and_permanent_delete() {
     let f = Fixture::new("misc");
@@ -1840,4 +1875,72 @@ fn a_very_deep_tree_is_measured_and_planned_without_recursion() {
     assert_eq!(planned.items[0].bytes, 5);
     let measured = crate::sizes::measure(&f.path("deep"), &crate::sizes::Cancel::new()).unwrap();
     assert_eq!((measured.bytes, measured.folders), (5, 180));
+}
+
+#[test]
+fn forwarding_through_a_batch_applies_one_entry_per_item() {
+    let f = Fixture::new("forward-batch");
+    let created = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&created);
+    let renamed = f.run(Request::Rename { path: f.path("untitled"), new_name: "1.txt".into() });
+    ok(&renamed);
+    f.file("2.txt", "two");
+    let shift = run_batch(&f, &[(f.path("1.txt"), "2.txt"), (f.path("2.txt"), "3.txt")]);
+    ok(&shift);
+    let forwarded = created.record.forwarded([&renamed.record, &shift.record]).unwrap();
+    assert_eq!(forwarded.steps, vec![Step::Created(f.path("2.txt"))], "a shift moves the file once, not twice");
+    ok(&f.run(Request::Rename { path: f.path("2.txt"), new_name: "a.txt".into() }));
+
+    let f = Fixture::new("forward-swap");
+    let created = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&created);
+    f.file("b.txt", "b");
+    let renamed = f.run(Request::Rename { path: f.path("untitled"), new_name: "a.txt".into() });
+    ok(&renamed);
+    let swap = run_batch(&f, &[(f.path("a.txt"), "b.txt"), (f.path("b.txt"), "a.txt")]);
+    ok(&swap);
+    let forwarded = created.record.forwarded([&renamed.record, &swap.record]).unwrap();
+    assert_eq!(forwarded.steps, vec![Step::Created(f.path("b.txt"))], "a swap sends a to b");
+}
+
+#[test]
+fn forwarding_stops_at_a_later_trash_and_never_follows_a_new_item_with_the_name() {
+    let f = Fixture::new("forward-trash");
+    let created = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&created);
+    let trashed = f.run(Request::Trash { paths: paths(vec![f.path("untitled")]) });
+    ok(&trashed);
+    let again = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&again);
+    let renamed = f.run(Request::Rename { path: f.path("untitled"), new_name: "Other".into() });
+    ok(&renamed);
+    let later = [&trashed.record, &again.record, &renamed.record];
+    assert!(matches!(created.record.forwarded(later), Err(OpError::NotFound(_))));
+    assert!(f.path("Other").is_file(), "the newer file is left alone");
+}
+
+#[test]
+fn a_vacated_path_follows_its_parent_but_not_a_new_item_in_its_place() {
+    let f = Fixture::new("forward-vacated");
+    f.file("A/x.txt", "x");
+    f.file("B/keep.txt", "k");
+    let moved = f.run(Request::Move { paths: paths(vec![f.path("A/x.txt")]), into: f.path("B") });
+    ok(&moved);
+    let parent = f.run(Request::Rename { path: f.path("A"), new_name: "A2".into() });
+    ok(&parent);
+    let forwarded = moved.record.forwarded([&parent.record]).unwrap();
+    assert_eq!(forwarded.steps, vec![Step::Moved { from: f.path("A2/x.txt"), to: f.path("B/x.txt") }]);
+    undo(&forwarded, &f.trash).expect("the move goes back into the renamed folder");
+    assert_eq!(f.snapshot()["A2/x.txt"], "x");
+
+    let f = Fixture::new("forward-vacated-name");
+    f.file("A/x.txt", "x");
+    f.file("B/keep.txt", "k");
+    let moved = f.run(Request::Move { paths: paths(vec![f.path("A/x.txt")]), into: f.path("B") });
+    ok(&moved);
+    f.file("A/x.txt", "new");
+    let renamed = f.run(Request::Rename { path: f.path("A/x.txt"), new_name: "y.txt".into() });
+    ok(&renamed);
+    let forwarded = moved.record.forwarded([&renamed.record]).unwrap();
+    assert_eq!(forwarded.steps, moved.record.steps, "the new item's rename does not move the vacated path");
 }

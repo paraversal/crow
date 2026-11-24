@@ -20,7 +20,9 @@ mod system_colors;
 mod volumes;
 
 pub use cloud::{SystemReadGate, status as cloud_status, status_batch as cloud_status_batch};
-pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
+pub use context_menu::{
+    ContextMenuEntry, MenuShortcut, SUBMENU_BASE, SUBMENU_STRIDE, show_context_menu, submenu_choice,
+};
 pub use drag::{ComboDrag, begin_drag, drop_is_premature, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;

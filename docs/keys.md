@@ -57,13 +57,13 @@ Movement keys (arrows, Return, Space and Esc in lists, the sidebar, search resul
 | View as List | `⌘2` |  | `view-as-list` |
 | View as Columns | `⌘3` |  | `view-as-columns` |
 | View as Gallery | `⌘4` |  | `view-as-gallery` |
-| Why This View? | `⌘J` |  | `why-this-view` |
 | Toggle Hidden Files | `⇧⌘.` |  | `toggle-hidden-files` |
 | Show or Hide Right Sidebar | `⇧⌘P` |  | `toggle-preview` |
 | Show or Hide Left Sidebar | `⌃⌘S` |  | `toggle-sidebar` |
 | Show Info | `⌘I` |  | `show-info` |
 | Cycle Right Sidebar | `⌥⌘P` |  | `cycle-right-sidebar` |
 | Show Activity | `⌥⌘L` |  | `toggle-activity` |
+| Show Folder Menu | `⌃⌘M` |  | `show-folder-menu` |
 | Theme… | `⌥⌘T` |  | `show-theme-picker` |
 
 ## Go

@@ -171,12 +171,20 @@ enum ControlId {
     Terminal,
     Keymap,
     Enter,
+    FolderTarget,
     Hints,
     Tips,
     FolderSizes,
     ShowHidden,
     SearchHidden,
     SearchMatch,
+    ExcludeDev,
+    ExcludeDependencies,
+    ExcludeMedia,
+    ExcludeHidden,
+    ExcludeSystem,
+    ExcludeBackup,
+    ExcludeNames,
     SavedQueryList,
     NewSavedQuery,
     ShowPreview,
@@ -220,7 +228,7 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 55] = [
+    const ALL: [ControlId; 63] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
         ControlId::IconStyle,
@@ -231,6 +239,7 @@ impl ControlId {
         ControlId::FontSize,
         ControlId::Keymap,
         ControlId::Enter,
+        ControlId::FolderTarget,
         ControlId::Hints,
         ControlId::Tips,
         ControlId::Terminal,
@@ -262,6 +271,13 @@ impl ControlId {
         ControlId::ViewPerFolder,
         ControlId::SearchHidden,
         ControlId::SearchMatch,
+        ControlId::ExcludeDev,
+        ControlId::ExcludeDependencies,
+        ControlId::ExcludeMedia,
+        ControlId::ExcludeHidden,
+        ControlId::ExcludeSystem,
+        ControlId::ExcludeBackup,
+        ControlId::ExcludeNames,
         ControlId::SavedQueryList,
         ControlId::NewSavedQuery,
         ControlId::Plugins,
@@ -290,11 +306,19 @@ impl ControlId {
             ControlId::Terminal => "settings-terminal",
             ControlId::Keymap => "settings-keymap",
             ControlId::Enter => "settings-enter",
+            ControlId::FolderTarget => "settings-folder-target",
             ControlId::Hints => "settings-hints",
             ControlId::Tips => "settings-tips",
             ControlId::FolderSizes => "settings-folder-sizes",
             ControlId::ShowHidden => "settings-show-hidden",
             ControlId::SearchHidden => "settings-search-hidden",
+            ControlId::ExcludeDev => "settings-exclude-dev",
+            ControlId::ExcludeDependencies => "settings-exclude-dependencies",
+            ControlId::ExcludeMedia => "settings-exclude-media",
+            ControlId::ExcludeHidden => "settings-exclude-hidden",
+            ControlId::ExcludeSystem => "settings-exclude-system",
+            ControlId::ExcludeBackup => "settings-exclude-backup",
+            ControlId::ExcludeNames => "settings-exclude-names",
             ControlId::SearchMatch => "settings-search-match",
             ControlId::SavedQueryList => "settings-saved-query-list",
             ControlId::NewSavedQuery => "settings-new-saved-query",
@@ -350,6 +374,7 @@ impl ControlId {
             | ControlId::Terminal
             | ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -358,6 +383,13 @@ impl ControlId {
             | ControlId::SidebarStyle
             | ControlId::ShowHidden
             | ControlId::SearchHidden
+            | ControlId::ExcludeDev
+            | ControlId::ExcludeDependencies
+            | ControlId::ExcludeMedia
+            | ControlId::ExcludeHidden
+            | ControlId::ExcludeSystem
+            | ControlId::ExcludeBackup
+            | ControlId::ExcludeNames
             | ControlId::SearchMatch
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
@@ -391,11 +423,19 @@ impl ControlId {
             ControlId::Terminal => "Terminal app",
             ControlId::Keymap => "Keymap",
             ControlId::Enter => "What Return does",
+            ControlId::FolderTarget => "New items go in",
             ControlId::Hints => "Key hints",
             ControlId::Tips => "Tips",
             ControlId::FolderSizes => "Folder sizes",
             ControlId::ShowHidden => "Show hidden files",
             ControlId::SearchHidden => "Search always includes hidden files",
+            ControlId::ExcludeDev => "Skip developer folders",
+            ControlId::ExcludeDependencies => "Skip dependency folders",
+            ControlId::ExcludeMedia => "Skip media libraries",
+            ControlId::ExcludeHidden => "Skip hidden folders",
+            ControlId::ExcludeSystem => "Skip system folders",
+            ControlId::ExcludeBackup => "Skip folders excluded from Time Machine",
+            ControlId::ExcludeNames => "Developer folder names",
             ControlId::SearchMatch => "Search matches",
             ControlId::SavedQueryList => "Saved Queries",
             ControlId::NewSavedQuery => "New Saved Query…",
@@ -450,6 +490,7 @@ impl ControlId {
             | ControlId::PreviewAdd => Role::ComboBox,
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -464,13 +505,19 @@ impl ControlId {
             | ControlId::PreviewScope => Role::RadioGroup,
             ControlId::ShowHidden
             | ControlId::SearchHidden
+            | ControlId::ExcludeDev
+            | ControlId::ExcludeDependencies
+            | ControlId::ExcludeMedia
+            | ControlId::ExcludeHidden
+            | ControlId::ExcludeSystem
+            | ControlId::ExcludeBackup
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
             | ControlId::PaletteRecent
             | ControlId::TranslucentSidebar
             | ControlId::DefaultFoldersFirst => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
-            ControlId::Terminal | ControlId::PreviewRulePattern => Role::TextInput,
+            ControlId::Terminal | ControlId::ExcludeNames | ControlId::PreviewRulePattern => Role::TextInput,
             ControlId::KeyboardSearch => Role::SearchInput,
             ControlId::Plugins | ControlId::PreviewList | ControlId::SavedQueryList | ControlId::KeyboardList => {
                 Role::ListBox
@@ -514,6 +561,9 @@ impl ControlId {
             }
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
             ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
+            ControlId::FolderTarget => {
+                "Shown is the folder you are looking at, like Finder. Selected is the selected folder, for New Folder, New File and Paste."
+            }
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
             ControlId::FolderSizes => "Measure the folders on screen in the background; off leaves them as --.",
@@ -522,6 +572,17 @@ impl ControlId {
                 "Find dot items while Show hidden files is off; Go to ranks them after visible matches."
             }
             ControlId::SearchMatch => "What each new Find looks for; the panel's control changes the open search.",
+            ControlId::ExcludeDev => "node_modules, .git, target, build and the like. On by default.",
+            ControlId::ExcludeDependencies => "vendor, .bundle and bower_components.",
+            ControlId::ExcludeMedia => "Photos, Photo Booth, iMovie and Final Cut libraries.",
+            ControlId::ExcludeHidden => "Every folder whose name starts with a dot.",
+            ControlId::ExcludeSystem => "/System, /Library/Caches and Trash folders.",
+            ControlId::ExcludeBackup => {
+                "Folders with the Time Machine exclusion mark, such as the dev folders asimeow marks (github.com/paraversal/asimeow). One attribute read per folder."
+            }
+            ControlId::ExcludeNames => {
+                "Comma-separated folder names or globs; search skips them while Skip developer folders is on."
+            }
             ControlId::SavedQueryList | ControlId::NewSavedQuery => return None,
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
@@ -624,6 +685,13 @@ impl ControlId {
             ControlId::KeyboardSearch | ControlId::KeyboardList => true,
             ControlId::KeyboardResetAll => ui.file_error("keys.toml").is_none(),
             ControlId::NewSavedQuery => ui.file_error("saved-queries.toml").is_none(),
+            ControlId::ExcludeDev
+            | ControlId::ExcludeDependencies
+            | ControlId::ExcludeMedia
+            | ControlId::ExcludeHidden
+            | ControlId::ExcludeSystem
+            | ControlId::ExcludeBackup
+            | ControlId::ExcludeNames => ui.file_error("exclude.toml").is_none(),
             ControlId::DefaultView
             | ControlId::DefaultSort
             | ControlId::DefaultDirection
@@ -812,6 +880,7 @@ pub struct SettingsWindow {
     handles: HashMap<ControlId, FocusHandle>,
     font_size: Entity<TextInput>,
     terminal: Entity<TextInput>,
+    exclude_names: Entity<TextInput>,
     window_width: Entity<TextInput>,
     window_height: Entity<TextInput>,
     theme: ThemeChoice,
@@ -903,6 +972,11 @@ impl SettingsWindow {
                 .with_id("settings-terminal")
                 .with_aria_label("Terminal app")
         });
+        let exclude_names = cx.new(|cx| {
+            TextInput::new(names_text(&cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names), "", cx)
+                .with_id("settings-exclude-names")
+                .with_aria_label("Developer folder names")
+        });
         let window_width = cx.new(|cx| {
             TextInput::new(settings.window.width.to_string(), "", cx)
                 .with_id("settings-window-width")
@@ -948,6 +1022,9 @@ impl SettingsWindow {
         subscriptions.push(cx.subscribe_in(&terminal, window, |this, _, event, window, cx| {
             this.on_terminal_event(event, window, cx);
         }));
+        subscriptions.push(cx.subscribe_in(&exclude_names, window, |this, _, event, window, cx| {
+            this.on_exclude_names_event(event, window, cx);
+        }));
         subscriptions.push(cx.subscribe_in(&search, window, |this, _, event, window, cx| {
             this.on_search_event(event, window, cx);
         }));
@@ -960,6 +1037,7 @@ impl SettingsWindow {
             let handle = match id {
                 ControlId::FontSize => font_size.read(cx).focus_handle(cx),
                 ControlId::Terminal => terminal.read(cx).focus_handle(cx),
+                ControlId::ExcludeNames => exclude_names.read(cx).focus_handle(cx),
                 ControlId::WindowWidth => window_width.read(cx).focus_handle(cx),
                 ControlId::WindowHeight => window_height.read(cx).focus_handle(cx),
                 ControlId::PreviewRulePattern => preview_pattern.read(cx).focus_handle(cx),
@@ -987,6 +1065,7 @@ impl SettingsWindow {
             ControlId::DefaultSort,
             ControlId::FontSize,
             ControlId::Terminal,
+            ControlId::ExcludeNames,
             ControlId::WindowWidth,
             ControlId::WindowHeight,
             ControlId::KeyboardList,
@@ -1059,6 +1138,7 @@ impl SettingsWindow {
             handles,
             font_size,
             terminal,
+            exclude_names,
             window_width,
             window_height,
             theme,
@@ -1467,6 +1547,7 @@ impl SettingsWindow {
                 self.commit_stepper(id, window, cx);
             }
             ControlId::Terminal => self.commit_terminal(window, cx),
+            ControlId::ExcludeNames => self.commit_exclude_names(window, cx),
             ControlId::KeyboardList => self.cancel_capture(cx),
             _ => {}
         }
@@ -1508,6 +1589,65 @@ impl SettingsWindow {
             }
             TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
         }
+    }
+
+    /// Put the Developer set's names in the field unless it is being typed in.
+    fn sync_exclude_names(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_focused(ControlId::ExcludeNames, window) {
+            return;
+        }
+        let text = names_text(&cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names);
+        if self.exclude_names.read(cx).text() != text {
+            self.exclude_names.update(cx, |input, cx| input.set_text(text, window, cx));
+        }
+    }
+
+    fn commit_exclude_names(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names.clone();
+        // An untouched field writes nothing: the comma-joined text can't round-trip a
+        // name that has a comma in it (a glob like `*.{a,b}` from exclude.toml).
+        if self.exclude_names.read(cx).text() == names_text(&current) {
+            cx.notify();
+            return;
+        }
+        let names = parse_names(self.exclude_names.read(cx).text());
+        if names != current {
+            ui::set_exclude_names(crow_core::SetName::Dev, names, cx);
+        }
+        // Show the list as it is saved (trimmed, without blanks and repeats).
+        let shown = names_text(&parse_names(self.exclude_names.read(cx).text()));
+        if self.exclude_names.read(cx).text() != shown {
+            self.exclude_names.update(cx, |input, cx| input.set_text(shown, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn on_exclude_names_event(&mut self, event: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            TextInputEvent::Confirmed => self.commit_exclude_names(window, cx),
+            TextInputEvent::Cancelled => self.cancel(window, cx),
+            TextInputEvent::CompletionRequested => {
+                self.commit_exclude_names(window, cx);
+                self.advance_focus(1, window, cx);
+            }
+            TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
+        }
+    }
+
+    /// A switch in Settings ▸ Search: turn a skip set on or off in exclude.toml.
+    fn toggle_exclude(&mut self, id: ControlId, cx: &mut Context<Self>) {
+        let set = match id {
+            ControlId::ExcludeDev => crow_core::SetName::Dev,
+            ControlId::ExcludeDependencies => crow_core::SetName::Dependencies,
+            ControlId::ExcludeMedia => crow_core::SetName::Media,
+            ControlId::ExcludeHidden => crow_core::SetName::Hidden,
+            ControlId::ExcludeSystem => crow_core::SetName::System,
+            ControlId::ExcludeBackup => crow_core::SetName::BackupExcluded,
+            _ => return,
+        };
+        let enabled = cx.global::<Ui>().exclude.set(set).enabled;
+        ui::set_exclude_enabled(set, !enabled, cx);
+        cx.notify();
     }
 
     fn on_search_event(&mut self, event: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1621,6 +1761,12 @@ impl SettingsWindow {
                 self.select_direction(index, cx);
             }
             ControlId::DefaultFoldersFirst => self.toggle_default_folders_first(cx),
+            ControlId::ExcludeDev
+            | ControlId::ExcludeDependencies
+            | ControlId::ExcludeMedia
+            | ControlId::ExcludeHidden
+            | ControlId::ExcludeSystem
+            | ControlId::ExcludeBackup => self.toggle_exclude(id, cx),
             ControlId::ShowHidden
             | ControlId::SearchHidden
             | ControlId::ShowPreview
@@ -1648,6 +1794,7 @@ impl SettingsWindow {
             }
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -1657,6 +1804,7 @@ impl SettingsWindow {
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
+            | ControlId::ExcludeNames
             | ControlId::Terminal => {}
         }
     }
@@ -1667,6 +1815,7 @@ impl SettingsWindow {
             ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -1966,6 +2115,7 @@ impl SettingsWindow {
         let (current, count) = match id {
             ControlId::Keymap => (keymap_index(cx.global::<Ui>().settings.keymap), 2),
             ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
+            ControlId::FolderTarget => (folder_target_index(cx.global::<Ui>().settings.folder_target), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
@@ -1987,6 +2137,11 @@ impl SettingsWindow {
         let change = match id {
             ControlId::Keymap => SettingChange::Keymap(if index == 0 { KeymapLayer::Finder } else { KeymapLayer::Vim }),
             ControlId::Enter => SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open }),
+            ControlId::FolderTarget => SettingChange::FolderTarget(if index == 0 {
+                crow_core::FolderTarget::Shown
+            } else {
+                crow_core::FolderTarget::Selected
+            }),
             ControlId::Hints => SettingChange::Hints(match index {
                 0 => HintsMode::Auto,
                 1 => HintsMode::Always,
@@ -2378,6 +2533,7 @@ impl SettingsWindow {
         match self.focused_control(window) {
             Some(ControlId::FontSize) => self.commit_stepper(ControlId::FontSize, window, cx),
             Some(ControlId::Terminal) => self.commit_terminal(window, cx),
+            Some(ControlId::ExcludeNames) => self.commit_exclude_names(window, cx),
             Some(ControlId::WindowWidth) => self.commit_stepper(ControlId::WindowWidth, window, cx),
             Some(ControlId::WindowHeight) => self.commit_stepper(ControlId::WindowHeight, window, cx),
             _ => {}
@@ -2495,6 +2651,7 @@ impl SettingsWindow {
                 ControlId::FontFamily => Some(self.font_cursor),
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
+                ControlId::FolderTarget => Some(folder_target_index(settings.folder_target)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
@@ -2523,6 +2680,16 @@ impl SettingsWindow {
             toggled: match id {
                 ControlId::ShowHidden => Some(settings.show_hidden_files),
                 ControlId::SearchHidden => Some(settings.search_includes_hidden),
+                ControlId::ExcludeDev => Some(cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled),
+                ControlId::ExcludeDependencies => {
+                    Some(cx.global::<Ui>().exclude.set(crow_core::SetName::Dependencies).enabled)
+                }
+                ControlId::ExcludeMedia => Some(cx.global::<Ui>().exclude.set(crow_core::SetName::Media).enabled),
+                ControlId::ExcludeHidden => Some(cx.global::<Ui>().exclude.set(crow_core::SetName::Hidden).enabled),
+                ControlId::ExcludeSystem => Some(cx.global::<Ui>().exclude.set(crow_core::SetName::System).enabled),
+                ControlId::ExcludeBackup => {
+                    Some(cx.global::<Ui>().exclude.set(crow_core::SetName::BackupExcluded).enabled)
+                }
                 ControlId::ShowPreview => Some(settings.show_preview),
                 ControlId::ViewPerFolder => Some(settings.view_per_folder),
                 ControlId::PaletteRecent => Some(settings.palette_recent_commands),
@@ -2582,6 +2749,7 @@ impl Render for SettingsWindow {
             self.sync_stepper(id, window, cx);
         }
         self.sync_terminal(window, cx);
+        self.sync_exclude_names(window, cx);
         self.repair_preview_target(cx);
         let visible = self.visible_controls(cx);
         for id in ControlId::ALL {
@@ -2709,6 +2877,18 @@ impl Render for SettingsWindow {
             None,
         );
 
+        let folder_target_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::FolderTarget, index, window, cx)
+        });
+        let folder_target_row = controls::segmented(
+            self.meta(ControlId::FolderTarget, cx),
+            &["Shown folder", "Selected folder"],
+            folder_target_index(settings.folder_target),
+            self.style(ControlId::FolderTarget, window, &theme),
+            folder_target_select,
+            None,
+        );
+
         let hints_select =
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Hints, index, window, cx));
         let hints_row = controls::segmented(
@@ -2746,6 +2926,60 @@ impl Render for SettingsWindow {
         let show_hidden = switch_row(self, ControlId::ShowHidden, settings.show_hidden_files, window, &theme, cx);
         let search_hidden =
             switch_row(self, ControlId::SearchHidden, settings.search_includes_hidden, window, &theme, cx);
+        let exclude_dev = switch_row(
+            self,
+            ControlId::ExcludeDev,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_dependencies = switch_row(
+            self,
+            ControlId::ExcludeDependencies,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::Dependencies).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_media = switch_row(
+            self,
+            ControlId::ExcludeMedia,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::Media).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_hidden = switch_row(
+            self,
+            ControlId::ExcludeHidden,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::Hidden).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_system = switch_row(
+            self,
+            ControlId::ExcludeSystem,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::System).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_backup = switch_row(
+            self,
+            ControlId::ExcludeBackup,
+            cx.global::<Ui>().exclude.set(crow_core::SetName::BackupExcluded).enabled,
+            window,
+            &theme,
+            cx,
+        );
+        let exclude_names_row = controls::text_field(
+            self.meta(ControlId::ExcludeNames, cx),
+            &self.exclude_names,
+            self.style(ControlId::ExcludeNames, window, &theme),
+            320.0,
+        );
         let search_match_select = select_callback(cx, |this, index, window, cx| {
             this.select_segment(ControlId::SearchMatch, index, window, cx)
         });
@@ -2957,6 +3191,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::FontSize, font_size_row.into_any_element());
         rows.insert(ControlId::Keymap, keymap_row.into_any_element());
         rows.insert(ControlId::Enter, enter_row.into_any_element());
+        rows.insert(ControlId::FolderTarget, folder_target_row.into_any_element());
         rows.insert(ControlId::Hints, hints_row.into_any_element());
         rows.insert(ControlId::Tips, tips_row.into_any_element());
         rows.insert(ControlId::Terminal, terminal_row.into_any_element());
@@ -2977,6 +3212,13 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::ShowPreview, show_preview.into_any_element());
         rows.insert(ControlId::ViewPerFolder, view_per_folder.into_any_element());
         rows.insert(ControlId::SearchHidden, search_hidden.into_any_element());
+        rows.insert(ControlId::ExcludeDev, exclude_dev.into_any_element());
+        rows.insert(ControlId::ExcludeDependencies, exclude_dependencies.into_any_element());
+        rows.insert(ControlId::ExcludeMedia, exclude_media.into_any_element());
+        rows.insert(ControlId::ExcludeHidden, exclude_hidden.into_any_element());
+        rows.insert(ControlId::ExcludeSystem, exclude_system.into_any_element());
+        rows.insert(ControlId::ExcludeBackup, exclude_backup.into_any_element());
+        rows.insert(ControlId::ExcludeNames, exclude_names_row.into_any_element());
         rows.insert(ControlId::SearchMatch, search_match_row.into_any_element());
         rows.insert(ControlId::SavedQueryList, self.render_saved_queries(window, &theme, cx));
         rows.insert(ControlId::PreviewScope, self.render_preview_unit(window, &theme, cx));
@@ -3430,6 +3672,29 @@ fn keymap_index(value: KeymapLayer) -> usize {
     match value {
         KeymapLayer::Finder => 0,
         KeymapLayer::Vim => 1,
+    }
+}
+
+/// The names as the field shows them: comma-separated.
+fn names_text(names: &[String]) -> String {
+    names.join(", ")
+}
+
+/// The field's names: split at commas, trimmed, without blanks or repeats.
+fn parse_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in text.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        if !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+fn folder_target_index(value: crow_core::FolderTarget) -> usize {
+    match value {
+        crow_core::FolderTarget::Shown => 0,
+        crow_core::FolderTarget::Selected => 1,
     }
 }
 
@@ -4954,6 +5219,17 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
+    fn folder_target_control_writes_its_line(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::FolderTarget);
+        assert_eq!(state(&view, &vcx, ControlId::FolderTarget).selected, Some(0), "the shown folder is the default");
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::FolderTarget).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.folder_target), crow_core::FolderTarget::Selected);
+        wait_for(&vcx, "folder_target = \"selected\"");
+    }
+
+    #[gpui::test]
     fn enter_control_writes_only_its_line_and_survives_reload(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         focus_control(&view, &mut vcx, ControlId::Enter);
@@ -5025,6 +5301,53 @@ preview_providers = ["example.one.preview"]
         assert_eq!(state(&view, &vcx, ControlId::FontSize).value, Some(20.0));
         assert_eq!(stepper_text(&view, &vcx, ControlId::FontSize), "20");
         wait_for(&vcx, "font_size = 20.0");
+    }
+
+    #[gpui::test]
+    fn skip_set_switches_write_exclude_toml_and_reload(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let backup = |vcx: &VisualTestContext| {
+            vcx.read_global::<Ui, _>(|ui, _| ui.exclude.set(crow_core::SetName::BackupExcluded).enabled)
+        };
+        assert_eq!(state(&view, &vcx, ControlId::ExcludeDev).toggled, Some(true), "the dev set starts on");
+        assert_eq!(state(&view, &vcx, ControlId::ExcludeBackup).toggled, Some(false), "Time Machine starts off");
+
+        focus_control(&view, &mut vcx, ControlId::ExcludeBackup);
+        vcx.simulate_keystrokes("space");
+        wait_for_preview(&vcx, |ui| ui.exclude.set(crow_core::SetName::BackupExcluded).enabled);
+        assert!(backup(&vcx));
+        assert_eq!(state(&view, &vcx, ControlId::ExcludeBackup).toggled, Some(true));
+        let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        let text = std::fs::read_to_string(dir.join("exclude.toml")).unwrap();
+        assert!(text.contains("# Build and dependency folders"), "the file's comments survive: {text}");
+
+        focus_control(&view, &mut vcx, ControlId::ExcludeDev);
+        vcx.simulate_keystrokes("space");
+        wait_for_preview(&vcx, |ui| !ui.exclude.set(crow_core::SetName::Dev).enabled);
+        assert_eq!(state(&view, &vcx, ControlId::ExcludeDev).toggled, Some(false));
+    }
+
+    #[gpui::test]
+    fn the_developer_names_field_adds_and_removes_names(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::ExcludeNames);
+        let shown = view.read_with(&vcx, |view, cx| view.exclude_names.read(cx).text().to_owned());
+        assert!(shown.starts_with("node_modules, .git"), "{shown}");
+        vcx.simulate_keystrokes("cmd-a");
+        vcx.simulate_input("node_modules, out,  out , .git,");
+        vcx.simulate_keystrokes("enter");
+        wait_for_preview(&vcx, |ui| ui.exclude.set(crow_core::SetName::Dev).names.len() == 3);
+        let names = vcx.read_global::<Ui, _>(|ui, _| ui.exclude.set(crow_core::SetName::Dev).names);
+        assert_eq!(names, ["node_modules", "out", ".git"], "trimmed, without blanks or repeats");
+        let shown = view.read_with(&vcx, |view, cx| view.exclude_names.read(cx).text().to_owned());
+        assert_eq!(shown, "node_modules, out, .git");
+    }
+
+    #[test]
+    fn name_lists_round_trip_through_the_field() {
+        assert_eq!(parse_names(" a , b,, a ,c "), ["a", "b", "c"]);
+        assert_eq!(names_text(&["a".to_owned(), "b".to_owned()]), "a, b");
+        assert!(parse_names(" , ").is_empty());
     }
 
     #[gpui::test]

@@ -29,7 +29,7 @@ twin hints across Favorites and Recent, the current-folder fill and cursor ring,
 row's free space and warning tone, arrows showing the folder in the center, Option-Up/Down group jumps),
 live change batches (a late batch cannot bring back a deleted file, watcher paths through a
 symlinked ancestor still match),
-view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
+view settings (per-folder memory, live rules, broken files), the theme picker
 (preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the home row matching its account name, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar, its folder glyph and spoken path, switch,
 Search Home from the field and the results, footer counts and the grouped skipped list, the Full Disk Access action,
 idle examples, empty-state widen buttons (everything, Home, names and contents), best-row selection while results stream and the user's
@@ -653,7 +653,7 @@ Run on a bundle built from the branch, in light and dark, at the native minimum 
 | Recently used | Run two commands from the palette, quit, relaunch: `>` lists them under Recently used. Set `palette_recent_commands = false`: the section disappears without a restart, and new runs aren't recorded. |
 | Palette themes | FireBox and Solarized Light: token, highlights, chip and keycaps readable, the input and footer dividers visible; narrow window keeps the sheet inside with 16 px margins. |
 | Go to Folder | Shift-Cmd-G opens Cmd-K with this folder's path and `/` typed and its subfolders listed; type a few letters, Tab, Return goes there; a file's full path selects it in its folder; a missing path beeps and stays open. Typing a capitalised name (`Docs`) never crashes. |
-| Sheets | Open Shift-Cmd-G, Cmd-J, the theme picker, Cmd-K, a permanent delete and Empty Trash: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete and Empty Trash do nothing), clicking inside doesn't. The window can still be dragged. |
+| Sheets | Open Shift-Cmd-G, the theme picker, Cmd-K, a permanent delete and Empty Trash: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete and Empty Trash do nothing), clicking inside doesn't. The window can still be dragged. |
 | Empty Trash | Put one disposable item in the Trash. ⌘⇧⌫, File ▸ Empty Trash… and palette `>empty trash` all ask "Empty the Trash?"; Cancel/Esc leaves the item, Empty Trash removes it with Finder's empty-trash sound and the status says how many. An empty Trash says "The Trash is already empty." with no sheet or sound. ⌘⇧⌫ does nothing while a filter, rename, search or palette field has focus. A disk image with an item in `.Trashes/<uid>` is emptied too; a locked item is named in the status. |
 | Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
 
@@ -765,7 +765,7 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Copy | Copy a 2 GB file: progress, the bar fades at the end, Glass in `crow` (only if it ran over a second). |
 | Reduce Motion | With `motion = "auto"`, toggle System Settings ▸ Accessibility ▸ Reduce Motion: Full ↔ Low without a relaunch. |
 | Sounds off | System Settings ▸ Sound: "Play user interface sound effects" off → no sounds except the alert. Alert volume low → Crow's sounds are as quiet as Finder's (NSSound follows the output volume; Q7). |
-| Sheets and tips | Cmd-K, Cmd-J, ⇧⌘G and the theme picker fade in (140 ms Full, 120 Low); a tip rises 8 px and fades in Full, fades in Low. Tooltips still appear without motion. |
+| Sheets and tips | Cmd-K, ⇧⌘G and the theme picker fade in (140 ms Full, 120 Low); a tip rises 8 px and fades in Full, fades in Low. Tooltips still appear without motion. |
 | Right pane tabs | Switch Preview, Info and Git Diff (with the Git provider enabled) in List, Columns and search. Full glides the underline and fades the new body in with a 6 px nudge. Low fades in place. Off changes in one frame. The pane stays at its current size and the new tab is active immediately. |
 | Folder view switch | In a long folder, select an item partway down and switch List ↔ Columns with Cmd-2 and Cmd-3. Full moves matching visible icons, names and selection fills. Low fades, Off snaps. Try a quick reversal and press Down immediately. Check that automatic per-folder view changes do not start the morph. |
 | Column and result reveal | In Columns, select a file and then a folder. Full brings the new child content out from its divider; Low fades it in place. Use Cmd-R on a search result and check the tint pulse is on the destination row, including one well down a long listing. Off changes both instantly. |

@@ -31,8 +31,29 @@ pub struct MenuShortcut {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextMenuEntry {
-    Item { title: String, shortcut: Option<MenuShortcut>, enabled: bool },
+    Item {
+        title: String,
+        shortcut: Option<MenuShortcut>,
+        enabled: bool,
+    },
     Separator,
+    /// A line that opens a submenu of checkable lines (`(title, checked)`). Choosing one
+    /// reports `SUBMENU_BASE + entry * SUBMENU_STRIDE + line`; see [`submenu_choice`].
+    Submenu {
+        title: String,
+        lines: Vec<(String, bool)>,
+    },
+}
+
+/// A submenu line's choice is reported above any top-level index.
+pub const SUBMENU_BASE: usize = 1_000_000;
+/// Room for this many lines per submenu in the reported choice.
+pub const SUBMENU_STRIDE: usize = 1_000;
+
+/// The `(entry, line)` a choice names, when it came from a submenu.
+pub fn submenu_choice(chosen: usize) -> Option<(usize, usize)> {
+    let offset = chosen.checked_sub(SUBMENU_BASE)?;
+    Some((offset / SUBMENU_STRIDE, offset % SUBMENU_STRIDE))
 }
 
 define_class!(
@@ -82,6 +103,30 @@ pub fn show_context_menu(
         for (ix, entry) in entries.iter().enumerate() {
             let item = match entry {
                 ContextMenuEntry::Separator => NSMenuItem::separatorItem(mtm),
+                ContextMenuEntry::Submenu { title, lines } => {
+                    let item = NSMenuItem::new(mtm);
+                    item.setTitle(&NSString::from_str(title));
+                    let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+                    sub.setAutoenablesItems(false);
+                    for (line, (line_title, checked)) in lines.iter().enumerate() {
+                        // SAFETY: the selector is implemented by MenuTarget, set as the target below.
+                        let child = unsafe {
+                            NSMenuItem::initWithTitle_action_keyEquivalent(
+                                NSMenuItem::alloc(mtm),
+                                &NSString::from_str(line_title),
+                                Some(sel!(crowContextMenuChose:)),
+                                &NSString::from_str(""),
+                            )
+                        };
+                        // SAFETY: the target outlives the menu: both live until this block returns.
+                        unsafe { child.setTarget(Some(&*target as &AnyObject)) };
+                        child.setTag((SUBMENU_BASE + ix * SUBMENU_STRIDE + line) as NSInteger);
+                        child.setState(if *checked { 1 } else { 0 });
+                        sub.addItem(&child);
+                    }
+                    item.setSubmenu(Some(&sub));
+                    item
+                }
                 ContextMenuEntry::Item { title, shortcut, enabled } => {
                     let key = shortcut.as_ref().map_or_else(String::new, |s| key_equivalent(&s.key));
                     // SAFETY: the selector is implemented by MenuTarget, set as the target below.

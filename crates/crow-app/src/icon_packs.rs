@@ -230,6 +230,7 @@ impl IconPacks {
         self.error_file.as_deref()
     }
 
+    #[cfg(test)]
     pub fn display_name(&self, source: &str) -> String {
         self.snapshot.display_name(source)
     }

@@ -27,6 +27,18 @@ keymap = "finder"
 # name in place; "open" opens the item. F2 renames in either mode.
 enter = "rename"
 
+# Which folder New Folder, New File and Paste work in when a folder is selected:
+# "shown" (default, like Finder) is always the folder you are looking at;
+# "selected" is the selected folder, so a new folder lands inside it. It applies to
+# the keys, the right-click menu and the toolbar's folder menu.
+folder_target = "shown"
+
+# Buttons pinned to the toolbar beside the folder menu button, by command id:
+# "new-folder", "new-file", "paste", "copy-path", "show-in-finder", "open-terminal".
+# The folder menu's Pin to Toolbar submenu edits this list; narrow windows fold
+# the buttons into the menu.
+toolbar_pins = []
+
 # Key hints in the bottom bar: "auto" (default), "always" or "off".
 # "auto" retires each idle hint (/ filter, Cmd-F search, Cmd-K go to) after you
 # have used its key 3 times; hints for the focused filter, sidebar or search stay.
@@ -130,7 +142,7 @@ sidebar_width = 210
 
 ## views.toml
 
-How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns and `[folder."..."]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (⌘J) shows which layer decided what. An `icon_source` in any layer overrides the icon pack for that folder.
+How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns and `[folder."..."]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. An `icon_source` in any layer overrides the icon pack for that folder.
 
 <!-- defaults:views.toml -->
 ```toml
@@ -141,7 +153,6 @@ How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns a
 #   2. [[rule]]                   folders matching a path pattern (later rules win)
 #   3. [folder."~/Some/Folder"]   one folder; Crow writes these when you change
 #                                 a folder's view or sort
-# View ▸ Why This View? (Cmd-J) shows which layer decided what.
 #
 # Keys, in any layer:
 #   view = "icons" | "list" | "columns" | "gallery"
@@ -296,6 +307,15 @@ dot_folders = true
 enabled = false
 paths = ["/System", "/Library/Caches"]
 names = [".Trashes"]
+
+[backup-excluded]
+# Folders carrying the Time Machine exclusion mark, whichever tool set it: `tmutil
+# addexclusion`, Finder's Options, or asimeow (https://github.com/paraversal/asimeow),
+# which marks dev folders such as node_modules and target. Off by default: "not backed up"
+# does not mean "never search it". Exclusions made with `tmutil addexclusion -p` leave no
+# mark on the folder, so they do not count. Checking costs one attribute read per folder.
+enabled = false
+time_machine = true
 ```
 <!-- /defaults -->
 
