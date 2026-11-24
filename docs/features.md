@@ -3,7 +3,7 @@
 Everything Crow does today, by area. A change that adds or removes a feature updates this list in the same commit. Keys are in [keys.md](keys.md), settings in [configuration.md](configuration.md), and the task-by-task guide is the [manual](manual/index.html).
 
 ## Browsing
-- Four views: icons (Compact, Standard, Large, optional caption), list (resizable, hideable columns, nested folders), columns, and gallery (a filename rail beside a large preview; two selected files compare side by side).
+- Four views: icons (Compact, Standard, Large, optional caption), list (resizable, hideable columns, nested folders), columns, and gallery (a filename rail beside a large preview, with a draggable divider (double-click resets it); two selected files compare side by side).
 - Per-folder view, sort and columns, saved when you change them. Folders open inside a list follow the sort, and a size sort re-orders as folder sizes arrive (the selection stays on its item and the view does not scroll). Rules by path pattern in `views.toml`.
 - Tabs, Back and Forward history, Enclosing Folder, Go to Folder, and several windows.
 - A sidebar of favorites in groups, Recent, Projects, Tags, saved searches and Locations (free space, eject). Five looks: ledger lines, cards, accordion, floating panel, pills. Groups take an icon; favorites take a name, icon, colour and Vim mark. The default Outline icons draw sidebar folders and special folders (Home, Desktop, Documents, Downloads, Applications…) as SF Symbol line glyphs, like Finder's sidebar, and the path bar and the title's folder icon follow; Finder keeps Finder's colored icons. An icon pack still wins.
@@ -16,7 +16,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Same-named folders show their parent; symlinks are marked.
 
 ## Moving around
-- ⌘K palette: folders (Recent, Favorites, the current folder), files in the folder, every command (`>`), and recently used commands.
+- ⌘K palette: folders (Recent, Favorites, the current folder), files in the folder, paths typed from `/`, `~`, `.` or `..`, every command (`>`), and recently used commands.
 - `/` filters the focused folder as you type, with a tag filter and "n of N".
 - Drag across empty space in any view to select what the rectangle touches (⇧ or ⌘ keeps the current selection); it scrolls at the edge. Type-to-select with the typed letters shown; Vim layer with `hjkl`, `gg`/`G`, `yy`/`dd`/`p`, marks and `cw`.
 - Every command in the menu bar, the palette and a rebindable key (Settings ▸ Keyboard or `keys.toml`), with conflict handling.

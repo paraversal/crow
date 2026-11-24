@@ -3410,6 +3410,42 @@ fn gallery_shows_the_same_text_preview_pipeline(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_divider_resizes_the_rail_and_double_click_resets_it(cx: &mut TestAppContext) {
+    let root = fixture("gallery-divider");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    let modifiers = gpui::Modifiers::default();
+    let rail = |cx: &mut VisualTestContext| cx.debug_bounds("gallery-rail").expect("rail").size.width;
+    let before = rail(&mut cx);
+    let start = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(start + gpui::point(px(-20.), px(0.)), Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(start + gpui::point(px(-20.), px(0.)), gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(rail(&mut cx), before - px(20.), "the rail follows the pointer");
+    let far = start + gpui::point(px(2000.), px(0.));
+    let divider = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_mouse_down(divider, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(far, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(far, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    let widest = rail(&mut cx);
+    assert!(widest > before && widest < px(1280.) - px(200.) + px(1.), "the preview keeps room: {widest:?}");
+    let divider = cx.debug_bounds("gallery-divider").expect("divider").center();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: divider,
+        modifiers,
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_mouse_up(divider, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(rail(&mut cx), before, "a double click restores the default width");
+}
+
+#[gpui::test]
 fn gallery_drops_out_of_order_pair_replies(cx: &mut TestAppContext) {
     let root = fixture("gallery-stale");
     let alpha = root.join("alpha");
