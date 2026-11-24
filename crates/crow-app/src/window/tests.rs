@@ -341,6 +341,36 @@ fn search_count_is_announced(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn back_closes_search_like_escape(cx: &mut TestAppContext) {
+    let root = fixture("search-back");
+    let (view, mut cx) = open(cx, &root);
+    let location = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.location().clone());
+    pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("alpha"), cx));
+    settle(&view, &mut cx);
+    let before = location(&cx);
+    cx.simulate_keystrokes("cmd-f");
+    wait_for_search(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_some()));
+    assert!(cx.debug_bounds("back").is_some());
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Back closes the search");
+    assert_eq!(location(&cx), before, "and stays in the folder the search opened from");
+    // The toolbar button does the same.
+    cx.simulate_keystrokes("cmd-f");
+    wait_for_search(&view, &mut cx);
+    let back = cx.debug_bounds("back").expect("back button");
+    cx.simulate_click(back.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    assert_eq!(location(&cx), before);
+    // With no search open Back walks history as before.
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_ne!(location(&cx), before);
+}
+
+#[gpui::test]
 fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
     let root = fixture("assembled");
     let (view, mut cx) = open_sized(cx, &root, 1280., 800.);

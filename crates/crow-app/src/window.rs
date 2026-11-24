@@ -1078,6 +1078,11 @@ impl CrowWindow {
     }
 
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        // An open search is a layer over the folder: Back closes it, like Esc.
+        if self.search.is_some() {
+            self.close_search(window, cx);
+            return;
+        }
         self.pane().update(cx, |pane, cx| pane.go_back(window, cx));
     }
 
@@ -1120,14 +1125,14 @@ impl CrowWindow {
         let tight = width < px(330.);
         let (back, forward, mode, back_label, forward_label) = {
             let pane = self.pane().read(cx);
-            let back_label = pane
-                .back_target()
+            let back_target = if self.search.is_some() { Some(pane.location()) } else { pane.back_target() };
+            let back_label = back_target
                 .map_or_else(|| "Back".to_owned(), |location| format!("Back to {}", self.location_name(location, cx)));
             let forward_label = pane.forward_target().map_or_else(
                 || "Forward".to_owned(),
                 |location| format!("Forward to {}", self.location_name(location, cx)),
             );
-            (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
+            (pane.can_go_back() || self.search.is_some(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
         // During a drag, Back is live whenever holding over it would spring back.
         let back = back || self.drag.can_spring_back();
@@ -1181,7 +1186,7 @@ impl CrowWindow {
                     .relative()
                     .on_children_prepainted(move |children, _, _| back_bounds.set(children.first().copied()))
                     .child(nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx).on_click(
-                        cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx))),
+                        cx.listener(|this, _, window, cx| this.go_back(&GoBack, window, cx)),
                     ))
                     .when(back_drop, |wrap| {
                         wrap.child(
