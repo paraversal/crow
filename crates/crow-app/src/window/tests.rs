@@ -765,6 +765,21 @@ fn open_with_before(
     options: WindowOptions,
     before: impl FnOnce(&mut App),
 ) -> (Entity<CrowWindow>, VisualTestContext) {
+    let (view, mut cx) = open_untouched(cx, dir, options, before);
+    // A folder opens with nothing selected. Most tests start from the first row,
+    // so they get it here; `open_untouched` is the real opening.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.select_first_for_test(cx));
+    settle(&view, &mut cx);
+    (view, cx)
+}
+
+/// The window as a user finds it: the folder listed, nothing selected.
+fn open_untouched(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    options: WindowOptions,
+    before: impl FnOnce(&mut App),
+) -> (Entity<CrowWindow>, VisualTestContext) {
     let trash =
         dir.parent().unwrap_or(dir).join(format!(".trash-{}", dir.file_name().unwrap_or_default().to_string_lossy()));
     std::fs::create_dir_all(&trash).expect("create test trash");
@@ -1777,7 +1792,7 @@ fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) 
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
     assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Down in the sidebar moves its cursor");
     assert_eq!(dir(&view, &cx), root.join("beta"), "…and shows beta in the center");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("b.txt"), "the list follows the sidebar cursor");
+    assert_eq!(selected(&view, &cx), None, "a folder shown from the sidebar has nothing selected");
 
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
@@ -1785,7 +1800,7 @@ fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) 
     let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
     assert!(cx.update(|window, _| list_focus.is_focused(window)), "…and moves focus to the list");
 
-    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("down enter");
     assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
 }
 
@@ -4570,7 +4585,8 @@ fn path_segments_open_the_menu_of_their_folder(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "Open in New Tab");
     assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), parent);
     script(&mut cx, Some(0));
-    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    // The new tab shows its folder with nothing selected: the last segment is the folder.
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 1;
     let at = segment(&mut cx, shown - 1);
     right_click(&mut cx, at);
     settle(&view, &mut cx);
@@ -10327,7 +10343,7 @@ fn path_bar_clicks_edit_the_path_and_segments_navigate(cx: &mut TestAppContext) 
     settle(&view, &mut cx);
     assert_eq!(
         path_edit_text(&view, &cx),
-        Some(root.join("alpha").display().to_string()),
+        Some(root.display().to_string()),
         "a double-click still edits the shown path"
     );
 }
@@ -11611,7 +11627,7 @@ fn info_tab_survives_a_folder_change(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root.join("alpha"));
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info, "the tab choice survives");
     let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
-    assert!(label.contains("inner"), "the pane follows the new cursor: {label}");
+    assert!(label.contains("alpha"), "nothing is selected in the new folder, so Info names it: {label}");
 
     cx.simulate_keystrokes("cmd-[");
     settle(&view, &mut cx);
@@ -20730,13 +20746,11 @@ fn vim_yy_dd_p_u_and_ctrl_r_copy_cut_paste_undo_and_redo(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn switching_views_with_nothing_selected_selects_nothing(cx: &mut TestAppContext) {
+fn a_folder_opens_with_nothing_selected_and_views_keep_it_so(cx: &mut TestAppContext) {
     let root = fixture("view-switch-empty");
-    let (view, mut cx) = open_sized(cx, &root, 1100., 700.);
-    pane(&view, &cx).update(&mut cx, |p, cx| {
-        p.clear_selection(cx);
-    });
-    settle(&view, &mut cx);
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1100.), px(700.)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    let (view, mut cx) = open_untouched(cx, &root, options, |_| {});
     assert_eq!(selected(&view, &cx), None, "cleared");
     for keys in ["cmd-1", "cmd-3", "cmd-4", "cmd-2", "cmd-4", "cmd-1", "cmd-3", "cmd-2"] {
         cx.simulate_keystrokes(keys);

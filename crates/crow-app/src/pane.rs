@@ -1789,6 +1789,12 @@ impl Pane {
     }
 
     /// Clear the focused folder's selection. Returns whether anything was selected.
+    /// Tests that start from a selected row ask for it; a real folder opens with none.
+    #[cfg(test)]
+    pub fn select_first_for_test(&mut self, cx: &mut Context<Self>) {
+        self.with_focused(cx, |folder, cx| folder.select_first(cx));
+    }
+
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let had_selection = self.focused_folder().read(cx).selected_count() > 0;
         if had_selection {
@@ -2204,7 +2210,7 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let resolved = ui.views.resolve(&dir);
         self.sort = resolved.sort();
-        self.push_folder(dir, true, cx);
+        self.push_folder(dir, false, cx);
         self.plugin_scope_changed(cx);
         if apply_folder_view {
             self.apply_view(cx);
@@ -2870,8 +2876,11 @@ impl Pane {
     fn list_left(&mut self, cx: &mut Context<Self>) {
         let folder = self.focused_folder().clone();
         let read = folder.read(cx);
-        let Some(ix) = read.cursor_ix() else { return };
-        let Some((entry, _)) = read.row(ix) else { return };
+        // Nothing selected is how a folder opens: Left still goes up.
+        let Some((ix, entry)) = read.cursor_ix().and_then(|ix| read.row(ix).map(|(entry, _)| (ix, entry))) else {
+            self.open_parent(cx);
+            return;
+        };
         let (path, expanded, parent) = (entry.path.clone(), read.is_expanded(&entry.path, cx), read.parent_row(ix));
         if expanded {
             folder.update(cx, |folder, cx| folder.collapse(&path, cx));

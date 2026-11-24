@@ -1797,6 +1797,10 @@ impl SearchView {
     /// After that, keep the keyboard cursor on the same path when rows above it move.
     fn follow_selection(&mut self, cx: &mut Context<Self>) {
         if !self.user_moved {
+            // A saved query or tag opens like a folder: nothing selected until you move.
+            if self.is_destination() {
+                return;
+            }
             if let Some(first) = self.results.first() {
                 self.selection.select_only(first.path.clone());
                 self.bump_selection(cx);
