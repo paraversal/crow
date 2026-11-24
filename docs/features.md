@@ -17,7 +17,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 ## Moving around
 - ⌘K palette: folders (Recent, Favorites, the current folder), files in the folder, every command (`>`), and recently used commands.
 - `/` filters the focused folder as you type, with a tag filter and "n of N".
-- Type-to-select with the typed letters shown; Vim layer with `hjkl`, `gg`/`G`, `yy`/`dd`/`p`, marks and `cw`.
+- Drag across empty space in any view to select what the rectangle touches (⇧ or ⌘ keeps the current selection); it scrolls at the edge. Type-to-select with the typed letters shown; Vim layer with `hjkl`, `gg`/`G`, `yy`/`dd`/`p`, marks and `cw`.
 - Every command in the menu bar, the palette and a rebindable key (Settings ▸ Keyboard or `keys.toml`), with conflict handling.
 - Key hints and one-time tips that retire as you use the keys.
 

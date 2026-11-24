@@ -195,7 +195,14 @@ impl StepGen {
                 0..=1 => Step::ClickWith(selector, self.modifiers()),
                 2 => {
                     let to = state.selectors[self.rng.random_range(0..state.selectors.len())].clone();
-                    Step::Drag(selector, to, self.modifiers())
+                    // Half the drags start in a row view's empty margin: a drag selection.
+                    let margins: Vec<&String> = state.selectors.iter().filter(|s| s.ends_with("-margin")).collect();
+                    let from = match margins.as_slice() {
+                        [] => selector,
+                        margins if self.rng.random_bool(0.5) => margins[self.rng.random_range(0..margins.len())].clone(),
+                        _ => selector,
+                    };
+                    Step::Drag(from, to, self.modifiers())
                 }
                 _ => Step::Click(selector),
             };

@@ -2526,6 +2526,70 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     );
 }
 
+/// List, Columns and Gallery select by dragging over empty space, like Icons.
+#[gpui::test]
+fn dragging_over_empty_space_selects_rows_in_every_row_view(cx: &mut TestAppContext) {
+    for (mode, prefix) in [
+        (ViewMode::List, "row-"),
+        (ViewMode::Columns, "column-0-row-"),
+        (ViewMode::Gallery, "gallery-row-"),
+    ] {
+        let root = TestRoot::new("row-marquee");
+        for i in 0..8 {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+        }
+        let (view, mut cx) = open_sized(cx, &root, 900., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        let row = |cx: &VisualTestContext, name: &str| {
+            view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("{prefix}{name}"), cx))
+                .unwrap_or_else(|| panic!("{mode:?}: row {name}"))
+        };
+        let names = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |pane, cx| pane.selected_names(cx));
+        let modifiers = gpui::Modifiers::default();
+        let last = row(&cx, "f7.txt");
+        let start = gpui::point(last.left() + px(30.), last.bottom() + px(40.));
+        let f2 = gpui::point(last.left() + px(30.), row(&cx, "f2.txt").center().y);
+        let f5 = gpui::point(last.left() + px(30.), row(&cx, "f5.txt").center().y);
+
+        // A press without a drag only clears, as before.
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(start, MouseButton::Left, modifiers);
+        assert!(names(&cx).is_empty(), "{mode:?}: an empty click selects nothing");
+
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(f2, Some(MouseButton::Left), modifiers);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: the rectangle is live");
+        assert!(cx.debug_bounds("marquee").is_some(), "{mode:?}: the rectangle is drawn");
+        assert_eq!(
+            names(&cx),
+            vec!["f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"],
+            "{mode:?}: rows the rectangle crosses"
+        );
+        cx.simulate_mouse_move(f5, Some(MouseButton::Left), modifiers);
+        assert_eq!(names(&cx), vec!["f5.txt", "f6.txt", "f7.txt"], "{mode:?}: shrinking drops rows");
+        cx.simulate_mouse_up(f5, MouseButton::Left, modifiers);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: release commits");
+        assert!(cx.debug_bounds("marquee").is_none(), "{mode:?}: rectangle gone");
+        assert_eq!(names(&cx), vec!["f5.txt", "f6.txt", "f7.txt"]);
+
+        // Shift keeps what was selected and adds the rows it crosses.
+        let shift = gpui::Modifiers { shift: true, ..Default::default() };
+        let top = gpui::point(last.left() + px(30.), row(&cx, "f0.txt").center().y);
+        cx.simulate_mouse_down(start, MouseButton::Left, shift);
+        cx.simulate_mouse_move(top, Some(MouseButton::Left), shift);
+        cx.simulate_mouse_up(top, MouseButton::Left, shift);
+        assert_eq!(names(&cx).len(), 8, "{mode:?}: an additive drag keeps the starting selection");
+
+        // Escape ends the drag and returns to the selection before it.
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(f2, Some(MouseButton::Left), modifiers);
+        cx.simulate_keystrokes("escape");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.marquee_active()), "{mode:?}: Esc ends the drag");
+    }
+}
+
 #[gpui::test]
 fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     let root = TestRoot::new("icon-marquee-add");
@@ -2632,6 +2696,43 @@ fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppConte
     assert!(after > before, "edge autoscroll grows the selection ({before} -> {after})");
     cx.simulate_mouse_move(start, Some(gpui::MouseButton::Left), Default::default());
     cx.simulate_mouse_up(start, gpui::MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn a_row_view_drag_scrolls_at_the_edge_and_reaches_rows_below(cx: &mut TestAppContext) {
+    for (mode, selector) in [
+        (ViewMode::List, "row-f05.txt"),
+        (ViewMode::Columns, "column-0-row-f05.txt"),
+        (ViewMode::Gallery, "gallery-row-f05.txt"),
+    ] {
+        let root = TestRoot::new("row-marquee-scroll");
+        for i in 0..60 {
+            std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+        }
+        let (view, mut cx) = open_sized(cx, &root, 700., 500.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        let row = view.read_with(&cx, |window, cx| window.debug_selector_bounds(selector, cx)).expect("a row");
+        // The rows' side margin is empty space: press there, so a full list has a start.
+        // (Column and Gallery row bounds already start inside the margin.)
+        let gutter = if mode == ViewMode::List { 2. } else { -2. };
+        let start = gpui::point(row.left() + px(gutter), row.center().y);
+        let list = cx.debug_bounds("file-list").expect("the list");
+        let bottom = gpui::point(row.left() + px(60.), list.bottom() - px(6.));
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(bottom, Some(MouseButton::Left), modifiers);
+        let before = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+        assert!(before > 0, "{mode:?}: the drag selects rows");
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(40));
+            cx.run_until_parked();
+        }
+        let after = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+        assert!(after > before, "{mode:?}: edge autoscroll grows the selection ({before} -> {after})");
+        cx.simulate_mouse_up(bottom, MouseButton::Left, modifiers);
+    }
 }
 
 #[gpui::test]
