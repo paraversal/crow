@@ -91,6 +91,13 @@ pub struct Ui {
     pub exclude: Exclude,
     /// Counts `exclude.toml` reloads that changed it, so a running search can restart.
     pub exclude_generation: u64,
+    /// Newest started reload of each kind; a reply from an older one is dropped.
+    config_reload_generation: u64,
+    /// Bumped when a write of each config file is queued and again when it lands; a
+    /// reload whose copy of the epoch is older read the file before that write.
+    write_epoch: [u64; KEYS + 1],
+    keys_reload_generation: u64,
+    theme_reload_generation: u64,
     /// The user's key overrides (`keys.toml`); a broken file keeps the last good set.
     pub keys: crow_core::keymap_edit::KeyOverrides,
     /// Saved searches, reloaded live with the other config. A broken file keeps
@@ -142,6 +149,9 @@ pub struct Ui {
     /// preview editor's Use Current Folder action.
     pub settings_folder: Option<PathBuf>,
     settings_category_write: Option<Shared<Task<Result<(), String>>>>,
+    /// The last queued write of each config or state file, so the next write to the
+    /// same file waits for it instead of racing it.
+    file_writes: HashMap<&'static str, Shared<Task<Result<(), String>>>>,
     /// One message per config file that doesn't load; shown in the status line until fixed.
     errors: [Option<SharedString>; 6],
 }
@@ -225,6 +235,10 @@ impl Ui {
             sidebar: SidebarConfig::parse(crow_core::DEFAULT_SIDEBAR).unwrap_or_default(),
             exclude: Exclude::default(),
             exclude_generation: 0,
+            config_reload_generation: 0,
+            write_epoch: Default::default(),
+            keys_reload_generation: 0,
+            theme_reload_generation: 0,
             keys: Default::default(),
             recent,
             recent_commands,
@@ -250,17 +264,19 @@ impl Ui {
             settings_category,
             settings_folder: None,
             settings_category_write: None,
+            file_writes: HashMap::new(),
             saved_queries: SavedQueries::default(),
             saved_queries_generation: 0,
             saved_query_counts: SavedQueryCounts::default(),
             tags: crate::tags::TagIndex::default(),
             errors: Default::default(),
         };
+        // io-ok: startup, before a window exists
         ui.load_settings();
-        ui.load_views();
-        ui.load_sidebar();
-        ui.load_exclude();
-        ui.load_keys();
+        ui.load_views(); // io-ok: startup
+        ui.load_sidebar(); // io-ok: startup
+        ui.load_exclude(); // io-ok: startup
+        ui.load_keys(); // io-ok: startup
         ui.apply_loaded_saved_queries(load_saved_queries(&ui.config_dir, &ui.home));
         ui.feedback = Feedback::read(&ui.settings);
         ui
@@ -327,6 +343,7 @@ impl Ui {
         if self.config_writes[SETTINGS].is_some() {
             return false;
         }
+        // io-ok: startup; reloads read in the background
         self.apply_loaded_settings(load_settings(&self.config_dir).map_err(|error| error.to_string()))
     }
 
@@ -345,6 +362,7 @@ impl Ui {
         if self.config_writes[VIEWS].is_some() {
             return false;
         }
+        // io-ok: startup; reloads read in the background
         self.apply_loaded_views(load_views(&self.config_dir, &self.home))
     }
 
@@ -361,7 +379,11 @@ impl Ui {
     }
 
     pub fn load_sidebar(&mut self) -> bool {
-        match load_sidebar(&self.config_dir) {
+        self.apply_loaded_sidebar(load_sidebar(&self.config_dir)) // io-ok: startup; reloads read in the background
+    }
+
+    fn apply_loaded_sidebar(&mut self, result: Result<crow_core::SidebarConfig, String>) -> bool {
+        match result {
             Ok(sidebar) => {
                 let changed = sidebar != self.sidebar;
                 self.tags.set_pinned(sidebar.pinned_tags.clone());
@@ -374,14 +396,10 @@ impl Ui {
 
     /// Reload `keys.toml`; a broken file keeps the last good keys. True if the keys changed.
     pub fn load_keys(&mut self) -> bool {
-        let result = crow_core::keymap_edit::load_keys(&self.config_dir).and_then(|keys| {
-            for command in keys.finder.keys().chain(keys.vim.keys()) {
-                if crate::palette::CommandId::from_key(command).is_none() {
-                    return Err(format!("keys.toml: unknown command `{command}`"));
-                }
-            }
-            Ok(keys)
-        });
+        self.apply_loaded_keys(read_keys(&self.config_dir)) // io-ok: startup; reloads read in the background
+    }
+
+    fn apply_loaded_keys(&mut self, result: Result<crow_core::keymap_edit::KeyOverrides, String>) -> bool {
         match result {
             Ok(keys) => {
                 let changed = keys != self.keys;
@@ -398,7 +416,11 @@ impl Ui {
 
     /// Reload `exclude.toml`; a broken file keeps the last good rules.
     pub fn load_exclude(&mut self) -> bool {
-        match crow_core::load_exclude(&self.config_dir) {
+        self.apply_loaded_exclude(crow_core::load_exclude(&self.config_dir)) // io-ok: startup; reloads read in the background
+    }
+
+    fn apply_loaded_exclude(&mut self, result: Result<crow_core::Exclude, String>) -> bool {
+        match result {
             Ok(exclude) => {
                 let changed = exclude != self.exclude;
                 self.exclude = exclude;
@@ -598,17 +620,56 @@ struct TestRoots(Vec<tempfile::TempDir>);
 #[cfg(test)]
 impl gpui::Global for TestRoots {}
 
+/// Run `work` (file I/O) on the background pool after every earlier write queued
+/// under `key` has finished. Rapid edits of one file apply in the order made.
+pub fn queue_file_write(
+    key: &'static str,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+    cx: &mut App,
+) -> Shared<Task<Result<(), String>>> {
+    if key == "keys.toml" {
+        cx.global_mut::<Ui>().write_epoch[KEYS] += 1;
+    }
+    let previous = cx.global_mut::<Ui>().file_writes.remove(key);
+    let task = cx
+        .background_spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            work()
+        })
+        .shared();
+    cx.global_mut::<Ui>().file_writes.insert(key, task.clone());
+    task
+}
+
+/// Like [`queue_file_write`] for saves nobody waits for; a failure is logged.
+fn queue_state_save(
+    key: &'static str,
+    file: PathBuf,
+    save: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+    cx: &mut App,
+) {
+    let task = queue_file_write(key, move || save(&file), cx);
+    cx.spawn(async move |_| {
+        if let Err(error) = task.await {
+            tracing::warn!("{key}: {error}");
+        }
+    })
+    .detach();
+}
+
 /// Change the shelf and save it to the state folder in the background.
 pub fn edit_shelf(cx: &mut App, edit: impl FnOnce(&mut crow_core::Shelf)) {
     let ui = cx.global_mut::<Ui>();
     edit(&mut ui.shelf);
     let (shelf, file) = (ui.shelf.clone(), ui.state_dir.join("shelf.json"));
-    cx.background_spawn(async move {
-        if let Err(e) = shelf.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
-    })
-    .detach();
+    queue_state_save(
+        "shelf.json",
+        file,
+        move |file| shelf.save(file).map_err(|e| format!("{}: {e}", file.display())),
+        cx,
+    );
     cx.refresh_windows();
 }
 
@@ -628,6 +689,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
     // No theme index unless a test installs one: never the developer's own `~/.config/themes`.
     let (themes_dir, themes_state_dir) = (root.path().join("no-themes"), root.path().join("no-themes-state"));
+    crate::clock::install_for_tests(cx.background_executor().clone());
     let mut ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
     ui.themes_dir = themes_dir;
     ui.themes_state_dir = themes_state_dir;
@@ -646,6 +708,18 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     // GPUI test would be slow and machine-dependent.
     install_drag_cancel(cx);
     config_dir
+}
+
+/// Read `keys.toml` and check every command it names. Disk work: startup or a
+/// background task.
+fn read_keys(config_dir: &Path) -> Result<crow_core::keymap_edit::KeyOverrides, String> {
+    let keys = crow_core::keymap_edit::load_keys(config_dir)?; // io-ok: startup or background task
+    for command in keys.finder.keys().chain(keys.vim.keys()) {
+        if crate::palette::CommandId::from_key(command).is_none() {
+            return Err(format!("keys.toml: unknown command `{command}`"));
+        }
+    }
+    Ok(keys)
 }
 
 fn poll(cx: &mut App) {
@@ -672,7 +746,8 @@ fn poll(cx: &mut App) {
         // The index may have appeared or vanished: watch where it is now.
         watcher.refresh();
     }
-    if config_changed || theme_changed {
+    // A config edit that changes the theme reloads it once the new settings are applied.
+    if theme_changed {
         reload_theme(cx);
     }
     if mounts_changed {
@@ -750,17 +825,76 @@ pub fn window_background(translucent: bool) -> gpui::WindowBackgroundAppearance 
     if translucent { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque }
 }
 
-/// Reload every config file. Views always count as changed (cheap, and panes only
-/// re-apply what differs); the others only when their contents did.
+/// Every config file as read off the main thread.
+struct LoadedConfig {
+    settings: Result<Settings, String>,
+    views: Result<Views, String>,
+    sidebar: Result<SidebarConfig, String>,
+    exclude: Result<crow_core::Exclude, String>,
+    keys: Result<crow_core::keymap_edit::KeyOverrides, String>,
+    /// `Ui::write_epoch` when the read started.
+    epochs: [u64; KEYS + 1],
+}
+
+/// Reload every config file: read and parse in the background, apply on the main
+/// thread. A newer reload makes an older reply stale, and it is dropped. Views
+/// always count as changed (cheap, and panes only re-apply what differs); the
+/// others only when their contents did.
 pub fn reload_config(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    ui.config_reload_generation += 1;
+    let generation = ui.config_reload_generation;
+    let (config, home) = (ui.config_dir.clone(), ui.home.clone());
+    let epochs = ui.write_epoch;
+    let task = cx.background_spawn(async move {
+        LoadedConfig {
+            // io-ok: background task
+            settings: load_settings(&config).map_err(|error| error.to_string()),
+            // io-ok: background task
+            views: load_views(&config, &home),
+            // io-ok: background task
+            sidebar: load_sidebar(&config),
+            // io-ok: background task
+            exclude: crow_core::load_exclude(&config),
+            // io-ok: background task
+            keys: read_keys(&config),
+            epochs,
+        }
+    });
+    cx.spawn(async move |cx| {
+        let loaded = task.await;
+        cx.update(|cx| {
+            if cx.global::<Ui>().config_reload_generation == generation {
+                apply_loaded_config(loaded, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+fn apply_loaded_config(loaded: LoadedConfig, cx: &mut App) {
     let icon_before = cx.global::<Ui>().settings.icon_pack.clone();
     let ui = cx.global_mut::<Ui>();
-    let settings = ui.load_settings();
+    // A file written since the read started, or one with a write still queued, is
+    // owned by that write; its own result applies.
+    let LoadedConfig {
+        settings: new_settings,
+        views,
+        sidebar: new_sidebar,
+        exclude: new_exclude,
+        keys: new_keys,
+        epochs,
+    } = loaded;
+    let current = ui.write_epoch;
+    let fresh = |which: usize| current[which] == epochs[which];
+    let settings = fresh(SETTINGS) && ui.config_writes[SETTINGS].is_none() && ui.apply_loaded_settings(new_settings);
     let icon_changed = ui.settings.icon_pack != icon_before;
-    ui.load_views();
-    let sidebar = ui.load_sidebar();
-    let exclude = ui.load_exclude();
-    let keys = ui.load_keys();
+    if fresh(VIEWS) && ui.config_writes[VIEWS].is_none() {
+        ui.apply_loaded_views(views);
+    }
+    let sidebar = fresh(SIDEBAR) && ui.apply_loaded_sidebar(new_sidebar);
+    let exclude = fresh(EXCLUDE) && ui.apply_loaded_exclude(new_exclude);
+    let keys = fresh(KEYS) && ui.apply_loaded_keys(new_keys);
     if settings || sidebar || exclude || keys {
         tracing::info!("config reloaded");
     }
@@ -768,6 +902,8 @@ pub fn reload_config(cx: &mut App) {
         refresh_recent(cx);
     }
     if settings {
+        // The theme id may have changed; `reload_theme` reads the settings applied just now.
+        reload_theme(cx);
         crate::menus::refresh(cx);
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
         crate::window::apply_show_hidden(show_hidden, cx);
@@ -794,12 +930,29 @@ fn apply_keys(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Reload `keys.toml` after Settings wrote it.
+/// Reload `keys.toml` after Settings wrote it: read in the background, apply on
+/// the main thread unless a newer reload started.
 pub fn reload_keys(cx: &mut App) {
-    if cx.global_mut::<Ui>().load_keys() {
-        apply_keys(cx);
-    }
-    cx.refresh_windows();
+    let ui = cx.global_mut::<Ui>();
+    // The write that called this has landed: a config reload that read keys.toml earlier is stale.
+    ui.write_epoch[KEYS] += 1;
+    ui.keys_reload_generation += 1;
+    let generation = ui.keys_reload_generation;
+    let config = ui.config_dir.clone();
+    // io-ok: background task
+    let task = cx.background_spawn(async move { read_keys(&config) });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            if cx.global::<Ui>().keys_reload_generation == generation {
+                if cx.global_mut::<Ui>().apply_loaded_keys(result) {
+                    apply_keys(cx);
+                }
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
 }
 
 /// The app icon, `assets/app-icon.png` at the repository root: the Dock shows it
@@ -882,7 +1035,8 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         SettingChange::Motion(_) | SettingChange::Sound(_) => refresh_feedback(cx),
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
         SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
-        SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
+        // The View menu's checkmarks read both.
+        SettingChange::ShowPreview(_) | SettingChange::FolderSizes(_) => crate::menus::refresh(cx),
         SettingChange::TranslucentSidebar(_) => refresh_translucency(cx),
         _ => {}
     }
@@ -1053,22 +1207,41 @@ pub fn save_settings_category(id: &str, cx: &mut App) {
 }
 
 /// Re-resolve the theme (after an index change, a settings change, an appearance
-/// flip or a move in the theme picker). A broken theme file keeps the current theme.
+/// flip or a move in the theme picker). The files are read in the background and
+/// the newest reload wins: a reply from an older one is dropped. A broken theme
+/// file keeps the current theme.
 pub fn reload_theme(cx: &mut App) {
-    let _span = tracing::debug_span!("theme reload").entered();
     let variant = variant_of(cx.window_appearance());
-    let (dir, state) = {
-        let ui = cx.global::<Ui>();
-        (ui.themes_dir.clone(), ui.themes_state_dir.clone())
-    };
-    let ui = cx.global::<Ui>();
+    let ui = cx.global_mut::<Ui>();
+    ui.theme_reload_generation += 1;
+    let generation = ui.theme_reload_generation;
+    let (dir, state) = (ui.themes_dir.clone(), ui.themes_state_dir.clone());
     let saved = match &ui.preview_theme {
         Some(id) => Some(id.clone()),
         None => ui.settings.theme_id().map(str::to_owned),
     };
-    let id = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state);
-    let missing = crow_theme::missing_saved(saved.as_deref(), &dir).map(str::to_owned);
-    match crow_theme::load_theme(&dir, &id) {
+    let task = cx.background_spawn(async move {
+        // io-ok: background task
+        let id = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state);
+        // io-ok: background task
+        let missing = crow_theme::missing_saved(saved.as_deref(), &dir).map(str::to_owned);
+        // io-ok: background task
+        (missing, crow_theme::load_theme(&dir, &id))
+    });
+    cx.spawn(async move |cx| {
+        let (missing, loaded) = task.await;
+        cx.update(|cx| {
+            if cx.global::<Ui>().theme_reload_generation == generation {
+                apply_loaded_theme(missing, loaded, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+fn apply_loaded_theme(missing: Option<String>, loaded: Result<Theme, String>, cx: &mut App) {
+    let _span = tracing::debug_span!("theme reload").entered();
+    match loaded {
         Ok(theme) => {
             let theme = resolve_system_colors(theme);
             // Said once per missing id, not on every reload.
@@ -1140,7 +1313,7 @@ pub fn set_theme(theme: Theme, cx: &mut App) {
         && !theme.same_colors(&ui.theme)
     {
         // A change mid-fade starts from the colors on screen, not the old theme.
-        ui.fade = Some((ui.theme.clone(), Instant::now(), duration));
+        ui.fade = Some((ui.theme.clone(), crate::clock::now(), duration));
         ui.target = theme;
         if !fading {
             run_fade(cx);
@@ -1159,7 +1332,7 @@ fn run_fade(cx: &mut App) {
             let done = cx.update(|cx| {
                 let ui = cx.global_mut::<Ui>();
                 let Some((from, start, duration)) = &ui.fade else { return true };
-                let t = (start.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+                let t = (crate::clock::elapsed(*start).as_secs_f32() / duration.as_secs_f32()).min(1.0);
                 // Ease-out cubic: quick to start, gentle to land.
                 let eased = 1.0 - (1.0 - t).powi(3);
                 ui.theme = from.mix(&ui.target, eased);
@@ -1263,15 +1436,29 @@ pub fn open_config_folder(cx: &mut App) {
     crate::window::open_path(dir, true, cx);
 }
 
-/// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
-pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
-    let state = cx.global::<Ui>().themes_state_dir.clone();
-    if let Err(e) = crow_theme::set_global(theme, &state) {
-        // Not a file problem, so it belongs with the operation messages (no Open button).
-        crate::operations::message(format!("Can't apply the theme to all apps: {e}"), true, cx);
-        return;
-    }
-    choose_theme("system", cx);
+/// "Apply to all apps": make the theme `id` the global choice for its variant and
+/// follow it here. The theme is loaded and written in the background; the choice
+/// follows once it is on disk.
+pub fn apply_theme_everywhere(id: String, cx: &mut App) {
+    let (dir, state) = {
+        let ui = cx.global::<Ui>();
+        (ui.themes_dir.clone(), ui.themes_state_dir.clone())
+    };
+    let task = cx.background_spawn(async move {
+        // io-ok: background task
+        let theme = crow_theme::load_theme(&dir, &id)?;
+        // io-ok: background task
+        crow_theme::set_global(&theme, &state).map_err(|e| format!("Can't apply the theme to all apps: {e}"))
+    });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| match result {
+            Ok(()) => choose_theme("system", cx),
+            // Not a file problem, so it belongs with the operation messages (no Open button).
+            Err(e) => crate::operations::message(e, true, cx),
+        });
+    })
+    .detach();
 }
 
 /// Record a visit to `dir` for Recent, and save it.
@@ -1295,12 +1482,12 @@ pub fn record_command(id: crate::palette::CommandId, cx: &mut App) {
     recent.push(id.key(), crate::palette::RECENT_COMMANDS);
     let file = ui.state_dir.join("palette-commands.json");
     cx.global_mut::<Ui>().recent_commands = recent.clone();
-    let task = cx.background_spawn(async move {
-        if let Err(e) = recent.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
-    });
-    task.detach();
+    queue_state_save(
+        "palette-commands.json",
+        file,
+        move |file| recent.save(file).map_err(|e| format!("{}: {e}", file.display())),
+        cx,
+    );
     cx.refresh_windows();
 }
 
@@ -1339,10 +1526,16 @@ pub fn refresh_recent(cx: &mut App) {
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
     let alias_candidates = favorites;
+    {
+        let (saved, file) = (recent.clone(), file.clone());
+        queue_state_save(
+            "recent.json",
+            file,
+            move |file| saved.save(file).map_err(|e| format!("{}: {e}", file.display())),
+            cx,
+        );
+    }
     let task = cx.background_spawn(async move {
-        if let Err(e) = recent.save(&file) {
-            tracing::warn!("{}: {e}", file.display());
-        }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         // io-ok: inside background_spawn
         let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
@@ -1433,6 +1626,8 @@ fn write_config_with_completion(
     completion: Option<ViewsWriteCompletion>,
     cx: &mut App,
 ) {
+    // A reload that read the file before this write must not apply its older copy.
+    cx.global_mut::<Ui>().write_epoch[which] += 1;
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
     if matches!(which, SETTINGS | VIEWS | SAVED_QUERIES) {
@@ -1449,8 +1644,11 @@ fn write_config_with_completion(
                 }
                 write(&config_dir, &home)?;
                 match which {
+                    // io-ok: background task
                     SETTINGS => load_settings(&config_dir).map(ConfigSnapshot::Settings).map_err(|e| e.to_string()),
+                    // io-ok: background task
                     VIEWS => load_views(&config_dir, &home).map(ConfigSnapshot::Views),
+                    // io-ok: background task
                     SAVED_QUERIES => load_saved_queries(&config_dir, &home).map(ConfigSnapshot::SavedQueries),
                     _ => unreachable!("queued config file"),
                 }
@@ -1464,6 +1662,7 @@ fn write_config_with_completion(
                 if cx.global::<Ui>().config_write_revision[which] == revision {
                     let ui = cx.global_mut::<Ui>();
                     ui.config_writes[which] = None;
+                    ui.write_epoch[which] += 1;
                     match result {
                         Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
                         Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
@@ -1481,22 +1680,31 @@ fn write_config_with_completion(
         .detach();
         return;
     }
-    let task = cx.background_spawn(async move { write(&config_dir, &home) });
+    let task = cx.background_spawn(async move {
+        write(&config_dir, &home)?;
+        // Read back off the main thread, so applying it is not disk work.
+        Ok(match which {
+            // io-ok: background task
+            SIDEBAR => Some(Reread::Sidebar(load_sidebar(&config_dir))),
+            // io-ok: background task
+            EXCLUDE => Some(Reread::Exclude(Box::new(crow_core::load_exclude(&config_dir)))),
+            _ => None,
+        })
+    });
     cx.spawn(async move |cx| {
-        let result = task.await;
+        let result: Result<Option<Reread>, String> = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
+            ui.write_epoch[which] += 1;
             match result {
-                Ok(()) => match which {
-                    SIDEBAR => {
-                        ui.load_sidebar();
-                        refresh_recent(cx);
-                    }
-                    EXCLUDE => {
-                        ui.load_exclude();
-                    }
-                    _ => unreachable!("queued writes handled above"),
-                },
+                Ok(Some(Reread::Sidebar(sidebar))) => {
+                    ui.apply_loaded_sidebar(sidebar);
+                    refresh_recent(cx);
+                }
+                Ok(Some(Reread::Exclude(exclude))) => {
+                    ui.apply_loaded_exclude(*exclude);
+                }
+                Ok(None) => unreachable!("queued writes handled above"),
                 Err(e) => {
                     ui.set_error(which, Err(e));
                 }
@@ -1505,6 +1713,12 @@ fn write_config_with_completion(
         });
     })
     .detach();
+}
+
+/// A file read back after Crow wrote it.
+enum Reread {
+    Sidebar(Result<SidebarConfig, String>),
+    Exclude(Box<Result<crow_core::Exclude, String>>),
 }
 
 /// Reload the saved-query file without blocking the UI or publishing a read
@@ -1517,6 +1731,7 @@ fn reload_saved_queries(cx: &mut App) {
     ui.config_write_revision[SAVED_QUERIES] += 1;
     let revision = ui.config_write_revision[SAVED_QUERIES];
     let (config, home) = (ui.config_dir.clone(), ui.home.clone());
+    // io-ok: background task
     let task = cx.background_spawn(async move { load_saved_queries(&config, &home) });
     cx.spawn(async move |cx| {
         let result = task.await;
@@ -1642,6 +1857,74 @@ mod tests {
         theme.id = "other".into();
         theme.palette.insert("accent".into(), Rgb(0x123456));
         theme
+    }
+
+    #[gpui::test]
+    fn the_folder_sizes_setting_refreshes_the_view_menu(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_for_tests(cx);
+            crate::menus::init_for_tests(cx);
+            let calculate_disabled = |cx: &App| {
+                let menus = cx.get_menus().expect("menus are set");
+                menus
+                    .iter()
+                    .flat_map(|menu| menu.items.iter())
+                    .find_map(|item| match item {
+                        gpui::OwnedMenuItem::Action { name, disabled, .. } if name == "Calculate Folder Sizes" => {
+                            Some(*disabled)
+                        }
+                        _ => None,
+                    })
+                    .expect("the View menu lists Calculate Folder Sizes")
+            };
+            assert!(!calculate_disabled(cx));
+            set_setting(SettingChange::FolderSizes(FolderSizesMode::Visible), cx);
+            assert!(calculate_disabled(cx), "the menu follows the setting at once");
+        });
+    }
+
+    #[gpui::test]
+    fn writes_to_one_file_run_in_the_order_they_were_queued(cx: &mut gpui::TestAppContext) {
+        cx.update(init_for_tests);
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (first, second) = (log.clone(), log.clone());
+        let last = cx.update(|cx| {
+            let _earlier = queue_file_write(
+                "probe.toml",
+                move || {
+                    std::thread::sleep(Duration::from_millis(60));
+                    first.lock().unwrap().push(1);
+                    Ok(())
+                },
+                cx,
+            );
+            queue_file_write(
+                "probe.toml",
+                move || {
+                    second.lock().unwrap().push(2);
+                    Ok(())
+                },
+                cx,
+            )
+        });
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        cx.update(|cx| {
+            cx.spawn(async move |_| {
+                last.await.expect("the write succeeded");
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .detach();
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if finished.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst), "the queued writes finished");
+        assert_eq!(*log.lock().unwrap(), vec![1, 2], "the later write waited for the earlier one");
     }
 
     #[test]

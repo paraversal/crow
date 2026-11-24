@@ -27,13 +27,7 @@ pub(super) struct TagPicker {
 
 impl CrowWindow {
     pub(super) fn open_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some()
-            || self.tag_picker.is_some()
-            || self.sheet.is_some()
-            || self.palette.is_some()
-            || self.picker.is_some()
-            || self.why.is_some()
-        {
+        if self.search.is_some() || self.overlay_open() {
             return;
         }
         crate::tags::refresh_if_stale(cx);
@@ -110,6 +104,9 @@ impl CrowWindow {
                     .role(Role::CheckBox)
                     .aria_label(tag.clone())
                     .aria_toggled(if checked { Toggled::True } else { Toggled::False })
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(choices.len())
+                    .when(picker.cursor == index, |row| row.aria_active_descendant())
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -163,14 +160,7 @@ impl CrowWindow {
                     match event.keystroke.key.as_str() {
                         "tab" => {
                             let forward = !event.keystroke.modifiers.shift;
-                            let count = picker.buttons.len();
-                            let next = match (focused, forward) {
-                                (Some(index), true) => (index + 1) % count,
-                                (Some(index), false) => (index + count - 1) % count,
-                                (None, true) => 0,
-                                (None, false) => count - 1,
-                            };
-                            window.focus(&picker.buttons[next], cx);
+                            chrome::cycle_focus(&picker.buttons, forward, window, cx);
                         }
                         "up" => picker.cursor = picker.cursor.saturating_sub(1),
                         "down" => picker.cursor = (picker.cursor + 1).min(limit),

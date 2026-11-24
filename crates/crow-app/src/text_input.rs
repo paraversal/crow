@@ -214,7 +214,7 @@ impl TextInput {
             blink_loop: false,
             refuse: None,
             refuse_generation: 0,
-            shown_at: Instant::now(),
+            shown_at: crate::clock::now(),
         }
     }
 
@@ -265,7 +265,7 @@ impl TextInput {
         }
         self.refuse_generation += 1;
         let generation = self.refuse_generation;
-        self.refuse = Some((generation, Instant::now()));
+        self.refuse = Some((generation, crate::clock::now()));
         cx.notify();
         let total: Duration = crow_core::motion::phases(mode, crow_core::motion::Fx::Refuse).iter().sum();
         cx.spawn(async move |this, cx| {
@@ -357,8 +357,9 @@ impl TextInput {
 
     /// Select `range` (byte offsets, clamped to the text).
     pub fn select_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        let end = range.end.min(self.content.len());
-        self.selected_range = range.start.min(end)..end;
+        let end = self.content.floor_char_boundary(range.end);
+        let start = self.content.floor_char_boundary(range.start.min(end));
+        self.selected_range = start..end;
         self.selection_reversed = false;
         self.touch_caret(cx);
         window.notify_text_selection_changed(&self.focus_handle);
@@ -784,7 +785,8 @@ impl TextInput {
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+        self.offset_from_utf16(range_utf16.start.min(range_utf16.end))
+            ..self.offset_from_utf16(range_utf16.start.max(range_utf16.end))
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -1086,6 +1088,7 @@ impl Element for TextElement {
             .as_ref()
             .filter(|_| selected_range.is_empty() && cursor_offset == content.len() && !content.is_empty());
         let suffix_line = suffix.map(|suffix| {
+            let suffix = crate::style::display_text(suffix);
             let run = TextRun {
                 len: suffix.len(),
                 font: style.font(),
@@ -1094,7 +1097,7 @@ impl Element for TextElement {
                 underline: None,
                 strikethrough: None,
             };
-            window.text_system().shape_line(suffix.clone(), font_size, &[run], None)
+            window.text_system().shape_line(suffix.into_owned().into(), font_size, &[run], None)
         });
         PrepaintState { line: Some(line), suffix: suffix_line, text_top, scroll_x, selection, cursor }
     }
@@ -1168,7 +1171,7 @@ impl Render for TextInput {
         let chrome = self.chrome;
         let numeric = self.numeric;
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let refuse_look = self.refuse.and_then(|(_, started)| {
             if mode == Effective::Off {
                 return None;

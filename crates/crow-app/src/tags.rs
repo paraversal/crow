@@ -55,12 +55,13 @@ impl TagIndex {
     }
 
     fn apply(&mut self, discovery: TagDiscovery) {
-        if self.used == discovery.tags && self.partial == discovery.partial && self.error.is_none() {
+        let error = discovery.error.map(SharedString::from);
+        if self.used == discovery.tags && self.partial == discovery.partial && self.error == error {
             return;
         }
         self.used = discovery.tags;
         self.partial = discovery.partial;
-        self.error = discovery.error.map(SharedString::from);
+        self.error = error;
     }
 
     /// The section title labels the limitation the APIs impose: Spotlight only
@@ -198,6 +199,16 @@ pub fn refresh_if_stale(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_discovery_error_replaces_the_old_state_even_with_the_same_tags() {
+        let mut index = TagIndex::default();
+        index.apply(TagDiscovery { tags: vec!["Work".into()], partial: true, error: None });
+        index.apply(TagDiscovery { tags: vec!["Work".into()], partial: true, error: Some("Spotlight is off".into()) });
+        assert_eq!(index.section_title(), "Tags (index unavailable)");
+        index.apply(TagDiscovery { tags: vec!["Work".into()], partial: true, error: None });
+        assert_eq!(index.section_title(), "Tags (indexed, partial)", "and a later success clears it");
+    }
+
     use super::*;
 
     struct Fake(Vec<String>);

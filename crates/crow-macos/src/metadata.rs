@@ -235,7 +235,7 @@ pub fn format_mode(mode: u32, file_type: char) -> String {
 /// at 2x). Waits up to two seconds; `None` if Quick Look has nothing or takes longer.
 /// Returns `None` on the main thread rather than blocking it.
 pub fn thumbnail_png(path: &Path, points: f64) -> Option<Vec<u8>> {
-    if objc2::MainThreadMarker::new().is_some() {
+    if !points.is_finite() || points <= 0. || objc2::MainThreadMarker::new().is_some() {
         return None;
     }
     let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
@@ -283,6 +283,16 @@ pub fn thumbnail_png(path: &Path, points: f64) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_rejects_invalid_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("thumbnail.txt");
+        std::fs::write(&path, b"thumbnail").unwrap();
+        for size in [0., f64::NAN, f64::INFINITY, -1.] {
+            assert!(thumbnail_png(&path, size).is_none(), "{size}");
+        }
+    }
 
     #[test]
     fn kinds_come_from_the_system() {

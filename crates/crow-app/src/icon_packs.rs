@@ -310,7 +310,6 @@ fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, LoadE
         cx.refresh_windows();
     }
     if changed {
-        cx.refresh_windows();
         // Status errors stay until something replaces them. A successful load
         // that follows a failure is that something: drop the error text we put
         // there, but leave an unrelated message alone.

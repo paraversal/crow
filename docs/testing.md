@@ -402,6 +402,38 @@ because the app's file-system calls run off the main thread (`crates/crow-app/sr
 fails the tests on a new unmarked one). iCloud Drive placeholders (download on open,
 eviction) are out of scope for the test platform; check a cloud-backed folder by hand.
 
+## Component shots and the isolated Git grant
+
+The website's small shots (`docs/media/<name>-light.webp` and `-dark.webp`: `git-rows`,
+`git-sidebar`, `git-diff`) are single components cut out of
+the real window, so a change to a native component changes its shot:
+
+```bash
+scripts/component-shots.sh              # every component, light and dark, PNG in target/component-shots and WebP in docs/media
+scripts/component-shots.sh git-rows     # only those
+cargo run -p crow-app --features component-shots -- --component-shot git-rows --theme finder-dark --out rows.png
+```
+
+`crates/crow-app/src/component_shot.rs` opens the real `CrowWindow` in GPUI's headless test
+context (no window, the Metal headless renderer, the Mac text system, the built-in Finder themes,
+the Lucide pack from `docs/examples/icon-pack`), on fixture folders and throwaway Git repositories
+with fixed dates under a scratch folder, drives it to the wanted state and crops the elements
+(found by `debug_selector`, so it needs a debug build) with 20 pt of padding. `--scale 1|2|3` sets the pixel
+density; the script uses 3 (`CROW_SHOT_SCALE=2` for 2x) and the page shows each image at a third of its pixels.
+GPUI's headless test window is fixed at 2x, so `patches/gpui-test-window-scale-factor.patch` (applied by
+`scripts/fetch-gpui.sh` like the others; its header says why) adds `gpui::set_test_window_scale_factor`. It and the
+test window's use of it are behind `test-support`, so a normal build compiles none of it. The scale is process-wide, so the 3x test is ignored in the normal run (`cargo test -p crow-app scale_3 -- --ignored`). Nothing reads or writes your own config, home or Git settings. The feature `component-shots`
+is never in the bundle. Each component has a test that it renders in both themes, is padded and not blank,
+and that a render repeats byte for byte. `--whole-window` writes the full window instead, to see why a crop is missing.
+Look at every new or changed shot at 100% and at full size before committing it.
+
+The bundled Git package runs only with a grant for its exact digest. Isolated runs (the shot scripts,
+the component shots, tests) need that grant without the Settings approval: `crow --grant-bundled git
+--config-dir DIR` writes it to `DIR/plugins.toml` through the same `grants::approve` the approval uses, with the
+digest of the bundle embedded in this binary (a changed bundle is granted afresh). `DIR` must exist and be below the
+system temp folder or `$CROW_SHOT_HOME`, and it is refused when it is the folder the app would use as its real config.
+`scripts/shot.sh` uses it for demo-home shots. A real run is unchanged: it still asks.
+
 ## Folder sizes
 
 Set `folder_sizes = "visible"` in `settings.toml` (or Settings ▸ Folder sizes) and open a folder with subfolders in list view: the Size column shows `--`, then sizes fill in top first and fade in; a stale value dims until it is re-measured. Compare a folder with Finder's Get Info (logical size). Edit a file deep in a measured folder: the folder and its parents update within a couple of seconds. Quit Crow, change something, relaunch: the change shows. With the setting off, View ▸ Calculate Folder Sizes measures the current folder once. Scroll a 100k folder of folders quickly: no stutter, and Activity Monitor shows the workers stop for rows that scrolled away. No permission prompt appears just from viewing `~`; an iCloud folder's not-downloaded files stay not downloaded.
@@ -554,7 +586,7 @@ checks. The Settings window can be tested natively at 640 × 420 px.
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
 | Quick Look | Select a file, press Space. Arrow keys while it is open move it along. |
 | Click on empty space | List view: select a few items, click below the last row (or in the gutter beside a row): nothing is selected, ↓ selects the first row. Cmd- or Shift-click there keeps the selection. Column view with three columns open: click the empty part of the first column: the others close and nothing is selected. While renaming, click empty space (or another row): the rename is applied, not left open. |
-| Batch rename | Select two or more files and press F2: one sheet previews the old → new names before anything moves. Find & Replace, Add Text (before/after) and Numbering (base, start, padding) each update the preview; Keep extension is on by default. A duplicate or occupied target, a source changed since the preview, or an ancestor/descendant selection keeps Rename disabled or refuses with an error and no disk changes. Apply a swap, return, and use ⌘Z once: every name returns and the cursor follows the mapped row; ⇧⌘Z swaps again. Escape leaves the disk and selection alone. Try the same from results across two folders. Tab through the rules, Keep extension and buttons: Space and Enter activate the focused control, and Enter on Cancel closes without renaming. |
+| Batch rename | Select two or more files and press F2: one sheet previews the old → new names before anything moves. Find & Replace, Add Text (before/after) and Numbering (base, start, padding) each update the preview; Keep extension is on by default. A duplicate or occupied target, a source changed since the preview, or an ancestor/descendant selection keeps Rename disabled or refuses with an error and no disk changes. Apply a swap, return, and use ⌘Z once: every name returns and the cursor follows the mapped row; ⇧⌘Z swaps again. Escape leaves the disk and selection alone. Try the same from results across two folders. Tab through the rules, Keep extension and buttons: Space and Enter activate the focused control, and Enter on Cancel closes without renaming. The rule reads as one sentence (Replace [find] with [text], Add [text] after or before the name, Name them [base] counting from [start] with [n] digits) under three underline tabs (Find & Replace, Add Text, Numbering) with Keep extension at the right end of the tab row; the fields are underlined text, not boxes. In the table the removed part of each old name and the inserted part of each new name are tinted; unchanged rows are dimmed and read “unchanged”. A blank or unreadable field gets a red border and one message above the table, every After cell shows a dash, and Rename on it shakes that field (a red ring with Low motion, nothing with motion off). A clash tints its row with the reason after the new name and the footer counts the blocked rows. Check light and dark, a 640 px window, and motion Full, Low and Off: switching modes slides the tab ink bar to the new tab, slides the sentence in from the side of its tab and fades it (nothing slides with Low), and brings in, row by row about 35 ms apart, only the After cells whose text changed: an empty rule changing mode redraws nothing, and scrolling a long list never replays it; the sheet widens for long names and grows taller with the selection (about 12 rows in a tall window); the message strip fades in. With Off everything appears at once. |
 | Context menu | Right-click an unselected row: it alone is selected and a native menu opens at the pointer, with the menu bar's names and keys (⌘⌫ beside Move to Trash, ⌥⌘C beside Copy Path). Right-click inside a multi-selection: the selection stays; Move to Trash trashes all. Ctrl-click does the same as right-click. Right-click empty space: selection clears; New Folder starts its rename; Paste is grey with nothing copied, enabled after ⌘C. Show in Finder reveals the items (on empty space, opens the folder). Esc or a click outside closes the menu without acting. Both in list and column view, with the Vim layer on too (keys shown stay ⌘C etc.). While the menu is open, check whether a running copy's progress keeps updating: AppKit's tracking loop pauses GPUI frames, so it may freeze until the menu closes, then resume. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. Set `view_per_folder = false`: Cmd-3, then visit that folder with its own list view and go Back: the window stays in columns, Cmd-T opens columns, `views.toml` is unchanged, Cmd-J says "this window". |
@@ -702,7 +734,19 @@ fade the trash tail.
 
 ## Motion and sound (U10)
 
-`crow --motion-lab` opens a fake folder where every feedback event (trash, move, undo, new
+### Testing motion without sleeping
+
+Motion reads one clock, `crate::clock::now()` (`crates/crow-app/src/clock.rs`): `Instant::now()` in the
+app, and in tests (after `ui::init_for_tests`) the GPUI test executor's clock, which stands still until
+the test moves it and is the same clock GPUI's own `with_animation` and springs read. Every animation
+start stamp and every progress sample uses it; throttles, caches and performance timers keep the real
+clock. A window test steps motion with `executor.advance_clock(..)`, or the helpers in
+`window/tests.rs`: `step_motion(view, cx, ms)` (advance, redraw) and `finish_motion(view, cx)` (run a
+slide out). Never `thread::sleep` for motion: a mid-animation assertion samples the frame at exactly
+t = 0, and a finished one steps past the duration. A new animation start or sample takes
+`crate::clock::now()`, not `Instant::now()`.
+
+`crow --motion-lab` (built with `--features motion-lab`, never in the bundle) opens a fake folder where every feedback event (trash, move, undo, new
 folder, refuse, copy, tip, sheet) can be fired in Off, Low and Full and in the three sound
 sets, with slow motion ×5 and the cursor glide. The lab and the app share
 `crow_core::motion`, so a duration or look changed there changes both. `p` opens the mock
@@ -728,7 +772,7 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Expand and collapse | List view, a folder with a few items: → or the triangle. Full: the triangle turns, the rows below slide down and the new rows show from the top as the gap opens; ← slides the rows below back up. Low: the new rows fade in, nothing moves. Off: one frame. A folder with hundreds of items opens without a long slide. |
 | Hidden items | A folder with dotfiles (Home): hidden files and folders show dimmed (icon, name and every column) in list and column view, in light and dark themes; selected, the fill stays full and the name stays readable; renaming one shows the field at full contrast. |
 | Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |
-| Lab | `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |
+| Lab | A `--features motion-lab` build of `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |
 
 ## Selection and motion (F1)
 

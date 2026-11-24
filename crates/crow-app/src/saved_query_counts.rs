@@ -112,7 +112,24 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
     let run_started = std::time::SystemTime::now();
     let mut paths: HashSet<PathBuf> = HashSet::new();
     let mut partial = false;
-    let local_cancel = AtomicBool::new(false);
+    // `None`: ask Spotlight by name; `Some`: a metadata expression.
+    let expression = if text.is_empty() || !predicates.tags.is_empty() {
+        match spotlight_expression_for(predicates, text) {
+            Some(expression) => Some(expression),
+            None => return CountResult::default(),
+        }
+    } else if query.matching == SavedMatch::Contents {
+        // Spotlight cannot read contents; this combination is rejected by the
+        // config validator, so a hand-edited file simply counts nothing here.
+        return CountResult { count: 0, partial: false };
+    } else {
+        None
+    };
+    // The query stops on `local_cancel`, which the cap also sets. A slow or empty
+    // query sends no batch for a long time, so the caller's `cancel` is forwarded
+    // by a watcher instead of being looked at only when a batch arrives.
+    let local_cancel = AtomicBool::new(cancel.load(Ordering::Relaxed));
+    let finished = AtomicBool::new(false);
     let mut sink = |batch: Vec<crow_macos::SpotlightHit>| {
         if cancel.load(Ordering::Relaxed) {
             local_cancel.store(true, Ordering::Relaxed);
@@ -130,18 +147,23 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
             }
         }
     };
-    let result = if text.is_empty() || !predicates.tags.is_empty() {
-        match spotlight_expression_for(predicates, text) {
-            Some(expression) => crow_macos::spotlight_expression(&expression, &mut sink, &local_cancel),
-            None => return CountResult::default(),
-        }
-    } else if query.matching == SavedMatch::Contents {
-        // Spotlight cannot read contents; this combination is rejected by the
-        // config validator, so a hand-edited file simply counts nothing here.
-        return CountResult { count: 0, partial: false };
-    } else {
-        crow_macos::spotlight_names(text, &mut sink, &local_cancel)
-    };
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !finished.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    local_cancel.store(true, Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let result = match &expression {
+            Some(expression) => crow_macos::spotlight_expression(expression, &mut sink, &local_cancel),
+            None => crow_macos::spotlight_names(text, &mut sink, &local_cancel),
+        };
+        finished.store(true, Ordering::Relaxed);
+        result
+    });
     CountResult { count: paths.len() as u64, partial: partial || result.is_err() }
 }
 
@@ -149,6 +171,29 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
 mod tests {
     use super::*;
     use crow_core::{SavedQueryId, SavedScope};
+
+    #[test]
+    fn a_cancelled_spotlight_count_returns_at_once_and_counts_nothing() {
+        let query = SavedQuery {
+            id: SavedQueryId::new("everything").unwrap(),
+            name: "Everything".into(),
+            scope: SavedScope::Folder,
+            root: None,
+            text: "a".into(),
+            matching: crow_core::SavedMatch::Names,
+            include_hidden: true,
+            enter_hidden_folders: false,
+            exclusions: crow_core::SavedExclusions::Configured,
+            kind: None,
+            modified_within_days: None,
+            tags: Vec::new(),
+        };
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let result = count_spotlight(&query, "a", &Predicates::default(), &cancel);
+        assert_eq!(result.count, 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "cancel was not honoured");
+    }
 
     #[test]
     fn counts_a_saved_query_without_the_ui() {

@@ -529,6 +529,18 @@ impl CrowWindow {
         window.focus(&handle, cx);
     }
 
+    /// Whether any modal surface (sheet, palette, pickers, review) is open. Every
+    /// way of opening one checks this, so two never stack and none steals focus.
+    pub(crate) fn overlay_open(&self) -> bool {
+        self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some()
+            || self.git_review.is_some()
+            || self.column_picker.is_some()
+            || self.tag_picker.is_some()
+    }
+
     /// The focus surfaces the topmost overlay owns, in the precedence the fuzzer's
     /// focus invariant uses. Empty when no overlay is open: the pane, the sidebar
     /// and their text fields own focus then.
@@ -582,7 +594,9 @@ impl CrowWindow {
             allowed.push(("search field", search.input_focus_handle(cx)));
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
-            allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            if self.sidebar_takes_focus(cx) {
+                allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            }
             allowed.push(("sidebar divider", self.side_panes.left_focus.clone()));
             allowed.push(("preview divider", self.info.read(cx).splitter_focus().clone()));
             // ⌘L can edit the path while search is open; the bar's field owns focus then.
@@ -751,9 +765,15 @@ impl CrowWindow {
         if hide && self.sidebar.read(cx).focus_handle(cx).contains_focused(window, cx) {
             self.focus_center(window, cx);
         }
-        self.left_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: !hide });
+        self.left_slide = Some(PaneSlide { started: crate::clock::now(), opening: !hide });
         crate::menus::refresh(cx);
         cx.refresh_windows();
+    }
+
+    /// Whether focus may be in the left sidebar: it is shown, or still sliding away.
+    /// A hidden sidebar that keeps focus is a trap the focus invariant must report.
+    fn sidebar_takes_focus(&self, cx: &App) -> bool {
+        !cx.global::<Ui>().sidebar_hidden || self.left_look(cx).is_some_and(|look| look.width > 0.0 || look.overlay)
     }
 
     /// How the left sidebar looks now: `None` when it is not moving, else its slide.
@@ -763,7 +783,7 @@ impl CrowWindow {
         crow_core::motion::progress(
             mode,
             slide.started,
-            std::time::Instant::now(),
+            crate::clock::now(),
             crow_core::motion::ms::PANE_SLIDE,
             crow_core::motion::ms::LOW_IN,
         )
@@ -788,7 +808,7 @@ impl CrowWindow {
     fn begin_pane_slide(&mut self, was_visible: bool, cx: &mut Context<Self>) {
         let visible = self.info.read(cx).visible();
         if visible != was_visible {
-            self.pane_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: visible });
+            self.pane_slide = Some(PaneSlide { started: crate::clock::now(), opening: visible });
         }
     }
 
@@ -1084,7 +1104,7 @@ impl CrowWindow {
 
     fn set_title_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let (from, _) = self.title_slide(mode, now);
         self.title_hover = Some((from, f32::from(hovered), now));
         cx.notify();
@@ -1183,7 +1203,7 @@ impl CrowWindow {
         // was; only the text moves, so nothing else in the toolbar shifts.
         let title_content = {
             let mode = cx.global::<Ui>().feedback.mode;
-            let (slide, _) = self.title_slide(mode, std::time::Instant::now());
+            let (slide, _) = self.title_slide(mode, crate::clock::now());
             let folder = {
                 let pane = self.pane().read(cx);
                 pane.folder().is_some().then(|| pane.current_dir(cx))
@@ -1451,16 +1471,21 @@ impl CrowWindow {
             crow_core::motion::progress(
                 band_mode,
                 started,
-                std::time::Instant::now(),
+                crate::clock::now(),
                 crow_core::motion::ms::SEARCH_BAND,
                 crow_core::motion::ms::LOW_IN,
             )
             .map(|t| crow_core::motion::band_look(band_mode, opening, t))
         });
         let band_opening = self.search_motion.is_some_and(|(opening, _)| opening);
-        let band = self.active_search(cx).map(|search| {
-            let look = band_look.filter(|_| band_opening);
-            search.update(cx, |search, cx| search.render_band(look, window, cx).into_any_element())
+        let active_search = self.active_search(cx);
+        let right_sidebar_hidden = !self.info.read(cx).visible();
+        // Leave room for the sidebar affordances as well as the query and its controls.
+        let search_width = width - px(102. * (1.0 - left_share)) - px(if right_sidebar_hidden { 32. } else { 0. });
+        let compact_search = active_search.is_some() && search_width < px(570.);
+        let band = active_search.as_ref().map(|search| {
+            let look = band_look.filter(|_| band_opening && !compact_search);
+            search.update(cx, |search, cx| search.render_band(look, compact_search, window, cx).into_any_element())
         });
         // Closing: the toolbar's own field starts as wide as the band was and narrows back.
         let closing = band_look.filter(|_| !band_opening);
@@ -1471,7 +1496,7 @@ impl CrowWindow {
             .role(Role::Toolbar)
             .aria_label("Toolbar")
             .relative()
-            .h(px(BAND_HEIGHT))
+            .h(px(BAND_HEIGHT + if compact_search { 30. } else { 0. }))
             .flex_none()
             // With the sidebar hidden the traffic lights sit at the toolbar's left, and the
             // button that brings the sidebar back sits right after them.
@@ -1497,9 +1522,9 @@ impl CrowWindow {
             .gap(px(if tight { 4. } else { 10. }))
             .border_b_1()
             .border_color(crate::style::hairline(&theme))
-            .child(nav)
-            .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
-            .when(self.active_search(cx).is_none(), |bar| {
+            .child(nav.when(compact_search, |nav| nav.self_start().mt(px(11.))))
+            .children(band)
+            .when(active_search.is_none(), |bar| {
                 let search_field = match closing {
                     Some(look) if look.widen > 0.0 && !search_icon_only => {
                         // Narrowing back: the field keeps its 240 px basis and gives up a
@@ -1525,14 +1550,16 @@ impl CrowWindow {
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(search_field)
             })
-            .when(!self.info.read(cx).visible(), |bar| {
-                bar.child(chrome::collapse_chevron(
-                    "show-right-sidebar",
-                    "Show Right Sidebar",
-                    icons::Glyph::CollapseLeft,
-                    &TogglePreview,
-                    &theme,
-                    cx,
+            .when(right_sidebar_hidden, |bar| {
+                bar.child(div().when(compact_search, |button| button.self_start().mt(px(11.))).child(
+                    chrome::collapse_chevron(
+                        "show-right-sidebar",
+                        "Show Right Sidebar",
+                        icons::Glyph::CollapseLeft,
+                        &TogglePreview,
+                        &theme,
+                        cx,
+                    ),
                 ))
             })
     }
@@ -1578,7 +1605,7 @@ impl CrowWindow {
         let active = self.tabs.active_index();
         let count = self.tabs.len();
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = std::time::Instant::now();
+        let now = crate::clock::now();
         let progress = |motion: &TabMotion| {
             crow_core::motion::progress(
                 mode,
@@ -1720,12 +1747,10 @@ impl CrowWindow {
     ) -> gpui::Stateful<gpui::Div> {
         let tab = self.info.read(cx).tab();
         let folder_size = entry.and_then(|entry| {
-            if !entry.is_dir || cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+            if !entry.is_dir {
                 return None;
             }
-            cx.try_global::<crate::folder_sizes::SizeService>()
-                .and_then(|service| service.0.read(cx).size(&entry.path))
-                .map(Into::into)
+            crate::folder_sizes::visible_size(&entry.path, cx).map(Into::into)
         });
         let cloud = entry.and_then(|entry| {
             cx.try_global::<crate::cloud_status::CloudStatusService>()
@@ -3108,6 +3133,10 @@ impl CrowWindow {
     }
 
     fn open_picker(&mut self, infos: Vec<crow_theme::ThemeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        // The list loads in the background; something else may have opened meanwhile.
+        if self.overlay_open() {
+            return;
+        }
         let current = cx.global::<Ui>().settings.theme.clone();
         let choice = crate::theme_choice::ThemeChoice::new(infos, &current);
         let focus = cx.focus_handle();
@@ -3155,12 +3184,8 @@ impl CrowWindow {
         let Some(picker) = self.picker.as_ref().filter(|picker| picker.choice.index) else { return };
         let chosen = picker.choice.entries.get(picker.choice.cursor).cloned();
         retire!(self, cx, picker);
-        let dir = cx.global::<Ui>().themes_dir.clone();
         match chosen {
-            Some(Some(info)) => match crow_theme::load_theme(&dir, &info.id) {
-                Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
-                Err(e) => operations::message(e, true, cx),
-            },
+            Some(Some(info)) => ui::apply_theme_everywhere(info.id, cx),
             _ => ui::choose_theme("system", cx),
         }
         self.focus_center(window, cx);
@@ -3384,10 +3409,10 @@ impl CrowWindow {
         {
             return;
         }
-        if !crate::plugins::begin_command_preparation(cx) {
+        let Some(preparation) = crate::plugins::begin_command_preparation(cx) else {
             operations::message("A plugin command is already being prepared; try again.", true, cx);
             return;
-        }
+        };
         let capture = crate::plugins::CommandCapture {
             surface: context.surface,
             scope: context.scope.clone(),
@@ -3415,7 +3440,8 @@ impl CrowWindow {
         let this_capture = capture.clone();
         cx.spawn_in(window, async move |this, cx| {
             let prepared = task.await;
-            cx.update(|_, cx| crate::plugins::end_command_preparation(cx)).ok();
+            // Also released if the window closes before this point and the task is dropped.
+            drop(preparation);
             this.update_in(cx, |_, window, cx| {
                 if !crate::plugins::command_available(&action, window, cx)
                     || !crate::plugins::capture_current(&this_capture, window, cx)
@@ -3828,12 +3854,12 @@ impl Render for CrowWindow {
         if search_open != self.last_search_open {
             self.last_search_open = search_open;
             self.search_motion =
-                (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, std::time::Instant::now()));
+                (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, crate::clock::now()));
         }
-        if self.search_motion.is_some() || self.title_slide(band_mode, std::time::Instant::now()).1 {
+        if self.search_motion.is_some() || self.title_slide(band_mode, crate::clock::now()).1 {
             window.request_animation_frame();
         }
-        let tab_now = std::time::Instant::now();
+        let tab_now = crate::clock::now();
         self.track_tabs(cx.global::<Ui>().feedback.mode, tab_now, cx);
         if !self.tab_motions.is_empty() {
             window.request_animation_frame();
@@ -3972,7 +3998,7 @@ impl Render for CrowWindow {
             crow_core::motion::progress(
                 mode_now,
                 slide.started,
-                std::time::Instant::now(),
+                crate::clock::now(),
                 crow_core::motion::ms::PANE_SLIDE,
                 crow_core::motion::ms::LOW_IN,
             )
@@ -4051,7 +4077,7 @@ impl Render for CrowWindow {
         };
         // A closed overlay's last picture is lent back to its slot for this render
         // (`motion_ui::lend`) and fades out; it takes no input.
-        let (mode, now) = (cx.global::<Ui>().feedback.mode, std::time::Instant::now());
+        let (mode, now) = (cx.global::<Ui>().feedback.mode, crate::clock::now());
         // Leaving pictures are drawn under the live overlays, so a new sheet's
         // buttons are never covered by an old panel that is still fading.
         let mut behind: Vec<gpui::AnyElement> = Vec::new();
@@ -4074,7 +4100,7 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(window, cx));
         let why = lend!(why, self.render_why(window, cx));
         let picker = lend!(picker, self.render_picker(cx));
-        let git_review = lend!(git_review, self.render_git_review(cx));
+        let git_review = lend!(git_review, self.render_git_review(window, cx));
         let column_picker = lend!(column_picker, self.render_column_picker(window, cx));
         let tag_picker = lend!(tag_picker, self.render_tag_picker(cx));
         let palette = lend!(palette, self.render_palette(window, cx));
@@ -4520,7 +4546,9 @@ impl CrowWindow {
                     let pane = self.pane().read(cx);
                     let sidebar = self.sidebar.read(cx);
                     allowed.push(("pane", pane.focus_handle().clone()));
-                    allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    if self.sidebar_takes_focus(cx) {
+                        allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    }
                     // A saved search or tag destination fills the center with its own session.
                     if let Some(session) = pane.saved_session() {
                         let session = session.read(cx);

@@ -91,18 +91,26 @@ pub(crate) fn ns_view(window: &impl HasWindowHandle) -> Option<Retained<NSView>>
     unsafe { Retained::retain(appkit.ns_view.as_ptr().cast::<NSView>()) }
 }
 
+fn drag_image_size(width: f32, height: f32) -> Option<NSSize> {
+    if !width.is_finite() || !height.is_finite() || width <= 0. || height < 4. {
+        return None;
+    }
+    Some(NSSize::new(f64::from(width), f64::from(height)))
+}
+
 /// Draw the same icon + name pill the GPUI drag shows in the window.
 #[allow(deprecated)] // NSImage's focus-based drawing is the simplest way to compose the combo.
 fn combo_image(drag: &ComboDrag) -> Option<Retained<NSImage>> {
-    let height = drag.height as f64;
-    let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(drag.width as f64, height));
+    let size = drag_image_size(drag.width, drag.height)?;
+    let height = size.height;
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
     image.lockFocus();
     let data = NSData::with_bytes(drag.icon_png);
     if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
         icon.drawInRect(NSRect::new(NSPoint::new(0., (height - ICON) / 2.), NSSize::new(ICON, ICON)));
     }
 
-    let pill = NSRect::new(NSPoint::new(ICON + GAP, 2.), NSSize::new(drag.pill_width as f64, height - 4.));
+    let pill = NSRect::new(NSPoint::new(ICON + GAP, 2.), NSSize::new(f64::from(drag.pill_width.max(0.)), height - 4.));
     let radius = (height - 4.) / 2.;
     let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(pill, radius, radius);
     NSColor::colorWithWhite_alpha(0.12, 0.92).setFill();
@@ -189,7 +197,7 @@ fn stop_slide_back() {
 fn install_key_observers() {
     use block2::RcBlock;
     use objc2_app_kit::{NSApplicationDidResignActiveNotification, NSWindowDidResignKeyNotification};
-    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue};
     use std::ptr::NonNull;
     thread_local!(static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
     if DONE.with(|done| done.replace(true)) {
@@ -201,9 +209,16 @@ fn install_key_observers() {
     for name in names {
         let block = RcBlock::new(|_: NonNull<NSNotification>| stop_slide_back());
         // SAFETY: the block only touches this thread's session handle and lives for the process.
-        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block) };
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(name),
+                None,
+                Some(&NSOperationQueue::mainQueue()),
+                &block,
+            )
+        };
+        // The center keeps the observer, and copies the block, for the process.
         std::mem::forget(token);
-        std::mem::forget(block);
     }
 }
 
@@ -233,7 +248,7 @@ fn primary_button_down() -> bool {
 /// mouse-up that caused it was synthetic, so the drop must not act. The session then
 /// starts again at the pointer.
 pub fn drop_is_premature() -> bool {
-    primary_button_down()
+    main_thread().is_some() && primary_button_down()
 }
 
 /// Whether a session that just ended was cut short and should start again: the user is
@@ -289,6 +304,9 @@ fn resume_session() {
 /// Start a native file drag whose image is the same icon + pill combo as the in-window one.
 /// Call with the current mouse event; returns false when no native view/event is available.
 pub fn begin_drag(window: &impl HasWindowHandle, drag: &ComboDrag) -> bool {
+    if drag.paths.is_empty() {
+        return false;
+    }
     let Some(mtm) = main_thread() else { return false };
     let Some(view) = ns_view(window) else { return false };
     let event = LAST_MOUSE_DOWN
@@ -306,6 +324,9 @@ pub fn begin_drag(window: &impl HasWindowHandle, drag: &ComboDrag) -> bool {
 }
 
 fn start_session(view: &Retained<NSView>, drag: &ComboDrag, at: NSPoint, event: &NSEvent) -> bool {
+    if drag.paths.is_empty() {
+        return false;
+    }
     let Some(image) = combo_image(drag) else { return false };
     let empty: Retained<NSImage> = NSImage::initWithSize(NSImage::alloc(), NSSize::new(1., 1.));
     let height = drag.height as f64;
@@ -357,6 +378,22 @@ fn start_session(view: &Retained<NSView>, drag: &ComboDrag, at: NSPoint, event: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_image_dimensions_must_be_finite_and_fit_the_pill() {
+        for (width, height) in [
+            (0., 22.),
+            (-1., 22.),
+            (f32::NAN, 22.),
+            (f32::INFINITY, 22.),
+            (22., f32::NAN),
+            (22., f32::INFINITY),
+            (22., 3.9),
+        ] {
+            assert!(drag_image_size(width, height).is_none(), "{width} × {height}");
+        }
+        assert_eq!(drag_image_size(32., 22.), Some(NSSize::new(32., 22.)));
+    }
 
     #[test]
     fn a_session_cut_short_with_the_button_held_resumes() {

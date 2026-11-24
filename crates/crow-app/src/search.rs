@@ -2112,7 +2112,6 @@ impl SearchView {
     }
 
     /// Whether the query field has focus.
-    #[allow(dead_code)] // U5's hints read it.
     pub fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.input.read(cx).focus_handle(cx).is_focused(window)
     }
@@ -2760,17 +2759,18 @@ impl SearchView {
 
     // ----- rendering -----
 
-    /// The window's band while search is open: the query field and Done.
-    /// The window places this between Back/Forward and the window edge.
-    /// The toolbar's band. `look` is set while it opens (`crow_core::motion::band_look`).
+    /// The search controls between Back/Forward and the window edge.
+    /// Compact toolbars give the match control its own row.
     pub fn render_band(
         &mut self,
         look: Option<crow_core::motion::BandLook>,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let growing = look.is_some_and(|look| look.widen < 1.0);
         let ring = if focused { field_ring(&theme) } else { color(theme.role("surface")) };
         let field = div()
             .id("search-field")
@@ -2783,7 +2783,7 @@ impl SearchView {
             .on_action(cx.listener(Self::close_action))
             .on_action(cx.listener(Self::focus_results_from_field))
             .flex_1()
-            .min_w(px(160.))
+            .when(!compact, |field| field.min_w(px(if growing { 160. } else { 280. })))
             .h(px(32.))
             .flex()
             .items_center()
@@ -2796,14 +2796,25 @@ impl SearchView {
             .border_color(ring)
             .text_size(px(14.))
             .text_color(color(theme.role("fg")))
-            .child(with_tooltip(
-                div().id("search-field-icon").flex_none().child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme)),
-                "Wrap the query in slashes for a regular expression, like /fn \\w+_view/",
-                None,
-            ))
-            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .when(!compact, |field| {
+                field.child(with_tooltip(
+                    div().id("search-field-icon").flex_none().child(icons::glyph(
+                        Glyph::Search,
+                        15.,
+                        "fg-muted",
+                        &theme,
+                    )),
+                    "Wrap the query in slashes for a regular expression, like /fn \\w+_view/",
+                    None,
+                ))
+            })
+            .child(div().debug_selector(|| "search-query".into()).flex_1().min_w_0().child(self.input.clone()))
             .children(self.render_regex_badge(cx))
-            .child(div().opacity(look.map_or(1.0, |look| look.controls)).child(self.render_match_control(focused, cx)));
+            .when(!compact, |field| {
+                field.child(
+                    div().opacity(look.map_or(1.0, |look| look.controls)).child(self.render_match_control(focused, cx)),
+                )
+            });
         // Widening: the field starts at the toolbar field's 240 px and takes a share of
         // the band's free space. A flex factor under 1 hands out only that share, so
         // the width runs linearly to the settled one without a clamp that ends the
@@ -2837,23 +2848,22 @@ impl SearchView {
             .hover(move |style| style.bg(color(theme.role("surface"))))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Close)))
             .child("Done")
-            .child(Keycap::text("esc", KeycapWeight::Outline));
+            .when(!compact, |done| done.child(Keycap::text("esc", KeycapWeight::Outline)));
         // Opening: the field grows out of the toolbar's own (right-aligned) one, so the band
         // packs to the right while it is still narrower than the toolbar, and its buttons
         // take room only as they fade in.
-        let growing = look.is_some_and(|look| look.widen < 1.0);
-        let mut band = div()
+        let mut row = div()
             .flex_1()
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(if compact { 4. } else { 10. }))
             .when(growing, |band| band.justify_end())
             .child(field);
         let controls = look.map_or(1.0, |look| look.controls);
         let reveal = move |natural: f32| (look.is_some() && controls < 1.0).then(|| px(natural * controls));
         let save_label = if self.saved.is_some() { "Update…" } else { "Save…" };
-        band = band.child(
+        row = row.child(
             div()
                 .id("search-save")
                 .debug_selector(|| "search-save".into())
@@ -2873,28 +2883,34 @@ impl SearchView {
                 .when_some(reveal(64.), |save, width| save.w(width).overflow_hidden().whitespace_nowrap())
                 .child(save_label),
         );
-        if self.saved.is_some() || self.tag.is_some() {
+        let destination = self.saved.is_some() || self.tag.is_some();
+        let title = destination.then(|| {
             // The destination title stays visible; Done would imply closing the tab.
-            band = band.child(
-                div()
-                    .id("saved-query-title")
-                    .debug_selector(|| "saved-query-title".into())
-                    .flex_none()
-                    .max_w(px(260.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.))
-                    .text_color(title_color)
-                    .child(self.title.clone()),
-            );
-        } else {
-            band = band.child(
+            div()
+                .id("saved-query-title")
+                .debug_selector(|| "saved-query-title".into())
+                .min_w_0()
+                .max_w(px(260.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(13.))
+                .text_color(title_color)
+                .child(self.title.clone())
+        });
+        if !destination {
+            row = row.child(
                 done.opacity(controls)
                     .when_some(reveal(84.), |done, width| done.w(width).overflow_hidden().whitespace_nowrap()),
             );
         }
-        band.opacity(look.map_or(1.0, |look| look.fade))
+        if compact {
+            div().flex_1().min_w_0().flex().flex_col().gap(px(4.)).child(row).child(
+                div().flex().items_center().gap(px(8.)).child(self.render_match_control(focused, cx)).children(title),
+            )
+        } else {
+            row.children(title).opacity(look.map_or(1.0, |look| look.fade))
+        }
     }
 
     /// "regex" in the field while the query is a `/pattern/`: the accent when it parses,

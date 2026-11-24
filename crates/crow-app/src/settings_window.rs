@@ -876,6 +876,8 @@ pub struct SettingsWindow {
     dismissed_by_mouse: Option<ControlId>,
     theme_type_ahead: TypeAhead,
     font_type_ahead: TypeAhead,
+    icon_type_ahead: TypeAhead,
+    sort_type_ahead: TypeAhead,
     page_scroll: ScrollHandle,
     /// Each control's direct-child index in the page, for keyboard scrolling.
     control_items: HashMap<ControlId, usize>,
@@ -987,6 +989,7 @@ impl SettingsWindow {
             ControlId::Terminal,
             ControlId::WindowWidth,
             ControlId::WindowHeight,
+            ControlId::KeyboardList,
         ] {
             let handle = handles[&id].clone();
             let entity = entity.clone();
@@ -1107,6 +1110,8 @@ impl SettingsWindow {
             dismissed_by_mouse: None,
             theme_type_ahead: TypeAhead::default(),
             font_type_ahead: TypeAhead::default(),
+            icon_type_ahead: TypeAhead::default(),
+            sort_type_ahead: TypeAhead::default(),
             page_scroll: ScrollHandle::new(),
             control_items: HashMap::new(),
             error_handles,
@@ -1222,7 +1227,7 @@ impl SettingsWindow {
 
     fn start_content_motion(&mut self, cx: &App) {
         let mode = cx.global::<Ui>().feedback.mode;
-        self.content_motion = (mode != Effective::Off).then(|| ContentMotion { started: Instant::now(), mode });
+        self.content_motion = (mode != Effective::Off).then(|| ContentMotion { started: crate::clock::now(), mode });
     }
 
     /// Open a category from the sidebar (or a click). Search ends, transient
@@ -1462,6 +1467,7 @@ impl SettingsWindow {
                 self.commit_stepper(id, window, cx);
             }
             ControlId::Terminal => self.commit_terminal(window, cx),
+            ControlId::KeyboardList => self.cancel_capture(cx),
             _ => {}
         }
     }
@@ -1483,7 +1489,12 @@ impl SettingsWindow {
         // An empty app would make `open -a` fail; the setting's default stands in.
         let text = if text.is_empty() { "Terminal".to_owned() } else { text };
         ui::set_setting(SettingChange::Terminal(text), cx);
-        self.sync_terminal(window, cx);
+        // The field may still hold focus (and so be skipped by `sync_terminal`):
+        // an emptied field must show the default that was written.
+        let written = cx.global::<Ui>().settings.terminal.clone();
+        if self.terminal.read(cx).text() != written {
+            self.terminal.update(cx, |input, cx| input.set_text(written, window, cx));
+        }
         cx.notify();
     }
 
@@ -1506,6 +1517,7 @@ impl SettingsWindow {
                 if text != self.query {
                     let was_searching = !self.query.is_empty();
                     self.close_menu(window, cx);
+                    self.cancel_capture(cx);
                     self.query = text;
                     if was_searching != !self.query.is_empty() {
                         self.start_content_motion(cx);
@@ -1756,6 +1768,18 @@ impl SettingsWindow {
         }
     }
 
+    /// A click on a plugin row selects it and puts the keys (A, E, D, R, T) on the list.
+    fn select_plugin_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bundle) = cx.global::<Plugins>().inventory.plugins.get(index).map(|entry| entry.bundle.clone()) else {
+            return;
+        };
+        self.selected_plugin = Some(bundle);
+        self.plugin_position = index;
+        let focus = self.handle(ControlId::Plugins);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
     fn selected_plugin_index(&self, plugins: &[PluginEntry]) -> Option<usize> {
         let selected = self.selected_plugin.as_ref()?;
         plugins.iter().position(|entry| &entry.bundle == selected)
@@ -1866,8 +1890,18 @@ impl SettingsWindow {
         let mut plugin_rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, entry) in inventory.plugins.iter().enumerate() {
             plugin_rows.push(
-                plugin_row(index, count, entry, Some(index) == selected, focused, grants_error, theme, handle.clone())
-                    .into_any_element(),
+                plugin_row(
+                    index,
+                    count,
+                    entry,
+                    Some(index) == selected,
+                    focused,
+                    grants_error,
+                    theme,
+                    handle.clone(),
+                    cx.listener(move |this, _, window, cx| this.select_plugin_at(index, window, cx)),
+                )
+                .into_any_element(),
             );
         }
         let mut list = div()
@@ -2135,7 +2169,7 @@ impl SettingsWindow {
                 return;
             }
             Some(ControlId::DefaultSort) => self.commit_sort(cx),
-            Some(ControlId::PreviewRuleSelect) | Some(ControlId::PreviewAdd) => self.keep_preview_menu(cx),
+            Some(ControlId::PreviewRuleSelect) | Some(ControlId::PreviewAdd) => self.keep_preview_menu(window, cx),
             _ => {}
         }
         self.menu = None;
@@ -2302,8 +2336,8 @@ impl SettingsWindow {
                 type_ahead(&mut self.theme_type_ahead, &event.keystroke, &labels)
             }
             ControlId::FontFamily => type_ahead(&mut self.font_type_ahead, &event.keystroke, &self.fonts),
-            ControlId::IconPack => type_ahead(&mut self.font_type_ahead, &event.keystroke, &self.icon_pack_labels),
-            ControlId::DefaultSort => type_ahead(&mut self.font_type_ahead, &event.keystroke, &sort_labels()),
+            ControlId::IconPack => type_ahead(&mut self.icon_type_ahead, &event.keystroke, &self.icon_pack_labels),
+            ControlId::DefaultSort => type_ahead(&mut self.sort_type_ahead, &event.keystroke, &sort_labels()),
             _ => None,
         };
         let Some(index) = found else { return };
@@ -2340,6 +2374,7 @@ impl SettingsWindow {
     /// listeners cover a click elsewhere.
     fn commit_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
+        self.cancel_capture(cx);
         match self.focused_control(window) {
             Some(ControlId::FontSize) => self.commit_stepper(ControlId::FontSize, window, cx),
             Some(ControlId::Terminal) => self.commit_terminal(window, cx),
@@ -2999,8 +3034,9 @@ impl Render for SettingsWindow {
             .child(glyph(Glyph::Search, 13., "fg-muted", &theme))
             .child(div().flex_1().min_w_0().child(self.search.clone()));
 
-        let content_progress =
-            self.content_motion.and_then(|motion| motion.progress(cx.global::<Ui>().feedback.mode, Instant::now()));
+        let content_progress = self
+            .content_motion
+            .and_then(|motion| motion.progress(cx.global::<Ui>().feedback.mode, crate::clock::now()));
         if content_progress.is_some() {
             window.request_animation_frame();
         }
@@ -3323,7 +3359,8 @@ fn type_ahead(state: &mut TypeAhead, keystroke: &gpui::Keystroke, labels: &[Stri
     state.buffer.push_str(text);
     state.at = Some(now);
     let needle = state.buffer.to_lowercase();
-    let found = labels.iter().position(|label| label.to_lowercase().starts_with(&needle));
+    // A ticked icon pack reads "✓ Name"; typing its name must still find it.
+    let found = labels.iter().position(|label| label.trim_start_matches("✓ ").to_lowercase().starts_with(&needle));
     if found.is_none() {
         state.buffer.clear();
     }
@@ -3478,6 +3515,7 @@ fn plugin_row(
     grants_error: bool,
     theme: &Theme,
     handle: Option<PluginHandle>,
+    select: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let muted = color(theme.role("fg-muted"));
     let error_color = color(theme.role("error"));
@@ -3533,6 +3571,7 @@ fn plugin_row(
     };
     div()
         .id(("plugin-row", index))
+        .debug_selector(move || format!("plugin-row-{index}"))
         .role(Role::ListBoxOption)
         .aria_label(format!("{}, {}", entry.title(), entry.state.label()))
         .aria_description(description)
@@ -3548,6 +3587,8 @@ fn plugin_row(
         .rounded(px(6.))
         .overflow_hidden()
         .when(selected, |row| row.bg(if focused { active_selection(theme) } else { inactive_selection(theme) }))
+        .cursor_pointer()
+        .on_click(select)
         .child(details)
         .child(action_row)
 }
@@ -4376,13 +4417,13 @@ mod tests {
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Full), cx));
         // Asked at a moment before the change: a slow runner can spend longer than PANEL_TAB inside
         // `show_category`, and the check must not depend on that.
-        let before = Instant::now();
+        let before = crate::clock::now();
         show_category(&view, &mut vcx, Category::Behaviour);
         assert!(
             view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, before)).is_some(),
             "a category change starts a content transition"
         );
-        let later = Instant::now() + Duration::from_millis(300);
+        let later = crate::clock::now() + Duration::from_millis(300);
         assert!(
             view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, later)).is_none(),
             "the transition ends after PANEL_TAB"
@@ -4391,7 +4432,8 @@ mod tests {
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Off), cx));
         show_category(&view, &mut vcx, Category::Search);
         assert!(
-            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Off, Instant::now())).is_none(),
+            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Off, crate::clock::now()))
+                .is_none(),
             "motion off switches content in one frame"
         );
     }
@@ -4706,11 +4748,13 @@ preview_providers = ["example.two.preview", "example.three.preview"]
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).0), PreviewScope::Rule);
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).2), Some(0), "first rule");
 
-        // Select the second rule; its own ordered list is shown.
+        // Select the second rule with the mouse; its own ordered list is shown.
         focus_control(&view, &mut vcx, ControlId::PreviewRuleSelect);
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("down");
-        vcx.simulate_keystrokes("enter");
+        let option = vcx.debug_bounds("settings-preview-rule-option-1").unwrap().center();
+        vcx.simulate_click(option, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert!(view.read_with(&vcx, |view, _| view.menu.is_none()));
         assert_eq!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).2), Some(1));
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).4),
@@ -4787,11 +4831,44 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
-    fn preview_rule_adds_a_provider_from_the_plugin_catalog(cx: &mut TestAppContext) {
+    fn clicking_a_plugin_row_selects_it_and_focuses_the_list(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings_after(cx, |cx| {
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/p1b-fixture");
             copy_dir(&source, &config.join("plugins/p1b-fixture"));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
+        });
+        wait_plugin_state(&mut vcx, "example.p1b-fixture", PluginState::PendingApproval);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        view.update_in(&mut vcx, |view, window, cx| {
+            view.selected_plugin = None;
+            window.focus(&view.sidebar, cx);
+        });
+        draw(&mut vcx);
+        let row = vcx.debug_bounds("plugin-row-0").expect("the plugin row is drawn");
+        vcx.simulate_click(gpui::point(row.left() + px(40.), row.center().y), gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert!(view.read_with(&vcx, |view, _| view.selected_plugin.is_some()), "the row is selected");
+        let list = view.read_with(&vcx, |view, _| view.handle(ControlId::Plugins));
+        assert!(vcx.update(|window, _| list.is_focused(window)), "the plugin list has the keys");
+    }
+
+    #[gpui::test]
+    fn preview_rule_adds_a_provider_from_the_plugin_catalog(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/p1b-fixture");
+            let bundle = config.join("plugins/p1b-fixture");
+            copy_dir(&source, &bundle);
+            let script_path = bundle.join("main.rhai");
+            let script = std::fs::read_to_string(&script_path).unwrap();
+            let second = r#"#{ kind: "preview", id: "second-preview", title: "Second preview",
+                extensions: ["txt"], function: "sample_preview" },"#;
+            std::fs::write(
+                &script_path,
+                script.replacen("#{ kind: \"hook\"", &format!("{second}\n#{{ kind: \"hook\""), 1),
+            )
+            .unwrap();
             cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_state(&mut vcx, "example.p1b-fixture", PluginState::PendingApproval);
@@ -4806,12 +4883,15 @@ preview_providers = ["example.one.preview"]
         assert!(view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).3), "no rules: a new one");
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_available_for_tests(cx)),
-            ["example.p1b-fixture.sample-preview"]
+            ["example.p1b-fixture.sample-preview", "example.p1b-fixture.second-preview"]
         );
 
         focus_control(&view, &mut vcx, ControlId::PreviewAdd);
         vcx.simulate_keystrokes("space");
-        vcx.simulate_keystrokes("enter");
+        let option = vcx.debug_bounds("settings-preview-add-option-0").unwrap().center();
+        vcx.simulate_click(option, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert!(view.read_with(&vcx, |view, _| view.menu.is_none()));
         assert_eq!(
             view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).4),
             ["example.p1b-fixture.sample-preview"],
@@ -4956,6 +5036,44 @@ preview_providers = ["example.one.preview"]
         vcx.simulate_keystrokes("enter");
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.terminal.clone()), "iTerm");
         wait_for(&vcx, "terminal = \"iTerm\"");
+    }
+
+    #[gpui::test]
+    fn an_emptied_terminal_field_shows_the_default_it_wrote(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::Terminal);
+        vcx.simulate_keystrokes("cmd-a backspace");
+        vcx.simulate_keystrokes("enter");
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.terminal.clone()), "Terminal");
+        let shown = view.read_with(&vcx, |view, cx| view.terminal.read(cx).text().to_owned());
+        assert_eq!(shown, "Terminal", "the box agrees with the file while it keeps focus");
+    }
+
+    #[test]
+    fn type_ahead_finds_a_ticked_icon_pack_by_its_name() {
+        let labels = vec!["Native".to_owned(), "✓ Outline".to_owned()];
+        let key = |text: &str| gpui::Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: text.into(),
+            key_char: Some(text.into()),
+        };
+        let mut state = TypeAhead::default();
+        assert_eq!(type_ahead(&mut state, &key("o"), &labels), Some(1));
+        // Each menu keeps its own buffer.
+        let mut other = TypeAhead::default();
+        assert_eq!(type_ahead(&mut other, &key("n"), &labels), Some(0));
+    }
+
+    #[gpui::test]
+    fn the_inherited_list_button_is_absent_while_a_new_rule_is_drafted(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        view.update(&mut vcx, |view, cx| {
+            view.preview_scope = PreviewScope::Rule;
+            view.preview_rule_new = true;
+            assert!(!view.preview_control_visible(ControlId::PreviewClear, cx));
+            view.preview_rule_new = false;
+            assert!(view.preview_control_visible(ControlId::PreviewClear, cx));
+        });
     }
 
     fn set_two_themes(view: &Entity<SettingsWindow>, vcx: &mut VisualTestContext) {
@@ -5961,6 +6079,107 @@ permissions = { fs = "none" }
         vcx.simulate_keystrokes("left enter");
         settle_writes(&mut vcx);
         assert_eq!(keys_of(&vcx, "view-as-columns"), None, "Reset all clears the layer");
+    }
+
+    #[gpui::test]
+    fn clicking_shortcut_reset_does_not_start_capture(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let path = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+            std::fs::write(path, "[finder]\nview-as-columns = [\"cmd-shift-9\"]\n").unwrap();
+            cx.update(ui::reload_config);
+        });
+        show_category(&view, &mut vcx, Category::Keyboard);
+        view.update(&mut vcx, |view, cx| {
+            view.keyboard.query = "view as columns".into();
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let reset = vcx.debug_bounds("settings-keyboard-reset-view-as-columns").unwrap().center();
+        vcx.simulate_click(reset, gpui::Modifiers::default());
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None);
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+    }
+
+    #[gpui::test]
+    fn shortcut_reset_preserves_broken_key_files(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let path = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+            std::fs::write(path, "[finder]\nview-as-columns = [\"cmd-shift-9\"]\n").unwrap();
+            cx.update(ui::reload_config);
+        });
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        view.update(&mut vcx, |view, cx| {
+            view.keyboard.query = "view as columns".into();
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let path = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.join("keys.toml"));
+        for broken in [
+            "[finder\nview-as-columns = [\"cmd-shift-9\"]\n",
+            "[finder]\nview-as-columns = [\"cmd-shift-9\"]\nview-as-list = 42\n",
+        ] {
+            std::fs::write(&path, broken).unwrap();
+            vcx.update(|_, cx| ui::reload_config(cx));
+            draw(&mut vcx);
+            assert!(vcx.read_global::<Ui, _>(|ui, _| ui.file_error("keys.toml").is_some()));
+            vcx.simulate_keystrokes("delete");
+            settle_writes(&mut vcx);
+            let reset = vcx.debug_bounds("settings-keyboard-reset-view-as-columns").unwrap().center();
+            vcx.simulate_click(reset, gpui::Modifiers::default());
+            settle_writes(&mut vcx);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+            assert!(vcx.read_global::<Ui, _>(|ui, _| ui.file_error("keys.toml").is_some()));
+        }
+    }
+
+    #[gpui::test]
+    fn leaving_the_keyboard_list_releases_shortcut_capture(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_some()));
+        let previews = vcx.debug_bounds("settings-category-views-preview").unwrap().center();
+        vcx.simulate_click(previews, gpui::Modifiers::default());
+        draw(&mut vcx);
+        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::ViewsPreview);
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        let search = vcx.debug_bounds("settings-search-row").unwrap().center();
+        vcx.simulate_click(search, gpui::Modifiers::default());
+        vcx.simulate_input("motion");
+        assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
+        assert_eq!(view.read_with(&vcx, |view, _| view.query.clone()), "motion");
+        vcx.simulate_keystrokes("cmd-w");
+        assert!(!vcx.cx.read(|cx| cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some())));
+    }
+
+    #[gpui::test]
+    fn keyboard_scrolling_accounts_for_group_headings(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        for query in ["", "c"] {
+            view.update(&mut vcx, |view, cx| {
+                view.keyboard.cursor = 0;
+                view.keyboard.query = query.into();
+                view.keyboard.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                cx.notify();
+            });
+            draw(&mut vcx);
+            let rows = view.read_with(&vcx, |view, cx| view.keyboard_rows(cx));
+            let steps = vec!["down"; rows.len() - 1].join(" ");
+            vcx.simulate_keystrokes(&steps);
+            draw(&mut vcx);
+            let selector = format!("settings-keyboard-row-{}", rows.last().unwrap().id.key());
+            let row = vcx.debug_bounds(selector.leak()).expect("last shortcut row");
+            let viewport = vcx.debug_bounds("settings-keyboard-list").expect("shortcut list");
+            assert!(
+                row.top() >= viewport.top() && row.bottom() <= viewport.bottom(),
+                "query {query:?}, row {row:?}, viewport {viewport:?}"
+            );
+        }
     }
 
     #[gpui::test]

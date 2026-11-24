@@ -317,7 +317,7 @@ pub struct Clipboard {
 impl Clipboard {
     pub fn new(paths: Arc<[PathBuf]>, cut: bool, change_count: Option<isize>) -> Self {
         let set = paths.iter().cloned().collect();
-        Self { paths, cut, change_count, flash: (!cut).then(Instant::now), marked: cut, set }
+        Self { paths, cut, change_count, flash: (!cut).then(crate::clock::now), marked: cut, set }
     }
 
     /// Whether `path` is on the clipboard.

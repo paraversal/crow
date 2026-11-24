@@ -49,12 +49,37 @@ fn main_thread() -> Option<MainThreadMarker> {
     marker
 }
 
+/// The path as an `NSString`. Foundation cannot hold bytes that are not UTF-8 in a
+/// string, so those become U+FFFD; use `ns_url` where the item itself is addressed.
 fn ns_string(path: &Path) -> Retained<NSString> {
     NSString::from_str(&path.to_string_lossy())
 }
 
+/// A file URL built from the file system representation, so a name that is not
+/// UTF-8 keeps its bytes (percent-encoded).
 fn ns_url(path: &Path) -> Retained<NSURL> {
-    NSURL::fileURLWithPath(&ns_string(path))
+    use std::os::unix::ffi::OsStrExt;
+    match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(bytes) if !bytes.as_bytes().is_empty() => {
+            // SAFETY: a valid NUL-terminated buffer; AppKit copies it.
+            unsafe {
+                NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+                    std::ptr::NonNull::new_unchecked(bytes.as_ptr().cast_mut()),
+                    path.is_dir(),
+                    None,
+                )
+            }
+        }
+        // An empty path would mean the working directory, an interior NUL a shorter
+        // path. Callers that act on the file check `valid_path` first.
+        _ => NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy())),
+    }
+}
+
+/// Whether `path` can be handed to AppKit as it is: not empty, no NUL byte.
+pub(crate) fn valid_path(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    !path.as_os_str().is_empty() && !path.as_os_str().as_bytes().contains(&0)
 }
 
 /// The Dock draws every icon inside a template: artwork about 80% of the canvas, centered,
@@ -169,5 +194,37 @@ mod icon_margin_tests {
         assert!(icon_needs_margin([0., 0., 0., 1.]), "one edge touched");
         assert!(!icon_needs_margin([0., 0., 0., 0.]), "a transparent border is already there");
         assert!(!icon_needs_margin([0.05, 0., 0.08, 0.]), "antialiasing at the border is not art");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{ns_url, valid_path};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    #[test]
+    fn non_utf8_names_keep_their_bytes_in_file_urls() {
+        let a = ns_url(Path::new(OsStr::from_bytes(b"/tmp/a\xfe")));
+        let b = ns_url(Path::new(OsStr::from_bytes(b"/tmp/a\xff")));
+        let (a, b) = (a.absoluteString().unwrap().to_string(), b.absoluteString().unwrap().to_string());
+        assert_ne!(a, b, "lossy conversion would make both U+FFFD");
+        assert_eq!(ns_url(Path::new("/tmp/plain")).path().unwrap().to_string(), "/tmp/plain");
+    }
+
+    #[test]
+    fn empty_and_nul_paths_are_not_usable() {
+        assert!(!valid_path(Path::new("")));
+        assert!(!valid_path(Path::new(OsStr::from_bytes(b"/tmp/a\0b"))));
+        assert!(valid_path(Path::new("/tmp/a")));
+        let refused = crow_fs::ops::Trash::trash(&crate::files::SystemTrash, Path::new("")).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn main_thread_only_calls_degrade_off_the_main_thread() {
+        // Tests never run on the main thread.
+        assert!(!crate::drag::drop_is_premature());
     }
 }

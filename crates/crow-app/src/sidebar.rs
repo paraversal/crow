@@ -967,7 +967,7 @@ impl Sidebar {
         if total.is_zero() {
             return;
         }
-        self.receive = Some((path, Instant::now()));
+        self.receive = Some((path, crate::clock::now()));
         self.receive_generation += 1;
         let generation = self.receive_generation;
         cx.notify();
@@ -1659,21 +1659,34 @@ impl Sidebar {
             Row::PluginItem { section, .. } => section.clone(),
             _ => return,
         };
-        let scope = if self.plugin_dirs_dir.as_os_str().is_empty() {
-            self.current.as_folder().map(Path::to_path_buf).unwrap_or_default()
+        let is_project = section == crate::git::PROJECTS_SECTION;
+        let scope = if is_project {
+            let ui = cx.global::<Ui>();
+            ui.sidebar.project_root(&ui.home)
+        } else if self.plugin_dirs_dir.as_os_str().is_empty() {
+            self.current.as_folder().map(Path::to_path_buf)
         } else {
-            self.plugin_dirs_dir.clone()
+            Some(self.plugin_dirs_dir.clone())
         };
         let revision = self.section_revision();
         let expected_path = path.clone();
         let task = cx.background_spawn(async move {
+            let in_scope = scope.is_some_and(|scope| {
+                if is_project {
+                    // Discovery publishes canonical worktrees at the root or one level below it.
+                    // io-ok: inside background_spawn
+                    scope.canonicalize().is_ok_and(|root| path == root || path.parent() == Some(root.as_path()))
+                } else {
+                    path.parent() == Some(scope.as_path())
+                }
+            });
+            if !in_scope {
+                return false;
+            }
             // io-ok: inside background_spawn
             std::fs::symlink_metadata(&path).ok().is_some_and(|meta| {
                 // io-ok: inside background_spawn
-                meta.file_type().is_dir()
-                    && !meta.file_type().is_symlink()
-                    && (meta.dev(), meta.ino()) == identity
-                    && path.parent() == Some(scope.as_path())
+                meta.file_type().is_dir() && !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == identity
             })
         });
         cx.spawn(async move |this, cx| {
@@ -1985,7 +1998,7 @@ impl Sidebar {
 
     fn set_header_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<Self>) {
         let mode = cx.global::<Ui>().feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let target = f32::from(hovered);
         let from = self.header_amount(id, mode, now);
         self.header_hover.retain(|h| h.id != id);
@@ -2004,7 +2017,7 @@ impl Render for Sidebar {
         self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
         self.refresh_names(&rows, cx);
-        let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
+        let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, crate::clock::now());
         self.track_sections(&rows, motion_mode, motion_now);
         self.header_hover.retain(|h| h.amount(motion_mode, motion_now).1 || h.target > 0.0);
         let hovering_moves = self.header_hover.iter().any(|h| h.amount(motion_mode, motion_now).1);
@@ -2028,7 +2041,7 @@ impl Render for Sidebar {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let mode = ui.feedback.mode;
-        let now = Instant::now();
+        let now = crate::clock::now();
         let icons = crate::icon_packs::Resolver::for_source(cx, &ui.settings.icon_pack);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);
@@ -2246,6 +2259,7 @@ impl Render for Sidebar {
                     .child(crate::pane::chevron_glyph(open, color(muted)));
                 let lead = div()
                     .flex()
+                    .min_w_0()
                     .items_center()
                     .gap_1()
                     .min_h(px(14.))
@@ -2269,7 +2283,7 @@ impl Render for Sidebar {
                                 .child(text),
                         )
                     })
-                    .child(title.clone());
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.clone()));
                 kinds.push((group.map(DropTarget::Group), None));
                 let i = index;
                 index += 1;
@@ -2348,6 +2362,7 @@ impl Render for Sidebar {
                             header.child(
                                 div()
                                     .ml_auto()
+                                    .flex_none()
                                     .font_weight(FontWeight::NORMAL)
                                     .text_color(color(muted))
                                     .child(section_count.to_string()),

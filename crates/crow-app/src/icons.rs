@@ -12,8 +12,6 @@ use gpui::{AssetSource, Result, Rgba, SharedString, Svg, prelude::*, px, svg};
 
 use crate::style::color;
 
-// U3–U7 draw the other glyphs; U1 uses Back, Forward, List and Columns.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Back,
@@ -27,7 +25,6 @@ pub enum Glyph {
     Gallery,
     Search,
     GoTo,
-    Close,
     ChevronDown,
     ChevronRight,
     AlertCircle,
@@ -57,7 +54,7 @@ pub enum Glyph {
 }
 
 impl Glyph {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const ALL: &'static [Glyph] = &[
         Glyph::Back,
         Glyph::Forward,
@@ -69,7 +66,6 @@ impl Glyph {
         Glyph::Gallery,
         Glyph::Search,
         Glyph::GoTo,
-        Glyph::Close,
         Glyph::ChevronDown,
         Glyph::ChevronRight,
         Glyph::AlertCircle,
@@ -108,7 +104,6 @@ impl Glyph {
             Glyph::Gallery => "icons/gallery-vertical.svg",
             Glyph::Search => "icons/search.svg",
             Glyph::GoTo => "icons/arrow-right-to-line.svg",
-            Glyph::Close => "icons/x.svg",
             Glyph::ChevronDown => "icons/chevron-down.svg",
             Glyph::ChevronRight => "icons/chevron-right.svg",
             Glyph::AlertCircle => "icons/alert-circle.svg",
@@ -229,7 +224,6 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/gallery-vertical.svg", include_bytes!("../assets/icons/gallery-vertical.svg")),
     ("icons/search.svg", include_bytes!("../assets/icons/search.svg")),
     ("icons/arrow-right-to-line.svg", include_bytes!("../assets/icons/arrow-right-to-line.svg")),
-    ("icons/x.svg", include_bytes!("../assets/icons/x.svg")),
     ("icons/chevron-down.svg", include_bytes!("../assets/icons/chevron-down.svg")),
     ("icons/alert-circle.svg", include_bytes!("../assets/icons/alert-circle.svg")),
     ("icons/trash-2.svg", include_bytes!("../assets/icons/trash-2.svg")),

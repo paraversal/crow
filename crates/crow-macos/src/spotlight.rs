@@ -4,6 +4,7 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,22 +55,6 @@ pub fn escape_literal(value: &str) -> String {
     out
 }
 
-/// Escape a `kMDItemFSName` pattern so the user's text is literal: `*` and `?`
-/// are wildcards, and a trailing backslash would escape the closing quote.
-fn escape_name_pattern(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '*' => out.push_str("\\*"),
-            '?' => out.push_str("\\?"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 impl SpotlightPredicate {
     /// The raw `mdfind` query, or `None` when nothing narrows the scan.
     pub fn expression(&self) -> Option<String> {
@@ -78,12 +63,12 @@ impl SpotlightPredicate {
             conditions.push(format!("kMDItemContentTypeTree == \"{}\"", escape_literal(content_type)));
         }
         if let Some(extension) = &self.extension {
-            conditions.push(format!("kMDItemFSName == \"*.{extension}\"cd"));
+            conditions.push(format!("kMDItemFSName == \"*.{}\"cd", escape_literal(extension)));
         }
         if let Some(name) = &self.name_contains
             && !name.is_empty()
         {
-            conditions.push(format!("kMDItemFSName == \"*{}*\"cd", escape_name_pattern(name)));
+            conditions.push(format!("kMDItemFSName == \"*{}*\"cd", escape_literal(name)));
         }
         for tag in &self.tags {
             conditions.push(format!("kMDItemUserTags == \"{}\"", escape_literal(tag)));
@@ -117,7 +102,7 @@ fn run_mdfind(args: Vec<OsString>, mut sink: impl FnMut(Vec<SpotlightHit>), canc
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let mut child = Command::new("mdfind")
+    let mut child = Command::new("/usr/bin/mdfind")
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -125,17 +110,27 @@ fn run_mdfind(args: Vec<OsString>, mut sink: impl FnMut(Vec<SpotlightHit>), canc
         .map_err(|e| format!("Spotlight search failed: {e}"))?;
     let stdout = child.stdout.take().ok_or_else(|| "Spotlight search failed: no output".to_owned())?;
     let mut batch = Vec::with_capacity(BATCH);
-    for line in BufReader::new(stdout).lines() {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return Ok(());
         }
-        let Ok(line) = line else { break };
+        // Raw bytes: one path that is not UTF-8 must not end the whole search.
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
         if line.is_empty() {
             continue;
         }
-        let path = PathBuf::from(line);
+        let path = PathBuf::from(OsString::from_vec(line.clone()));
         let metadata = std::fs::metadata(&path).ok();
         let is_dir = metadata.as_ref().is_some_and(|meta| meta.is_dir());
         let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
@@ -177,6 +172,12 @@ mod tests {
             )
         );
         assert_eq!(SpotlightPredicate::default().expression(), None);
+    }
+
+    #[test]
+    fn the_extension_is_an_escaped_literal() {
+        let predicate = SpotlightPredicate { extension: Some("t\"x*".into()), ..Default::default() };
+        assert_eq!(predicate.expression().as_deref(), Some(r#"kMDItemFSName == "*.t\"x\*"cd"#));
     }
 
     #[test]

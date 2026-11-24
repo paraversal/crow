@@ -32,6 +32,7 @@ pub(super) struct KeyboardState {
     pub layer: KeymapLayer,
     pub cursor: usize,
     pub scroll: ScrollHandle,
+    row_items: Vec<usize>,
     pub capture: Option<Capture>,
     pub prompt: Option<Prompt>,
     /// The last thing that went wrong or was refused, shown under its row.
@@ -53,6 +54,7 @@ impl KeyboardState {
             layer: cx.global::<Ui>().settings.keymap,
             cursor: 0,
             scroll: ScrollHandle::new(),
+            row_items: Vec::new(),
             capture: None,
             prompt: None,
             notice: None,
@@ -172,7 +174,9 @@ impl SettingsWindow {
         }
         let next = (self.keyboard.cursor as isize + delta).clamp(0, len as isize - 1) as usize;
         self.keyboard.cursor = next;
-        self.keyboard.scroll.scroll_to_item(next);
+        if let Some(&item) = self.keyboard.row_items.get(next) {
+            self.keyboard.scroll.scroll_to_item(item);
+        }
         cx.notify();
     }
 
@@ -201,7 +205,7 @@ impl SettingsWindow {
             self.keyboard.cursor = 0;
             self.keyboard.notice = None;
             self.keyboard.prompt = None;
-            self.end_capture(cx);
+            self.cancel_capture(cx);
             cx.notify();
         }
     }
@@ -217,9 +221,10 @@ impl SettingsWindow {
         busy
     }
 
-    fn end_capture(&mut self, cx: &mut Context<Self>) {
-        self.keyboard.capture = None;
-        cx.notify();
+    pub(super) fn cancel_capture(&mut self, cx: &mut Context<Self>) {
+        if self.keyboard.capture.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Return or a click on a row: listen for the new shortcut.
@@ -255,11 +260,11 @@ impl SettingsWindow {
         let bare = !m.control && !m.platform && !m.alt && !m.function && !m.shift;
         let command = capture.command;
         if bare && keystroke.key == "escape" {
-            self.end_capture(cx);
+            self.cancel_capture(cx);
             return;
         }
         if bare && matches!(keystroke.key.as_str(), "backspace" | "delete") && capture.steps.is_empty() {
-            self.end_capture(cx);
+            self.cancel_capture(cx);
             self.write_keys(command, Vec::new(), Vec::new(), cx);
             return;
         }
@@ -368,18 +373,17 @@ impl SettingsWindow {
         self.keyboard.notice = None;
         self.write_key_edits(
             command,
-            move |path| {
-                for (id, keys) in &writes {
-                    keymap_edit::set_keys(path, layer, id, keys)?;
-                }
-                Ok(())
-            },
+            // One file rewrite for the conflict removals and the new keys together.
+            move |path| keymap_edit::set_many(path, layer, &writes),
             path,
             cx,
         );
     }
 
     pub(super) fn reset_keyboard_row(&mut self, command: CommandId, cx: &mut Context<Self>) {
+        if cx.global::<Ui>().file_error("keys.toml").is_some() {
+            return;
+        }
         let layer = self.keyboard.layer;
         let path = cx.global::<Ui>().config_dir.join("keys.toml");
         self.write_key_edits(command, move |path| keymap_edit::reset_command(path, layer, command.key()), path, cx);
@@ -405,7 +409,9 @@ impl SettingsWindow {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let task = cx.background_spawn(async move { edit(&path) });
+        // Behind any earlier edit of keys.toml: rapid resets must not read the file
+        // while the previous one is still writing it.
+        let task = ui::queue_file_write("keys.toml", move || edit(&path), cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
@@ -447,7 +453,7 @@ impl SettingsWindow {
     /// `fill`: the Keyboard page itself, where the list takes the height left
     /// under the controls. In search results the page scrolls, so the list is capped.
     pub(super) fn render_keyboard(
-        &self,
+        &mut self,
         fill: bool,
         window: &Window,
         theme: &Theme,
@@ -554,6 +560,7 @@ impl SettingsWindow {
         };
 
         let mut items: Vec<gpui::AnyElement> = Vec::new();
+        let mut row_items = Vec::with_capacity(rows.len());
         let mut last_group = "";
         for (index, row) in rows.iter().enumerate() {
             if row.group != last_group {
@@ -571,6 +578,7 @@ impl SettingsWindow {
                         .into_any_element(),
                 );
             }
+            row_items.push(items.len());
             let current = index == cursor;
             let capturing = k.capture.as_ref().is_some_and(|c| c.command == row.id);
             let asking = matches!(&k.prompt, Some(Prompt::Conflict { command, .. }) if *command == row.id);
@@ -620,13 +628,19 @@ impl SettingsWindow {
                     .debug_selector(move || format!("settings-keyboard-reset-{}", id.key()))
                     .role(Role::Button)
                     .aria_label(format!("Reset {} to its default shortcut", row.label))
+                    .aria_disabled(broken)
                     .px_1()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .cursor_pointer()
-                    .hover(|b| b.text_color(color(theme.role("fg"))))
                     .child("Reset")
-                    .on_click(cx.listener(move |this, _, _, cx| this.reset_keyboard_row(id, cx)))
+                    .when(!broken, |button| {
+                        button.cursor_pointer().hover(|b| b.text_color(color(theme.role("fg")))).on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.reset_keyboard_row(id, cx);
+                            },
+                        ))
+                    })
                     .into_any_element()
             });
             let mut line = div()
@@ -700,7 +714,7 @@ impl SettingsWindow {
         }
         let empty = rows.is_empty();
 
-        div()
+        let keyboard = div()
             .when(fill, |d| d.size_full())
             .flex()
             .flex_col()
@@ -766,6 +780,8 @@ impl SettingsWindow {
                         .child("No shortcuts match."),
                 )
             })
-            .into_any_element()
+            .into_any_element();
+        self.keyboard.row_items = row_items;
+        keyboard
     }
 }

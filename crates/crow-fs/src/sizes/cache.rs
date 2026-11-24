@@ -106,7 +106,8 @@ impl Cache {
     pub fn validate_inodes(&mut self) {
         let mut replaced = Vec::new();
         for (path, entry) in &self.entries {
-            let inode = std::fs::metadata(path).ok().filter(|meta| meta.is_dir()).map_or(0, |meta| inode(&meta));
+            let inode =
+                std::fs::symlink_metadata(path).ok().filter(|meta| meta.is_dir()).map_or(0, |meta| inode(&meta));
             if inode != entry.inode {
                 replaced.push(path.clone());
             }
@@ -172,6 +173,14 @@ impl Cache {
 
     pub fn set_volume_uuid(&mut self, uuid: Option<String>) {
         self.volume_uuid = uuid;
+    }
+
+    /// Adopt the cache loaded from disk, keeping what this session measured while
+    /// it loaded: those entries are newer than the file's.
+    pub fn absorb_loaded(&mut self, loaded: Cache) {
+        let fresh = std::mem::take(&mut self.entries);
+        *self = loaded;
+        self.entries.extend(fresh);
     }
 
     /// The event store was replaced (a new volume UUID): the history is gone.
@@ -260,6 +269,20 @@ mod tests {
         missing.insert(&dir.join("gone"), 1, &measured(10, 1, 0), 0, 1);
         missing.validate_inodes();
         assert!(missing.get(&dir.join("gone")).unwrap().stale, "a missing folder");
+    }
+
+    #[test]
+    fn loading_keeps_measurements_made_while_the_file_was_read() {
+        let mut live = Cache::default();
+        live.insert(Path::new("/fresh"), 1, &measured(5, 1, 0), 0, 9);
+        let mut loaded = Cache::default();
+        loaded.insert(Path::new("/old"), 2, &measured(3, 1, 0), 40, 1);
+        loaded.insert(Path::new("/fresh"), 1, &measured(99, 1, 0), 40, 1);
+        loaded.set_last_event_id(40);
+        live.absorb_loaded(loaded);
+        assert_eq!(live.get(Path::new("/fresh")).unwrap().bytes, 5, "this session's size wins");
+        assert!(live.get(Path::new("/old")).is_some());
+        assert_eq!(live.last_event_id(), 40, "the stream resumes where the file left off");
     }
 
     #[test]

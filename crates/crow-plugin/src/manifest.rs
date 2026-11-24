@@ -136,6 +136,12 @@ pub fn parse_manifest(text: &str, limits: &Limits) -> Result<Manifest, PackageEr
         ));
     }
 
+    if raw.version.len() > limits.max_version_bytes {
+        return Err(PackageError::new(
+            PackageErrorKind::Manifest,
+            format!("plugin.toml version is longer than {} bytes", limits.max_version_bytes),
+        ));
+    }
     if !valid_version(&raw.version) {
         return Err(PackageError::new(
             PackageErrorKind::Manifest,
@@ -173,7 +179,14 @@ pub fn parse_manifest(text: &str, limits: &Limits) -> Result<Manifest, PackageEr
         provides.push(kind);
     }
 
+    if raw.assets.len() > limits.max_assets {
+        return Err(PackageError::new(
+            PackageErrorKind::Manifest,
+            format!("plugin.toml lists {} assets; at most {} are allowed", raw.assets.len(), limits.max_assets),
+        ));
+    }
     let mut assets = Vec::with_capacity(raw.assets.len());
+    let mut listed = std::collections::HashSet::with_capacity(raw.assets.len());
     for asset in &raw.assets {
         validate_relative(asset)
             .map_err(|error| PackageError::new(PackageErrorKind::Manifest, format!("plugin.toml asset: {error}")))?;
@@ -183,7 +196,7 @@ pub fn parse_manifest(text: &str, limits: &Limits) -> Result<Manifest, PackageEr
                 format!("plugin.toml asset \"{asset}\" duplicates the manifest or entry"),
             ));
         }
-        if assets.contains(asset) {
+        if !listed.insert(asset.as_str()) {
             return Err(PackageError::new(
                 PackageErrorKind::Manifest,
                 format!("plugin.toml asset \"{asset}\" is listed twice"),
@@ -304,6 +317,18 @@ permissions = { fs = "none", spawn = [], net = false }
 
     fn limits() -> Limits {
         Limits::default()
+    }
+
+    #[test]
+    fn asset_count_and_version_length_are_bounded() {
+        let many: Vec<String> = (0..=limits().max_assets).map(|n| format!("\"a{n}.txt\"")).collect();
+        let text = MINIMAL
+            .replace("provides = [\"command\"]", &format!("assets = [{}]\nprovides = [\"command\"]", many.join(", ")));
+        let error = parse_manifest(&text, &limits()).unwrap_err();
+        assert_eq!(error.kind, PackageErrorKind::Manifest);
+        assert!(error.message.contains("assets"), "{}", error.message);
+        let long = MINIMAL.replace("0.1.0", &format!("1.0.0+{}", "a".repeat(limits().max_version_bytes)));
+        assert_eq!(parse_manifest(&long, &limits()).unwrap_err().kind, PackageErrorKind::Manifest);
     }
 
     #[test]

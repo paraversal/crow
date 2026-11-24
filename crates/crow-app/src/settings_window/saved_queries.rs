@@ -15,7 +15,7 @@ impl SettingsWindow {
     pub(super) fn move_saved_query_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(selected) = self.selected_saved_query(cx) else { return };
         let queries = &cx.global::<Ui>().saved_queries.queries;
-        let current = queries.iter().position(|query| &query.id == selected).expect("selected query");
+        let Some(current) = queries.iter().position(|query| &query.id == selected) else { return };
         let next = current.saturating_add_signed(delta).min(queries.len() - 1);
         self.saved_query_selection = Some(queries[next].id.clone());
         self.saved_query_scroll.scroll_to_item(next);

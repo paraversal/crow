@@ -1,8 +1,7 @@
 //! Job execution for the file operation engine: stable job/item/attempt ids,
 //! ordered events, pause/cancel gates, staging, late conflicts and Replace.
 //!
-//! The compatibility [`execute`] entry point keeps the old synchronous shape for
-//! existing callers until P5B moves them to [`Job`].
+//! A synchronous `execute` entry point exists for the engine's own tests.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -87,7 +86,7 @@ pub struct JobOptions {
     pub resolutions: HashMap<PathBuf, Resolution>,
     /// Used when a plan-time conflict has no entry in `resolutions`.
     pub initial_default: Option<Resolution>,
-    /// Used for a conflict that appears after planning. P5B leaves this `None`
+    /// Used for a conflict that appears after planning. The app leaves this `None`
     /// so every late conflict waits for the current decision.
     pub late_default: Option<Resolution>,
     /// At most one progress event per interval. Zero emits every update.
@@ -520,6 +519,7 @@ impl<'a> Runner<'a> {
             let hooks = self.options.hooks.as_ref();
             BatchHooks {
                 before_stage: hooks.and_then(|h| h.before_batch_stage.clone()),
+                after_stage: None,
                 before_place: hooks.and_then(|h| h.before_batch_place.clone()),
                 before_restore: hooks.and_then(|h| h.before_batch_restore.clone()),
             }
@@ -801,17 +801,18 @@ impl<'a> Runner<'a> {
                 },
                 Decision::KeepBoth => {
                     let parent = target.parent().ok_or_else(|| Stop::Failed(OpError::NotFound(target.clone())))?;
-                    let name = file_name(&item.target)?;
-                    let is_dir = item.source.as_ref().is_some_and(|source| source.is_dir());
-                    let mut last = None;
-                    for candidate in keep_both_candidates(parent, &name, is_dir).take(MAX_COLLISION_RETRIES) {
+                    let name = file_name_os(&item.target)?;
+                    let is_dir = item.source_identity.as_ref().is_some_and(|source| source.kind == EntryKind::Dir);
+                    // Names already taken do not use up the retry budget; it is for
+                    // names that appear while the copy is being placed.
+                    let free = keep_both_candidates(parent, name, is_dir).filter(|candidate| !exists(candidate));
+                    for candidate in free.take(MAX_COLLISION_RETRIES) {
                         match rename_no_clobber(place_from, &candidate) {
                             Ok(()) => return Ok(self.placed(&candidate, move_source)),
-                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
+                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                             Err(e) => return failed(op_io(&candidate, e)),
                         }
                     }
-                    let _ = last;
                     return failed(OpError::NameTaken(item.target.clone()));
                 }
                 Decision::Replace(approved) => {
@@ -835,7 +836,6 @@ impl<'a> Runner<'a> {
                             // NSFileManager's Trash has no expected-identity argument.
                             // Verify immediately before and after; a swap in this
                             // window is detected below and restored no-clobber.
-                            // See P5A Q1 and the progress Decisions.
                             #[cfg(test)]
                             self.fire_hook(|h| h.before_replace_trash.clone());
                             let trashed = match self.trash.trash(&target) {
@@ -1043,11 +1043,6 @@ fn decision_from(choice: Resolution, approved: Option<FileIdentity>) -> Decision
 
 const MAX_COLLISION_RETRIES: usize = 64;
 
-fn keep_both_candidates(dir: &Path, name: &str, is_dir: bool) -> impl Iterator<Item = PathBuf> {
-    let (stem, ext) = split_name(name, is_dir);
-    (2..).map(move |n| dir.join(format!("{stem} {n}{ext}")))
-}
-
 fn same_volume(source: &Path, target: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let source_dev = source.symlink_metadata().map(|m| m.dev());
@@ -1099,10 +1094,30 @@ impl Drop for Stage {
         // Only the container this job created, and only when it is ours: create_dir
         // was exclusive, so a pre-existing path never reaches this.
         unregister_staging(&self.container);
-        if let Err(e) = remove_tree(&self.container) {
+        if let Err(e) = remove_tree(&self.container).or_else(|_| remove_unprotected(&self.container)) {
             warn(&format!("could not remove staging folder {}: {e}", self.container.display()));
         }
     }
+}
+
+/// Remove a tree that holds read-only folders (a copied `0555` directory): give the
+/// owner back write access on every real folder first, never following a symlink.
+fn remove_unprotected(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fn open_up(path: &Path) {
+        let Ok(meta) = path.symlink_metadata() else { return };
+        if !meta.is_dir() {
+            return;
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.filter_map(Result::ok) {
+                open_up(&entry.path());
+            }
+        }
+    }
+    open_up(path);
+    remove_tree(path)
 }
 
 fn run_job(
@@ -1130,8 +1145,9 @@ fn run_job(
     outcome
 }
 
-/// The compatibility entry point: synchronous, no pause, plan-time choices by
+/// A synchronous run for the engine's tests: no pause, plan-time choices by
 /// path and Keep Both for anything that appears later.
+#[cfg(test)]
 pub fn execute(
     plan: &Plan,
     resolutions: &HashMap<PathBuf, Resolution>,
@@ -1185,7 +1201,13 @@ pub(super) fn move_item(
                 Ok(())
             })?;
             rename_no_clobber(&stage.item, to).map_err(|e| op_io(to, e))?;
-            remove_tree(from).map_err(|e| op_io(from, e))
+            // The copy is in place; a source that cannot be removed is reported
+            // as kept, like a cross-volume move in a job.
+            remove_tree(from).map_err(|error| OpError::SourceKept {
+                source: from.to_path_buf(),
+                target: to.to_path_buf(),
+                error: Arc::new(error),
+            })
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(OpError::NameTaken(to.to_path_buf())),
         Err(e) => Err(op_io(from, e)),
@@ -1289,9 +1311,12 @@ fn copy_tree(
         libc::copyfile_state_set(state, libc::COPYFILE_STATE_STATUS_CB as u32, callback as *const c_void);
         libc::copyfile_state_set(state, libc::COPYFILE_STATE_STATUS_CTX as u32, (&raw mut *ctx).cast());
         let rc = libc::copyfile(src.as_ptr(), dst.as_ptr(), state, flags);
+        // errno is read before the state is freed: freeing may overwrite it.
+        let error = (rc != 0).then(io::Error::last_os_error);
         libc::copyfile_state_free(state);
-        rc
+        (rc, error)
     };
+    let (rc, os_error) = rc;
     if let Some(error) = ctx.stopped.take() {
         return Err(error);
     }
@@ -1300,7 +1325,7 @@ fn copy_tree(
     } else {
         // Name the child copyfile failed on, not the tree root.
         let path = ctx.failed_path.take().unwrap_or_else(|| source.to_path_buf());
-        Err(op_io(&path, io::Error::last_os_error()))
+        Err(op_io(&path, os_error.unwrap_or_else(io::Error::last_os_error)))
     }
 }
 
@@ -1362,4 +1387,23 @@ fn copy_tree(
 
     let mut copied = 0;
     copy_entry(source, dest, &mut copied, checkpoint)
+}
+
+#[cfg(test)]
+mod stage_cleanup_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_dropped_stage_removes_a_copied_read_only_folder() {
+        let parent = tempfile::tempdir().expect("temp dir");
+        let stage = Stage::create(&parent.path().join("target"), JobId(1), 0).expect("stage");
+        let locked = stage.item.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file.txt"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let container = stage.container.clone();
+        drop(stage);
+        assert!(!container.exists(), "the staging folder is gone, nothing is stranded");
+    }
 }

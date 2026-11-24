@@ -56,7 +56,7 @@ impl TableLayout {
         let mut widths: Vec<f32> = self.columns.iter().map(|c| c.width).collect();
         let Some(name) = self.columns.first() else { return widths };
         let metadata_minimum: f32 = self.columns[1..].iter().map(|c| c.min_width).sum();
-        let name_target = (available - metadata_minimum).clamp(name.min_width, name.width);
+        let name_target = (available - metadata_minimum).clamp(name.min_width, name.width.max(name.min_width));
         let mut deficit = name_target + widths[1..].iter().sum::<f32>() - available;
         for (width, column) in widths.iter_mut().zip(&self.columns).skip(1).rev() {
             if deficit <= 0.0 {
@@ -112,14 +112,16 @@ impl TableLayout {
         let Some(right) = self.columns.get(k + 1) else { return };
         let left = &self.columns[k];
         let delta =
-            (x - drag.start_x).max(left.min_width - drag.start_left).min(drag.start_right - right.min_width).round();
-        self.columns[k + 1].width = drag.start_right - delta;
-        self.columns[k].width = if k == 0 {
+            (x - drag.start_x).round().max(left.min_width - drag.start_left).min(drag.start_right - right.min_width);
+        let left_width = if k == 0 {
             // Name keeps its target unless the drag leaves it less room than that.
             drag.start_name.min(drag.start_left + delta)
         } else {
             drag.start_left + delta
         };
+        let left_width = left_width.max(left.min_width);
+        self.columns[k + 1].width = (drag.start_right - delta).max(right.min_width);
+        self.columns[k].width = left_width;
     }
 }
 
@@ -198,6 +200,30 @@ mod tests {
         assert_eq!(t.fitted(200.0), vec![150.0, 50.0, 0.0], "then whole columns hide from the right");
         assert_eq!(t.fitted(100.0), vec![100.0, 0.0, 0.0], "Name always shows, fitted to the pane");
         assert_eq!(t.total_width(), 430.0, "fitting never changes the stored widths");
+    }
+
+    #[test]
+    fn fractional_divider_drags_preserve_column_minima() {
+        for width in (0..20).map(|step| 230.6 + step as f32 * 0.17) {
+            for column in 0..2 {
+                let mut table = layout();
+                let drag = table.begin_resize(column, 0., width).unwrap();
+                for position in [-1000., -31.4, -0.61, 0., 0.63, 45.7, 1000.] {
+                    table.drag_to(&drag, position);
+                    for c in table.columns() {
+                        assert!(c.width >= c.min_width, "{c:?} at width {width}, divider {column}, x {position}");
+                    }
+                    table.fitted(width);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fitting_tolerates_a_saved_name_width_below_its_minimum() {
+        let mut table = layout();
+        table.columns[0].width = 119.4;
+        assert_eq!(table.fitted(230.), [120., 50., 60.]);
     }
 
     #[test]

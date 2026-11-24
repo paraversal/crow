@@ -5,9 +5,11 @@
 //! One rule runs at a time and applies to the original name, never to another
 //! row's result. Numbering follows display order with a fixed +1 step.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
 use crow_fs::ops::check_name;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Where add text goes around the stem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +68,9 @@ impl Default for RenameForm {
 }
 
 /// One preview row. `destination_name` is the proposed directory-entry name,
-/// even when the row is unchanged or invalid.
+/// even when the row is unchanged or invalid. `removed` and `inserted` are the
+/// byte ranges that differ in the original and the destination (see
+/// [`changed_spans`]); both are empty for an unchanged or invalid row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewRow {
     pub source: PathBuf,
@@ -74,6 +78,8 @@ pub struct PreviewRow {
     pub is_dir: bool,
     pub destination_name: String,
     pub state: RowState,
+    pub removed: Range<usize>,
+    pub inserted: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +95,18 @@ pub enum RowState {
 pub struct Preview {
     pub rows: Vec<PreviewRow>,
     pub error: Option<String>,
+    /// The field `error` is about, so the sheet can mark it.
+    pub error_field: Option<FormField>,
+}
+
+/// A form field a form-wide error can point at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormField {
+    Find,
+    Add,
+    Base,
+    Start,
+    Padding,
 }
 
 impl Preview {
@@ -108,7 +126,10 @@ impl Preview {
 /// Apply `form` to `inputs` in display order. Pure; the caller runs filesystem
 /// validation separately.
 pub fn preview(inputs: &[RenameInput], form: &RenameForm) -> Preview {
-    let error = form_error(form);
+    let (error_field, error) = match form_error(form) {
+        Some((field, message)) => (Some(field), Some(message)),
+        None => (None, None),
+    };
     let numbers = if form.kind == RenameKind::Number { parse_numbers(form).ok() } else { Some((0, 0)) };
     let mut rows = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
@@ -118,6 +139,8 @@ pub fn preview(inputs: &[RenameInput], form: &RenameForm) -> Preview {
             is_dir: input.is_dir,
             destination_name: input.name.clone(),
             state: RowState::Invalid(reason),
+            removed: 0..0,
+            inserted: 0..0,
         };
         if let Some(error) = &error {
             rows.push(invalid(error.clone()));
@@ -144,32 +167,60 @@ pub fn preview(inputs: &[RenameInput], form: &RenameForm) -> Preview {
                 Err(other) => RowState::Invalid(other.to_string()),
             }
         };
+        let (removed, inserted) =
+            if state == RowState::Ready { changed_spans(&input.name, &destination) } else { (0..0, 0..0) };
         rows.push(PreviewRow {
             source: input.source.clone(),
             original_name: input.name.clone(),
             is_dir: input.is_dir,
             destination_name: destination,
             state,
+            removed,
+            inserted,
         });
     }
-    Preview { rows, error }
+    Preview { rows, error, error_field }
 }
 
-fn form_error(form: &RenameForm) -> Option<String> {
+/// The part of `old` that goes away and the part of `new` that replaces it:
+/// what is left after trimming the longest common prefix and suffix, counted in
+/// grapheme clusters so a combining mark is never split from its base.
+pub fn changed_spans(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+    if old == new {
+        return (0..0, 0..0);
+    }
+    let old_clusters: Vec<(usize, &str)> = old.grapheme_indices(true).collect();
+    let new_clusters: Vec<(usize, &str)> = new.grapheme_indices(true).collect();
+    let prefix = old_clusters.iter().zip(&new_clusters).take_while(|(a, b)| a.1 == b.1).count();
+    let limit = old_clusters.len().min(new_clusters.len()) - prefix;
+    let suffix =
+        old_clusters.iter().rev().zip(new_clusters.iter().rev()).take(limit).take_while(|(a, b)| a.1 == b.1).count();
+    let span = |text: &str, clusters: &[(usize, &str)]| {
+        let start = clusters.get(prefix).map_or(text.len(), |cluster| cluster.0);
+        let end = clusters.get(clusters.len() - suffix).map_or(text.len(), |cluster| cluster.0);
+        start..end.max(start)
+    };
+    (span(old, &old_clusters), span(new, &new_clusters))
+}
+
+fn form_error(form: &RenameForm) -> Option<(FormField, String)> {
     match form.kind {
-        RenameKind::Replace if form.find.is_empty() => Some("Enter the text to find".to_owned()),
-        RenameKind::AddText if form.add.is_empty() => Some("Enter the text to add".to_owned()),
-        RenameKind::Number if form.base.trim().is_empty() => Some("Enter a base name".to_owned()),
+        RenameKind::Replace if form.find.is_empty() => Some((FormField::Find, "Enter the text to find".to_owned())),
+        RenameKind::AddText if form.add.is_empty() => Some((FormField::Add, "Enter the text to add".to_owned())),
+        RenameKind::Number if form.base.trim().is_empty() => Some((FormField::Base, "Enter a base name".to_owned())),
         RenameKind::Number => {
             let start = match form.start.trim() {
                 "" => Ok(1),
-                text => text.parse::<u64>().map_err(|_| "Start must be a whole number".to_owned()),
+                text => text.parse::<u64>().map_err(|_| (FormField::Start, "Start must be a whole number".to_owned())),
             };
             let padding = match form.padding.trim() {
                 "" | "0" => Ok(0),
-                text => text.parse::<u32>().map_err(|_| "Zero padding must be 0–32".to_owned()).and_then(|padding| {
-                    if padding <= 32 { Ok(padding as usize) } else { Err("Zero padding must be 0–32".to_owned()) }
-                }),
+                text => text
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|padding| *padding <= 32)
+                    .map(|padding| padding as usize)
+                    .ok_or((FormField::Padding, "Zero padding must be 0–32".to_owned())),
             };
             start.err().or_else(|| padding.err())
         }
@@ -313,6 +364,19 @@ mod tests {
     }
 
     #[test]
+    fn a_form_error_names_its_field() {
+        let field = |form: RenameForm| preview(&[input("a.txt", false)], &form).error_field;
+        assert_eq!(field(RenameForm::default()), Some(FormField::Find));
+        assert_eq!(field(RenameForm { kind: RenameKind::AddText, ..RenameForm::default() }), Some(FormField::Add));
+        let number = RenameForm { kind: RenameKind::Number, ..RenameForm::default() };
+        assert_eq!(field(number.clone()), Some(FormField::Base));
+        let base = RenameForm { base: "x".into(), ..number };
+        assert_eq!(field(RenameForm { start: "one".into(), ..base.clone() }), Some(FormField::Start));
+        assert_eq!(field(RenameForm { padding: "40".into(), ..base.clone() }), Some(FormField::Padding));
+        assert_eq!(field(base), None);
+    }
+
+    #[test]
     fn numeric_overflow_invalidates_only_the_overflowing_rows() {
         let form = RenameForm {
             kind: RenameKind::Number,
@@ -334,5 +398,41 @@ mod tests {
         let form = RenameForm { find: "a".into(), replace: "\0".into(), ..RenameForm::default() };
         let nul = preview(&[input("a.txt", false)], &form);
         assert!(matches!(nul.rows[0].state, RowState::Invalid(_)));
+    }
+
+    #[test]
+    fn spans_cover_what_differs_between_the_names() {
+        let spans = |old, new| {
+            let (removed, inserted) = changed_spans(old, new);
+            (&old[removed], &new[inserted])
+        };
+        assert_eq!(spans("IMG_0412.jpg", "Trip-0412.jpg"), ("IMG_", "Trip-"));
+        assert_eq!(spans("report.pdf", "report draft.pdf"), ("", " draft"));
+        assert_eq!(spans("draft report.pdf", "report.pdf"), ("draft ", ""));
+        assert_eq!(spans("a.txt", "Item 1"), ("a.txt", "Item 1"));
+        assert_eq!(spans("photo.jpg", "Photo.jpg"), ("p", "P"));
+        assert_eq!(spans("same.txt", "same.txt"), ("", ""));
+        assert_eq!(changed_spans("same.txt", "same.txt"), (0..0, 0..0));
+    }
+
+    #[test]
+    fn spans_never_split_a_combining_character() {
+        // "e" + combining acute vs a plain "e": the whole cluster differs.
+        let old = "cafe\u{301}.txt";
+        let new = "cafe.txt";
+        let (removed, inserted) = changed_spans(old, new);
+        assert_eq!(&old[removed], "e\u{301}");
+        assert_eq!(&new[inserted], "e");
+    }
+
+    #[test]
+    fn rows_carry_spans_only_when_ready() {
+        let form = RenameForm { find: "IMG_".into(), replace: "Trip-".into(), ..RenameForm::default() };
+        let preview = preview(&[input("IMG_1.jpg", false), input("notes.txt", false)], &form);
+        let ready = &preview.rows[0];
+        assert_eq!(&ready.original_name[ready.removed.clone()], "IMG_");
+        assert_eq!(&ready.destination_name[ready.inserted.clone()], "Trip-");
+        assert_eq!(preview.rows[1].state, RowState::Unchanged);
+        assert_eq!((preview.rows[1].removed.clone(), preview.rows[1].inserted.clone()), (0..0, 0..0));
     }
 }

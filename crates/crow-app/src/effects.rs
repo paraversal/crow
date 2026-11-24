@@ -336,6 +336,8 @@ struct Script {
     /// `None` leaves the menu unopened (tests drive `choose_*` themselves);
     /// `Some(choice)` answers at once, as the native menu would.
     context_menu_choice: Option<Option<usize>>,
+    /// The native menu cannot be shown (off the main thread, no window).
+    refuse_context_menu: bool,
     file_urls: Vec<PathBuf>,
     pasteboard_change_count: Option<isize>,
     write_change_count: Option<isize>,
@@ -406,6 +408,11 @@ impl RecordingEffects {
     /// Answer the next context menu with `choice` (`None` closes it without acting).
     pub fn set_context_menu_choice(&self, choice: Option<usize>) {
         self.script.lock().expect("the effect script is not poisoned").context_menu_choice = Some(choice);
+    }
+
+    /// Make context menus fail to open, as `crow_macos` does without a window.
+    pub fn refuse_context_menu(&self, refuse: bool) {
+        self.script.lock().expect("the effect script is not poisoned").refuse_context_menu = refuse;
     }
 
     /// Stop answering context menus; tests that drive `choose_*` need this.
@@ -585,14 +592,24 @@ impl Effects for RecordingEffects {
         done: Box<dyn FnOnce(Option<usize>)>,
     ) -> bool {
         self.record(Call::ContextMenu(entries));
-        let scripted = self.script.lock().expect("the effect script is not poisoned").context_menu_choice;
+        let (scripted, refuse) = {
+            let script = self.script.lock().expect("the effect script is not poisoned");
+            (script.context_menu_choice, script.refuse_context_menu)
+        };
+        if refuse {
+            return false;
+        }
         match scripted {
             Some(choice) => {
                 done(choice);
                 true
             }
-            // No script: nothing opens, so a test can call `choose_context_item` itself.
-            None => false,
+            // No script: the menu "stays open" (the callback is never answered), so a
+            // test can call `choose_context_item` itself.
+            None => {
+                std::mem::forget(done);
+                true
+            }
         }
     }
 

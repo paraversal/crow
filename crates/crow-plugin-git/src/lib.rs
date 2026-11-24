@@ -132,24 +132,39 @@ fn calculate_ahead_behind(
     let Some(upstream) = repo.branch_remote_tracking_ref_name(branch, gix::remote::Direction::Fetch) else {
         return Ok(None);
     };
-    let upstream = upstream?;
-    let Some(upstream_id) = repo.find_reference(&upstream).ok().map(|reference| reference.id().detach()) else {
+    // A broken tracking setup (malformed remote, shallow clone, a ref that is not a
+    // commit) means "no upstream", not a failed status for the whole repository.
+    let Ok(upstream) = upstream else { return Ok(None) };
+    let Some(upstream_id) = repo
+        .find_reference(&upstream)
+        .ok()
+        .and_then(|reference| reference.into_fully_peeled_id().ok())
+        .map(|id| id.detach())
+    else {
         return Ok(None);
     };
-    let Some(base) = repo.merge_base(head, upstream_id)?.map(|id| id.detach()) else { return Ok(None) };
-    let ahead = count_commits(repo, head, base)?;
-    let behind = count_commits(repo, upstream_id, base)?;
+    let Some(base) = repo.merge_base(head, upstream_id).ok().flatten().map(|id| id.detach()) else { return Ok(None) };
+    let (Some(ahead), Some(behind)) = (count_commits(repo, head, base), count_commits(repo, upstream_id, base)) else {
+        return Ok(None);
+    };
     Ok(Some(AheadBehind { ahead, behind }))
 }
 
-fn count_commits(repo: &gix::Repository, tip: gix::hash::ObjectId, base: gix::hash::ObjectId) -> gix::Result<u32> {
+/// A badge never needs more than this many commits: a branch that far from its
+/// upstream reads as "a lot", and the walk stays cheap on huge divergences.
+const MAX_COUNTED_COMMITS: u32 = 10_000;
+
+fn count_commits(repo: &gix::Repository, tip: gix::hash::ObjectId, base: gix::hash::ObjectId) -> Option<u32> {
     let mut count = 0u32;
-    for item in repo.rev_walk([tip]).with_hidden([base]).all()? {
+    for item in repo.rev_walk([tip]).with_hidden([base]).all().ok()? {
         if item.is_ok() {
-            count = count.saturating_add(1);
+            count += 1;
+            if count >= MAX_COUNTED_COMMITS {
+                break;
+            }
         }
     }
-    Ok(count)
+    Some(count)
 }
 
 /// Variants are ordered by display precedence, strongest first.
@@ -470,7 +485,9 @@ fn staged_status(
                 gix::diff::index::ChangeRef::Modification { location, previous_entry_mode, entry_mode, .. } => out
                     .push(StagedEntry {
                         path: path_from_bstr(location)?,
-                        kind: if previous_entry_mode == entry_mode {
+                        kind: if previous_entry_mode == entry_mode
+                            || blob_kind(*previous_entry_mode).is_some_and(|kind| blob_kind(*entry_mode) == Some(kind))
+                        {
                             StatusKind::Modified
                         } else {
                             StatusKind::TypeChange
@@ -676,20 +693,23 @@ struct DiffSide<'a> {
     path: &'a BStr,
 }
 
+fn blob_kind(mode: gix::index::entry::Mode) -> Option<gix::object::tree::EntryKind> {
+    match mode {
+        gix::index::entry::Mode::FILE | gix::index::entry::Mode::FILE_EXECUTABLE => {
+            Some(gix::object::tree::EntryKind::Blob)
+        }
+        gix::index::entry::Mode::SYMLINK => Some(gix::object::tree::EntryKind::Link),
+        _ => None,
+    }
+}
+
 fn prepare_sides(
     cache: &mut gix::diff::blob::Platform,
     old: DiffSide<'_>,
     new: DiffSide<'_>,
     repo: &gix::Repository,
 ) -> gix::Result<bool> {
-    let kind = |mode: gix::index::entry::Mode| match mode {
-        gix::index::entry::Mode::FILE | gix::index::entry::Mode::FILE_EXECUTABLE => {
-            Some(gix::object::tree::EntryKind::Blob)
-        }
-        gix::index::entry::Mode::SYMLINK => Some(gix::object::tree::EntryKind::Link),
-        _ => None,
-    };
-    let (Some(old_kind), Some(new_kind)) = (kind(old.mode), kind(new.mode)) else { return Ok(false) };
+    let (Some(old_kind), Some(new_kind)) = (blob_kind(old.mode), blob_kind(new.mode)) else { return Ok(false) };
     cache.clear_resource_cache_keep_allocation();
     cache.set_resource(
         old.id.unwrap_or_else(|| gix::hash::ObjectId::null(repo.object_hash())),

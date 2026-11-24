@@ -1142,7 +1142,9 @@ dependencies = [
  "crow-theme",
  "futures",
  "gpui",
+ "gpui_apple",
  "gpui_platform",
+ "image",
  "libc",
  "notify",
  "rand 0.9.5",
@@ -1170,6 +1172,7 @@ dependencies = [
  "toml_edit 0.25.19+spec-1.1.0",
  "tracing",
  "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -3116,6 +3119,7 @@ dependencies = [
  "gpui_linux",
  "gpui_macos",
  "gpui_web",
+ "gpui_wgpu",
  "gpui_windows",
 ]
 
@@ -3175,6 +3179,7 @@ dependencies = [
  "etagere",
  "gpui",
  "gpui_util",
+ "image",
  "itertools 0.14.0",
  "js-sys",
  "log",

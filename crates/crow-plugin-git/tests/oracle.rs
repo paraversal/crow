@@ -433,6 +433,55 @@ fn linked_worktrees_and_raw_paths_keep_their_identity() {
 }
 
 #[test]
+fn ahead_behind_peels_a_symbolic_upstream() {
+    let repo = Repo::new("symbolic-upstream");
+    repo.write("a.txt", b"base");
+    repo.commit("base");
+    repo.git(&["remote", "add", "origin", "."]);
+    repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
+    repo.git(&["symbolic-ref", "refs/remotes/origin/main", "refs/remotes/origin/other"]);
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    repo.write("a.txt", b"local");
+    repo.commit("local");
+    assert_eq!(head_info(&repo.open()).unwrap().upstream, Some(crow_plugin_git::AheadBehind { ahead: 1, behind: 0 }));
+}
+
+#[test]
+fn a_tracking_ref_that_is_not_a_commit_means_no_upstream() {
+    let repo = Repo::new("broken-upstream");
+    repo.write("a.txt", b"base");
+    repo.commit("base");
+    let blob = repo.git(&["hash-object", "-w", "a.txt"]);
+    repo.git(&["remote", "add", "origin", "."]);
+    std::fs::create_dir_all(repo.dir.join(".git/refs/remotes/origin")).unwrap();
+    std::fs::write(repo.dir.join(".git/refs/remotes/origin/main"), format!("{}\n", blob.trim())).unwrap();
+    repo.git(&["config", "branch.main.remote", "origin"]);
+    repo.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let head = head_info(&repo.open()).expect("a broken upstream must not fail the whole status");
+    assert_eq!(head.upstream, None);
+    assert_eq!(head.state, HeadState::Branch { name: "main".into() });
+}
+
+#[test]
+fn staging_an_executable_bit_change_is_a_modification() {
+    let repo = Repo::new("mode-change");
+    repo.write("script", b"echo test");
+    repo.write("target", b"target");
+    repo.write("link", b"regular file");
+    repo.commit("base");
+
+    repo.git(&["update-index", "--chmod=+x", "script"]);
+    std::fs::remove_file(repo.dir.join("link")).unwrap();
+    std::os::unix::fs::symlink("target", repo.dir.join("link")).unwrap();
+    repo.git(&["add", "link"]);
+
+    let snapshot = repo.snapshot();
+    assert_eq!(snapshot.entries[Path::new("script")].index, Some(StatusKind::Modified));
+    assert_eq!(snapshot.entries[Path::new("link")].index, Some(StatusKind::TypeChange));
+}
+
+#[test]
 fn heads_cover_detached_unborn_and_local_ahead_behind() {
     let detached = Repo::new("detached");
     detached.write("a.txt", b"a\n");

@@ -755,10 +755,16 @@ fn open_with_before(
 }
 
 /// Folders load on real threads; wait until every tab has finished.
-/// Let a motion that runs on the real clock (a sliding column, a fading sheet)
-/// run out, so geometry assertions see the end state.
+/// Let a motion (a sliding column, a fading sheet) run out, so geometry assertions see
+/// the end state. Steps the motion clock; nothing sleeps.
 fn finish_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
-    std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+    step_motion(view, cx, crow_core::motion::ms::PANE_SLIDE + 40);
+}
+
+/// Move the motion clock (`crate::clock`, the test executor's clock) forward `ms` and
+/// redraw, so a test samples an animation at an exact point instead of sleeping.
+fn step_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, ms: u64) {
+    cx.executor().advance_clock(std::time::Duration::from_millis(ms));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
 }
@@ -921,6 +927,23 @@ fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
     let stray = cx.update(|_, cx| cx.focus_handle());
     let found = cx.update(|window, cx| {
         window.focus(&stray, cx);
+        view.read(cx).check_invariants(window, cx, false, None)
+    });
+    assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
+}
+
+#[gpui::test]
+fn focus_left_in_a_hidden_sidebar_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-hidden-sidebar-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    let in_sidebar =
+        cx.update(|window, cx| view.read(cx).sidebar.read(cx).focus_handle(cx).contains_focused(window, cx));
+    assert!(in_sidebar, "Tab moved focus into the sidebar");
+    // Hide it without the focus move the toggle does, then let the slide end.
+    let found = cx.update(|window, cx| {
+        cx.global_mut::<Ui>().sidebar_hidden = true;
         view.read(cx).check_invariants(window, cx, false, None)
     });
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
@@ -1408,6 +1431,7 @@ fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
     let looks = row_looks(&view, &mut cx);
     let labels: Vec<&str> = looks.iter().map(|look| look.label.as_str()).collect();
     assert_eq!(labels, ["alpha", "beta"]);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| look.spoken == look.label), "no hint or mark yet: {looks:?}");
 }
 
@@ -1501,6 +1525,7 @@ fn sidebar_click_shows_fill_before_window_confirms_navigation(cx: &mut TestAppCo
     cx.run_until_parked();
     let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
     assert!(looks[2].current && !looks[1].current);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring));
 
     cx.simulate_keystrokes("up");
@@ -1527,6 +1552,7 @@ fn sidebar_failed_click_restores_fill_and_keeps_the_error(cx: &mut TestAppContex
     });
     let looks = row_looks(&view, &mut cx);
     assert!(looks[0].current && !looks[1].current);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring));
 }
 
@@ -1553,6 +1579,7 @@ fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestA
 
     cx.simulate_keystrokes("tab");
     let looks = row_looks(&view, &mut cx);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
     assert!(looks[1].current, "the current folder stays filled");
 }
@@ -1665,6 +1692,7 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
     );
     write_config(&view, &mut cx, "sidebar.toml", &toml);
     let looks = row_looks(&view, &mut cx);
+    assert!(!looks.is_empty(), "the sidebar draws rows");
     assert!(looks.iter().all(|look| look.right.is_none()), "the Finder layer shows no letters: {looks:?}");
 
     use_vim(&view, &mut cx);
@@ -2622,6 +2650,7 @@ fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestApp
     let (view, mut cx) = open_sized(cx, &root, 600., 500.);
     cx.simulate_keystrokes("cmd-1 cmd-shift-p");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let viewport = cx.debug_bounds("file-list").expect("icon viewport");
     cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
@@ -2687,7 +2716,7 @@ fn icon_presets_glide_tiles_in_full_motion_and_snap_otherwise(cx: &mut TestAppCo
         settle(&view, &mut cx);
         let pane = pane(&view, &cx);
         // Let the view-change glide finish so the capture is the settled grid.
-        std::thread::sleep(Duration::from_millis(300));
+        step_motion(&view, &mut cx, 300);
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let before = cx.debug_bounds("tile-f05.txt").expect("a visible tile");
@@ -2713,7 +2742,7 @@ fn a_resize_that_changes_the_column_count_glides_the_tiles(cx: &mut TestAppConte
     set_motion(&mut cx, "full");
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
-    std::thread::sleep(Duration::from_millis(300));
+    step_motion(&view, &mut cx, 300);
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     let pane = pane(&view, &cx);
@@ -3045,8 +3074,8 @@ fn the_chevrons_hide_the_left_and_right_sidebars(cx: &mut TestAppContext) {
     cx.simulate_click(show_right.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
     assert!(right_visible(&cx), "the toolbar button shows the right sidebar");
-    // The slides run on the wall clock: let both finish so the bounds are the resting ones.
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    // Let both slides finish so the bounds are the resting ones.
+    step_motion(&view, &mut cx, 600);
     cx.update(|window, _| window.refresh());
     settle(&view, &mut cx);
     let show_left = cx.debug_bounds("show-left-sidebar").expect("a button in the toolbar brings the left sidebar back");
@@ -3968,12 +3997,8 @@ fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     assert!(!cut && !marked, "a copy is not marked");
     assert!(cx.debug_bounds("flash-alpha").is_some(), "the copied row flashes");
     let first = flash.expect("flash");
-    // Age the flash past COPY_FADE (the clock is the real one, not the test clock).
-    cx.update(|_, cx| {
-        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
-            clipboard.flash = Some(Instant::now() - Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
-        }
-    });
+    // Step the motion clock past COPY_FADE.
+    cx.executor().advance_clock(Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
     pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
@@ -3986,7 +4011,7 @@ fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     assert!(flash.is_none() && cut && marked, "a cut is marked without a flash");
     assert!(cx.debug_bounds("cut-outline-alpha").is_some(), "the cut row is outlined");
     assert!(cx.debug_bounds("cut-outline-beta").is_none(), "an uncut row is not");
-    std::thread::sleep(Duration::from_millis(2));
+    cx.executor().advance_clock(Duration::from_millis(2));
     cx.simulate_keystrokes("cmd-c");
     let (flash, cut, marked) = cx.read(|cx| {
         let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
@@ -4849,6 +4874,8 @@ fn theme_index(cx: &mut VisualTestContext) -> TestRoot {
         ui.themes_state_dir = state;
         crate::ui::reload_theme(cx);
     });
+    // The reload reads the theme in the background.
+    cx.run_until_parked();
     root
 }
 
@@ -7200,6 +7227,8 @@ fn palette_twins_get_distinct_labels(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-k");
     cx.simulate_input("twin");
     settle(&view, &mut cx);
+    wait_for_palette_files(&view, &mut cx);
+    settle_palette(&view, &mut cx);
     let rows = view.read_with(&cx, |w, _| w.palette_rows());
     assert_eq!(rows.len(), 2, "two folders named twin: {rows:?}");
     assert!(rows[0].ends_with("/a/twin") && rows[1].ends_with("/b/twin"), "the paths tell them apart: {rows:?}");
@@ -7743,6 +7772,66 @@ fn picker_move_to(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, id: &st
     for _ in cursor..target {
         cx.simulate_keystrokes("down");
     }
+}
+
+#[gpui::test]
+fn two_quick_theme_previews_end_on_the_second(cx: &mut TestAppContext) {
+    let root = fixture("themes-quick");
+    let (_view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
+    // Both reloads start before either reply is applied: the first reply is stale.
+    cx.update(|_, cx| {
+        crate::theme_choice::preview("paper", cx);
+        crate::theme_choice::preview("firebox", cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), "FireBox", "the older reply is dropped");
+}
+
+#[gpui::test]
+fn a_second_config_edit_wins_and_the_reload_waits_for_the_background(cx: &mut TestAppContext) {
+    use crow_core::motion::MotionMode;
+    let root = fixture("config-two-edits");
+    let (_view, mut cx) = open(cx, &root);
+    let dir = cx.read(|cx| cx.global::<Ui>().config_dir.clone());
+    std::fs::write(dir.join("settings.toml"), "motion = \"low\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    assert_ne!(
+        cx.read(|cx| cx.global::<Ui>().settings.motion),
+        MotionMode::Low,
+        "nothing is read or applied before the background task finishes"
+    );
+    std::fs::write(dir.join("settings.toml"), "motion = \"full\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.motion), MotionMode::Full, "the second edit is the one applied");
+}
+
+#[gpui::test]
+fn a_theme_edited_in_settings_toml_applies_through_the_watcher_poll(cx: &mut TestAppContext) {
+    let root = fixture("config-theme-edit");
+    let (_view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
+    let dir = cx.read(|cx| cx.global::<Ui>().config_dir.clone());
+    std::fs::write(dir.join("settings.toml"), "theme = \"paper\"\n").unwrap();
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), "Paper", "the edited theme is applied");
+}
+
+#[gpui::test]
+fn a_reload_that_read_the_file_before_a_save_cannot_undo_the_save(cx: &mut TestAppContext) {
+    let root = fixture("config-save-race");
+    let (_view, mut cx) = open(cx, &root);
+    let before = cx.read(|cx| cx.global::<Ui>().settings.show_hidden_files);
+    cx.update(|_, cx| crate::ui::reload_config(cx));
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::ShowHiddenFiles(!before), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| cx.global::<Ui>().settings.show_hidden_files),
+        !before,
+        "the older reload's reply is dropped"
+    );
 }
 
 #[gpui::test]
@@ -8576,10 +8665,13 @@ fn tag_filter_requires_every_tag_and_reuses_metadata_for_name_changes(cx: &mut T
 /// Holds every tag read until the test opens the gate, so two scans overlap.
 struct HeldTags {
     open: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    /// How many reads are waiting at the gate.
+    entered: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl crow_search::TagReader for HeldTags {
     fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (lock, wake) = &*self.open;
         let mut open = lock.lock().expect("gate");
         while !*open {
@@ -8595,7 +8687,10 @@ fn a_stale_tag_scan_that_finishes_late_is_dropped(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
     let open_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    folder.update(&mut cx, |folder, _| folder.set_tag_reader_for_test(Arc::new(HeldTags { open: open_gate.clone() })));
+    let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    folder.update(&mut cx, |folder, _| {
+        folder.set_tag_reader_for_test(Arc::new(HeldTags { open: open_gate.clone(), entered: entered.clone() }))
+    });
 
     // Scan 1 (`Work`: alpha and beta) is held inside the reader when the
     // constraint changes to `review` (alpha only) and scan 2 starts. The gate
@@ -8603,7 +8698,12 @@ fn a_stale_tag_scan_that_finishes_late_is_dropped(cx: &mut TestAppContext) {
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["review".into()], cx));
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Open the gate once scan 1 is held inside the reader (scan 2 was started
+        // before this thread), so scan 1 really does finish after scan 2 began.
+        let limit = Instant::now() + std::time::Duration::from_secs(5);
+        while entered.load(std::sync::atomic::Ordering::SeqCst) < 1 && Instant::now() < limit {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let (lock, wake) = &*open_gate;
         *lock.lock().expect("gate") = true;
         wake.notify_all();
@@ -9094,7 +9194,7 @@ fn click_in_a_scrolled_filter_field_lands_on_the_visible_text(cx: &mut TestAppCo
     // Far wider than the column, so the field scrolls to keep the caret at the end.
     let long = "abcdefghij".repeat(12);
     cx.simulate_input(&long);
-    cx.run_until_parked();
+    finish_motion(&view, &mut cx);
     let field = cx.debug_bounds("filter-field").expect("field on screen");
     // Just right of the accent `/`: the start of the visible text, not of the query.
     cx.simulate_click(gpui::point(field.left() + px(30.), field.center().y), gpui::Modifiers::default());
@@ -9213,6 +9313,7 @@ fn filter_with_no_matches_offers_search(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("zzz");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     assert!(cx.debug_bounds("filter-no-matches").is_some(), "D replaces the list");
     assert!(cx.debug_bounds("filter-search-footer").is_none(), "there is no footer in D");
 
@@ -9364,6 +9465,7 @@ fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
     assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the theme picker is open");
     assert_ne!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "a theme is previewed");
     click_scrim(&mut cx);
+    cx.run_until_parked();
     assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
     assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "the preview is reverted");
     assert!(focused(&mut cx));
@@ -9540,6 +9642,114 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("alpha"));
     assert_eq!(path_edit_text(&view, &cx), None, "Return closes the field");
+}
+
+#[gpui::test]
+fn path_completion_draws_control_characters_without_panicking(cx: &mut TestAppContext) {
+    let root = fixture("control-in-suffix");
+    for (parent, name) in [("lf", "a\nb"), ("cr", "a\rb")] {
+        std::fs::create_dir_all(root.join(parent).join(name)).unwrap();
+    }
+    let (view, mut cx) = open(cx, &root);
+    for (parent, name) in [("lf", "a\nb"), ("cr", "a\rb")] {
+        let path = root.join(parent);
+        cx.simulate_keystrokes("cmd-l cmd-a");
+        cx.simulate_input(&format!("{}/a", path.display()));
+        settle(&view, &mut cx);
+        assert_eq!(path_edit_completion(&view, &cx), Some(format!("{}/", &name[1..])));
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        assert_eq!(path_edit_text(&view, &cx), Some(format!("{}/", path.join(name).display())));
+        cx.simulate_keystrokes("escape");
+    }
+}
+
+#[gpui::test]
+fn text_input_normalizes_inverted_utf16_queries(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler;
+
+    let root = fixture("utf16-ranges");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    let field = view.read_with(&cx, |w, _| w.path_edit.as_ref().unwrap().input.clone());
+    cx.update(|window, cx| {
+        field.update(cx, |input, cx| {
+            let inverted = std::ops::Range { start: 4, end: 1 };
+            input.set_text("Aé🙂z", window, cx);
+            let mut actual = None;
+            assert_eq!(input.text_for_range(inverted.clone(), &mut actual, window, cx).as_deref(), Some("é🙂"));
+            assert_eq!(actual, Some(1..4));
+            input.replace_text_in_range(Some(inverted.clone()), "x", window, cx);
+            assert_eq!(input.text(), "Axz");
+            input.set_text("Aé🙂z", window, cx);
+            let marked_selection = std::ops::Range { start: 8, end: 0 };
+            input.replace_and_mark_text_in_range(Some(inverted), "é", Some(marked_selection), window, cx);
+            assert_eq!(input.text(), "Aéz");
+            assert_eq!(input.selected_text_range(false, window, cx).unwrap().range, 1..2);
+        });
+    });
+}
+
+#[gpui::test]
+fn text_input_snaps_byte_selections_to_character_boundaries(cx: &mut TestAppContext) {
+    let root = fixture("utf8-boundary");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    let field = view.read_with(&cx, |w, _| w.path_edit.as_ref().unwrap().input.clone());
+    cx.update(|window, cx| {
+        field.update(cx, |input, cx| {
+            input.set_text("Aé🙂z", window, cx);
+            input.select_range(2..5, window, cx);
+        });
+    });
+    cx.simulate_keystrokes("cmd-c cmd-x alt-right");
+    assert_eq!(path_edit_text(&view, &cx).as_deref(), Some("A🙂z"));
+}
+
+#[gpui::test]
+fn palette_rejects_the_first_a_listing_after_a_b_a(cx: &mut TestAppContext) {
+    use crate::window::palette_view::PaletteDir;
+
+    let root = fixture("palette-generation");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let a = root.join("alpha");
+    let b = root.join("beta");
+    cx.update(|window, cx| {
+        view.update(cx, |w, cx| {
+            let input = w.palette.as_ref().unwrap().input.clone();
+            let query_a = format!("{}/", a.display());
+            let query_b = format!("{}/", b.display());
+            let mut generations = Vec::new();
+            for query in [&query_a, &query_b, &query_a] {
+                input.update(cx, |input, cx| input.set_text(query.to_owned(), window, cx));
+                w.refresh_palette(query, cx);
+                generations.push(w.palette.as_ref().unwrap().path_generation());
+            }
+            let listing = |name: &str| PaletteDir {
+                folders: vec![crate::palette::PathEntry::new(a.join(name), name.to_owned(), false)],
+                files: Vec::new(),
+                missing: false,
+            };
+            w.apply_path_listing(a.clone(), generations[2], listing("current"), cx);
+            w.apply_path_listing(a.clone(), generations[0], listing("stale"), cx);
+            assert!(w.palette.as_ref().unwrap().listing.items.iter().any(|item| {
+                matches!(item, crate::palette::Item::Folder { path, .. } if *path == a.join("current"))
+            }));
+        });
+    });
+}
+
+#[gpui::test]
+fn bottom_bar_measures_multiline_status_text(cx: &mut TestAppContext) {
+    let root = fixture("multiline-status");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        cx.global_mut::<Operations>().message = Some(("operation finished\nwith details".into(), false));
+        view.update(cx, |_, cx| cx.notify());
+    });
+    settle(&view, &mut cx);
+    assert!(matches!(bar_state(&view, &mut cx).primary, Primary::Message(_)));
 }
 
 #[gpui::test]
@@ -10251,6 +10461,49 @@ fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn new_folder_in_column_view_lands_in_the_focused_column_only(cx: &mut TestAppContext) {
+    let root = fixture("newfolder-columns");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    let focused = pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx));
+    assert_eq!(focused, root.join("alpha"), "right opened alpha as the focused column");
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let names = |dir: &Path| {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert!(
+        root.join("alpha/untitled folder").is_dir(),
+        "created in the focused column: {:?}",
+        names(&root.join("alpha"))
+    );
+    assert!(!root.join("untitled folder").exists(), "not in the root column: {:?}", names(&root));
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "its rename starts"
+    );
+    cx.simulate_input("Projects");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/Projects").is_dir(), "renamed in place: {:?}", names(&root.join("alpha")));
+    assert!(!root.join("alpha/untitled folder").exists());
+    assert!(!root.join("untitled folder").exists() && !root.join("Projects").exists());
+    let message = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+    assert!(!message.as_ref().is_some_and(|(_, error)| *error), "no error in the status line: {message:?}");
+}
+
+#[gpui::test]
 fn a_new_folder_clears_a_filter_that_hides_it(cx: &mut TestAppContext) {
     let root = fixture("newfolder-filter");
     let (view, mut cx) = open(cx, &root);
@@ -10456,6 +10709,73 @@ fn a_late_change_batch_does_not_bring_back_a_deleted_file(cx: &mut TestAppContex
     let names = folder.read_with(&cx, |folder, _| folder.names());
     assert!(!names.contains(&"notes.txt".to_owned()), "the deleted file stays gone: {names:?}");
     assert!(names.contains(&"later.txt".to_owned()), "the second batch still lands: {names:?}");
+}
+
+#[gpui::test]
+fn watcher_add_and_delete_are_retried_after_a_sort_change(cx: &mut TestAppContext) {
+    let root = fixture("sort-during-apply");
+    std::fs::write(root.join("a.txt"), b"keep").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |p, _| p.test_folder());
+    folder.update(&mut cx, |f, _| f.stop_watcher_for_test());
+    let added = root.join("z.txt");
+    let deleted = root.join("notes.txt");
+    std::fs::write(&added, b"new").unwrap();
+    std::fs::remove_file(&deleted).unwrap();
+    folder.update(&mut cx, |f, _| {
+        f.set_apply_delay(Duration::from_millis(300));
+        f.queue_changes(vec![added, deleted]);
+    });
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(folder.read_with(&cx, |f, _| f.apply_batches()), 1);
+    folder.update(&mut cx, |f, cx| {
+        f.set_sort(crow_fs::Sort { ascending: false, ..Default::default() }, cx);
+    });
+    let mut names = Vec::new();
+    for _ in 0..100 {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        names = folder.read_with(&cx, |f, _| f.names());
+        if names == ["beta", "alpha", "z.txt", "a.txt"] {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(names, ["beta", "alpha", "z.txt", "a.txt"]);
+}
+
+#[gpui::test]
+fn reconcile_after_a_sort_change_removes_a_deleted_addition(cx: &mut TestAppContext) {
+    let root = fixture("sort-during-reconcile");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |p, _| p.test_folder());
+    folder.update(&mut cx, |f, _| f.stop_watcher_for_test());
+    let transient = root.join("transient.txt");
+    std::fs::write(&transient, b"new").unwrap();
+    folder.update(&mut cx, |f, _| f.queue_changes(vec![transient.clone()]));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)));
+    std::fs::remove_file(&transient).unwrap();
+    folder.update(&mut cx, |f, cx| {
+        f.set_sort(crow_fs::Sort { ascending: false, ..Default::default() }, cx);
+    });
+    for _ in 0..100 {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        if !folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!folder.read_with(&cx, |f, _| f.entries().iter().any(|e| e.path == transient)));
 }
 
 #[gpui::test]
@@ -11169,6 +11489,8 @@ fn set_motion(cx: &mut VisualTestContext, mode: &str) {
         std::fs::write(dir.join("settings.toml"), format!("motion = \"{mode}\"\n")).expect("write settings");
         crate::ui::reload_config(cx);
     });
+    // The reload reads the file in the background.
+    cx.run_until_parked();
 }
 
 fn trash_in_mode(mode: &str, cx: &mut TestAppContext) {
@@ -11315,7 +11637,9 @@ fn a_huge_paste_into_the_palette_stays_quick(cx: &mut TestAppContext) {
     let started = Instant::now();
     cx.simulate_keystrokes("cmd-v");
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_millis(250), "a 10 MB paste took {elapsed:?}");
+    // A debug build on a shared runner: the bound only has to separate "truncated"
+    // from "reshaped 10 MB", which takes seconds.
+    assert!(elapsed < Duration::from_secs(2), "a 10 MB paste took {elapsed:?}");
 }
 
 /// H4 #25: a huge path query must not shape a multi-MB missing-path label.
@@ -11332,7 +11656,7 @@ fn a_huge_path_query_stays_quick(cx: &mut TestAppContext) {
         window.draw(cx).clear(cx);
     });
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_millis(500), "a 10 MB path query took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "a 10 MB path query took {elapsed:?}");
 }
 
 #[gpui::test]
@@ -11647,6 +11971,39 @@ fn a_paused_head_keeps_the_queue_and_activity_actions_follow_it(cx: &mut TestApp
         2,
         "the queued and active cancellations are both logged"
     );
+}
+
+#[gpui::test]
+fn activity_resume_and_cancel_respond_to_keyboard_presses(cx: &mut TestAppContext) {
+    use crate::operations::JobPhase;
+
+    let root = fixture("activity-keyboard");
+    let (view, mut cx) = open(cx, &root);
+    let (id, _) = cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            JobPhase::Paused,
+            crow_fs::ops::Progress::default(),
+        )
+    });
+    let press = |key: &str, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes(key);
+        let keystroke = cx.read(|cx| gpui::Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    };
+    cx.simulate_keystrokes("cmd-alt-l tab");
+    let resume = view.read_with(&cx, |w, _| w.activity_controls[&("activity-pause-resume", id.0)].clone());
+    assert!(cx.update(|window, _| resume.is_focused(window)));
+    press("space", &mut cx);
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|job| job.phase)), Some(JobPhase::Running));
+
+    cx.simulate_keystrokes("tab");
+    let cancel = view.read_with(&cx, |w, _| w.activity_controls[&("activity-cancel", id.0)].clone());
+    assert!(cx.update(|window, _| cancel.is_focused(window)));
+    press("enter", &mut cx);
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
 }
 
 #[gpui::test]
@@ -14473,13 +14830,12 @@ fn fuzz_confine(tree: &Path, cx: &mut VisualTestContext) {
     });
 }
 
-fn replay_script(
-    script: &[crate::fuzz::Step],
+fn fuzz_setup(
     tree: &Path,
     seed: u64,
     options: &FuzzOptions,
     cx: &mut TestAppContext,
-) -> Result<(), crate::fuzz::Violation> {
+) -> (Entity<CrowWindow>, VisualTestContext) {
     close_all_windows(cx);
     reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
@@ -14487,6 +14843,29 @@ fn replay_script(
     fuzz_seed_m9(&view, tree, &mut cx);
     fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
+    // Both runs and replays start with the icon pack loaded, even when the
+    // pack scan finishes after the saved-query reload.
+    for _ in 0..100 {
+        cx.run_until_parked();
+        let ready = cx.read(|cx| {
+            cx.global::<crate::icon_packs::IconPacks>().snapshot().choices().iter().any(|choice| choice.id == "fuzz")
+        });
+        if ready {
+            return (view, cx);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the seeded icon pack never loaded");
+}
+
+fn replay_script(
+    script: &[crate::fuzz::Step],
+    tree: &Path,
+    seed: u64,
+    options: &FuzzOptions,
+    cx: &mut TestAppContext,
+) -> Result<(), crate::fuzz::Violation> {
+    let (view, mut cx) = fuzz_setup(tree, seed, options, cx);
     let churn_handle = options.churn.then(|| Churn::start(tree, seed));
     for step in script {
         apply_and_check(&view, step, tree, churn_handle.as_ref(), &mut cx)?;
@@ -14506,14 +14885,9 @@ fn fuzz_run(
     tree: &Path,
     options: &FuzzOptions,
     cx: &mut TestAppContext,
-) -> Result<(), Box<crate::fuzz::Failure>> {
+) -> Result<crate::fuzz::Script, Box<crate::fuzz::Failure>> {
     use crate::fuzz::{Failure, Script, StepGen, state};
-    close_all_windows(cx);
-    reset_tree(tree, options.files, &options.edge, seed);
-    let (view, mut cx) = open(cx, tree);
-    write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
-    fuzz_confine(tree, &mut cx);
-    crate::fuzz::logs::install();
+    let (view, mut cx) = fuzz_setup(tree, seed, options, cx);
     let mut churn_handle = options.churn.then(|| Churn::start(tree, seed));
     let mut generator = StepGen::new(seed);
     let mut script = Vec::new();
@@ -14573,7 +14947,7 @@ fn fuzz_run(
             reproduces_without_churn: reproduces,
         }));
     }
-    Ok(())
+    Ok(Script(script))
 }
 
 fn settings_handle(cx: &mut TestAppContext) -> Option<WindowHandle<crate::settings_window::SettingsWindow>> {
@@ -15200,6 +15574,99 @@ fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn fuzz_run_and_replay_start_from_the_same_seeded_surfaces(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-setup-parity", 10);
+    let options = FuzzOptions::new(10, EdgeTree::default(), false);
+    let seed = 1;
+    let script = fuzz_run(seed, 1, &tree, &options, cx).unwrap_or_else(|failure| panic!("{}", failure.print()));
+    let assert_seeded = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let ui = cx.global::<Ui>();
+            assert_eq!(ui.settings.icon_pack, "fuzz");
+            assert_eq!(ui.settings.path_bar, crow_core::PathBarMode::Explorer);
+            assert!(ui.saved_queries.queries.iter().any(|query| query.id.as_str() == "fuzz-notes"));
+            let choices = cx.global::<crate::icon_packs::IconPacks>().snapshot().choices();
+            assert!(choices.iter().any(|choice| choice.id == "fuzz"));
+        });
+    };
+    let state = |cx: &mut TestAppContext| {
+        let window = cx.read(|cx| cx.windows().iter().find_map(|w| w.downcast::<CrowWindow>())).unwrap();
+        window.update(cx, |w, window, cx| crate::fuzz::state_for(w, window, cx)).expect("read fuzz window")
+    };
+    assert_seeded(cx);
+    let run = state(cx);
+    replay_script(&script.0, &tree, seed, &options, cx).expect("replay recorded first step");
+    assert_seeded(cx);
+    let replay = state(cx);
+    assert_eq!(run.selectors, replay.selectors);
+    assert_eq!(run.active_keys, replay.active_keys);
+    assert_eq!((run.tabs, run.windows, run.text_focused), (replay.tabs, replay.windows, replay.text_focused));
+}
+
+/// A run that drives every open browser window, not only the first. Opens a second
+/// window with the first step, then each step goes to a window picked from the
+/// seed; the invariants already cover every window. TST-6: the second window used
+/// to be passive.
+fn fuzz_run_two_windows(
+    seed: u64,
+    steps: usize,
+    tree: &Path,
+    options: &FuzzOptions,
+    cx: &mut TestAppContext,
+) -> Result<(), Box<crate::fuzz::Violation>> {
+    use crate::fuzz::{Step, StepGen, state};
+    let (first, mut first_cx) = fuzz_setup(tree, seed, options, cx);
+    apply_and_check(&first, &Step::Keys("cmd-n".into()), tree, None, &mut first_cx).map_err(Box::new)?;
+    settle(&first, &mut first_cx);
+    let mut generator = StepGen::new(seed);
+    for index in 0..steps {
+        let windows: Vec<WindowHandle<CrowWindow>> =
+            cx.read(|cx| cx.windows().into_iter().filter_map(|window| window.downcast::<CrowWindow>()).collect());
+        assert!(!windows.is_empty(), "seed {seed} step {index}: every browser window closed");
+        let chosen = windows[(seed as usize).wrapping_add(index * 7) % windows.len()];
+        let mut window_cx = VisualTestContext::from_window(chosen.into(), cx);
+        let view = chosen.root(&mut window_cx).expect("root view");
+        let current = state(&view, &mut window_cx);
+        let step = generator.next(&current);
+        println!("seed {seed} step {index} ({} windows): {step:?}", windows.len());
+        apply_and_check(&view, &step, tree, None, &mut window_cx).map_err(Box::new)?;
+    }
+    Ok(())
+}
+
+#[gpui::test]
+fn fuzz_two_windows_smoke(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-two-windows", 40);
+    let options = FuzzOptions::new(40, EdgeTree::default(), false);
+    for seed in [1, 2] {
+        if let Err(violation) = fuzz_run_two_windows(seed, 30, &tree, &options, cx) {
+            panic!("two windows, seed {seed}: {} — {}", violation.check, violation.detail);
+        }
+    }
+}
+
+/// The second-window shakeout: `CROW_FUZZ_MINUTES=2 CROW_FUZZ_SHRINK_SECS=0 cargo test -p crow-app
+/// fuzz_two_windows_long -- --ignored --nocapture`. Seeds count up from `CROW_FUZZ_SEED` (default 1).
+#[gpui::test]
+#[ignore]
+fn fuzz_two_windows_long(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-two-windows-long", 200);
+    let options = FuzzOptions::new(200, EdgeTree::small(), false);
+    let minutes = std::env::var("CROW_FUZZ_MINUTES").ok().and_then(|value| value.parse::<f64>().ok()).unwrap_or(2.0);
+    let first = std::env::var("CROW_FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1);
+    let deadline = Instant::now() + Duration::from_secs_f64(minutes * 60.);
+    let mut seed = first;
+    while Instant::now() < deadline {
+        println!("two windows, seed {seed}");
+        if let Err(violation) = fuzz_run_two_windows(seed, 300, &tree, &options, cx) {
+            panic!("two windows, seed {seed}: {} — {}", violation.check, violation.detail);
+        }
+        seed += 1;
+    }
+    println!("two windows: seeds {first}..{seed} clean in {minutes} minutes");
+}
+
+#[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
     let options = FuzzOptions::new(40, EdgeTree::default(), false);
@@ -15324,7 +15791,7 @@ fn fuzz_long(cx: &mut TestAppContext) {
         let options = FuzzOptions::new(200, edge.clone(), churn);
         let mut replay = fuzz_replay(seed, &edge, churn, steps);
         match fuzz_run(seed, steps, &tree, &options, cx) {
-            Ok(()) => crate::fuzz_events::seed_end("fuzz", seed, steps, started.elapsed(), "passed"),
+            Ok(_) => crate::fuzz_events::seed_end("fuzz", seed, steps, started.elapsed(), "passed"),
             Err(failure) => {
                 replay.script = Some(failure.script.print());
                 crate::fuzz_events::seed_failure(
@@ -15711,8 +16178,8 @@ fn a_reorder_starts_no_leaving_effect(cx: &mut TestAppContext) {
     // A watcher batch with no removals (a sort's apply).
     cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), Some(&[]), cx)));
     assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reorder");
-    let shift =
-        folder.read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, Instant::now(), crate::pane::ROW_HEIGHT));
+    let shift = folder
+        .read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, crate::clock::now(), crate::pane::ROW_HEIGHT));
     assert_eq!(shift, 0.0, "no gap to close");
     // A full reload with the same entries.
     cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
@@ -16669,6 +17136,145 @@ fn pump_batch(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn batch_rename_preview_names_align_with_the_heading(cx: &mut TestAppContext) {
+    let root = fixture("batch-preview-columns");
+    std::fs::write(root.join("notes with a substantially longer name.txt"), "").unwrap();
+    for width in [640., 1080.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 600.);
+        cx.simulate_keystrokes("cmd-a f2");
+        settle(&view, &mut cx);
+
+        for filled in [false, true] {
+            if filled {
+                cx.simulate_input("notes");
+                cx.simulate_keystrokes("tab");
+                cx.simulate_input("revised");
+                pump_batch(&mut cx);
+            }
+            let heading = cx.debug_bounds("batch-preview-new-name-heading").expect("New name heading");
+            for selector in [
+                "batch-preview-new-name-0",
+                "batch-preview-new-name-1",
+                "batch-preview-new-name-2",
+                "batch-preview-new-name-3",
+            ] {
+                let name = cx.debug_bounds(selector).expect("preview name");
+                assert_eq!(name.left(), heading.left(), "width {width}, filled {filled}, {selector}");
+                assert!(name.right() <= heading.right());
+            }
+        }
+    }
+}
+
+/// The rule bar wraps instead of overflowing: at the narrowest window every
+/// control of each mode sits inside the sheet and none overlaps another.
+#[gpui::test]
+fn batch_rename_rule_bar_fits_the_sheet_in_every_mode(cx: &mut TestAppContext) {
+    let root = fixture("batch-rule-bar");
+    for width in [640., 1080.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 600.);
+        cx.simulate_keystrokes("cmd-a f2");
+        settle(&view, &mut cx);
+        let modes: [(&str, &[&str]); 3] = [
+            ("batch-rule-replace", &["batch-field-find", "batch-field-replace"]),
+            ("batch-rule-add", &["batch-field-add", "batch-add-after", "batch-add-before"]),
+            ("batch-rule-number", &["batch-field-base", "batch-field-start", "batch-field-padding"]),
+        ];
+        for (rule, controls) in modes {
+            let rule_center = cx.debug_bounds(rule).expect("rule control").center();
+            cx.simulate_click(rule_center, Default::default());
+            pump_batch(&mut cx);
+            let panel = cx.debug_bounds("sheet-panel").expect("sheet panel");
+            let mut selectors =
+                vec!["batch-rule-replace", "batch-rule-add", "batch-rule-number", "batch-keep-extension"];
+            selectors.extend(controls);
+            let bounds: Vec<_> = selectors
+                .iter()
+                .map(|selector| {
+                    (*selector, cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} at {width}")))
+                })
+                .collect();
+            for (selector, bound) in &bounds {
+                assert!(
+                    bound.left() >= panel.left() && bound.right() <= panel.right(),
+                    "{selector} stays inside the sheet at {width}: {bound:?} in {panel:?}"
+                );
+            }
+            for (index, (first, a)) in bounds.iter().enumerate() {
+                for (second, b) in &bounds[index + 1..] {
+                    assert!(!a.intersects(b), "{first} and {second} overlap at {width} in {rule}");
+                }
+            }
+        }
+    }
+}
+
+/// A form error is shown once, above the table, and marks its own field.
+#[gpui::test]
+fn batch_rename_form_error_marks_the_field_and_clears(cx: &mut TestAppContext) {
+    let root = fixture("batch-form-error");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    let error_field = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+        view.read_with(cx, |w, _| match &w.sheet {
+            Some(Sheet::BatchRename(sheet)) => sheet.preview.error_field,
+            _ => panic!("batch sheet"),
+        })
+    };
+    assert_eq!(error_field(&view, &cx), Some(crow_core::batch_rename::FormField::Find), "blank Find is the error");
+    assert!(cx.debug_bounds("batch-error").is_some(), "the message strip is up");
+
+    let number = cx.debug_bounds("batch-rule-number").expect("Numbering rule").center();
+    cx.simulate_click(number, Default::default());
+    cx.simulate_input("Trip");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("one");
+    pump_batch(&mut cx);
+    assert_eq!(error_field(&view, &cx), Some(crow_core::batch_rename::FormField::Start));
+    assert!(cx.debug_bounds("batch-error").is_some());
+    cx.simulate_keystrokes("enter");
+    pump_batch(&mut cx);
+    assert!(sheet_open(&view, &cx), "Enter on a form error refuses (the bad field shakes) and keeps the sheet");
+
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("1");
+    pump_batch(&mut cx);
+    assert_eq!(error_field(&view, &cx), None, "a readable start clears the error");
+    assert!(cx.debug_bounds("batch-error").is_none(), "the strip is gone with the error");
+}
+
+/// A clash tints its row but never changes its height: the list is uniform.
+#[gpui::test]
+fn batch_rename_conflict_rows_keep_the_row_height(cx: &mut TestAppContext) {
+    let root = TestRoot::new("crow-app-batch-conflict-");
+    for name in ["a1.txt", "a2.txt", "b1.txt"] {
+        std::fs::write(root.join(name), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("b");
+    pump_batch(&mut cx);
+    let (blocked, can_submit) = view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => (sheet.row_state(0).cloned(), sheet.can_submit()),
+        _ => panic!("batch sheet"),
+    });
+    assert!(
+        matches!(blocked, Some(crow_fs::ops::BatchRowState::Invalid(_))),
+        "a1.txt would take the existing b1.txt: {blocked:?}"
+    );
+    assert!(!can_submit, "Rename stays off while a row is invalid");
+    let heights: Vec<_> = ["batch-preview-0", "batch-preview-1", "batch-preview-2"]
+        .into_iter()
+        .map(|selector| cx.debug_bounds(selector).expect("preview row").size.height)
+        .collect();
+    assert!(heights.iter().all(|height| *height == heights[0]), "rows share one height: {heights:?}");
+}
+
+#[gpui::test]
 fn batch_rename_sheet_previews_applies_one_activity_and_undo_selects(cx: &mut TestAppContext) {
     let root = fixture("batch-sheet-apply");
     let (view, mut cx) = open(cx, &root);
@@ -17476,18 +18082,20 @@ fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut T
 }
 
 #[gpui::test]
-fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestAppContext) {
+fn sidebar_projects_row_accepts_drops_and_opens_from_another_folder(cx: &mut TestAppContext) {
     let root = fixture("audit-projects-drop");
     let source = fixture("audit-projects-source");
     let repo = root.join("beta").canonicalize().unwrap();
     let output = std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let (view, mut cx) = open(cx, &root);
+    let alias = source.join("projects-alias");
+    std::os::unix::fs::symlink(&root.path, &alias).unwrap();
+    let (view, mut cx) = open(cx, &source);
     cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
     let config = format!(
         "{}\n[projects]\nroot = \"{}\"\n",
         favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
-        root.display()
+        alias.display()
     );
     write_config(&view, &mut cx, "sidebar.toml", &config);
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
@@ -17506,6 +18114,11 @@ fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestApp
     finder_drop(&view, &mut cx, at, source.join("notes.txt"));
     assert!(repo.join("notes.txt").is_file());
     assert!(!root.join("alpha/notes.txt").exists());
+
+    let at = cx.update(|window, _| window.debug_bounds(&selector)).expect("Projects row after drop").center();
+    cx.simulate_click(at, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), repo);
 }
 
 #[gpui::test]
@@ -17972,9 +18585,14 @@ fn an_unreadable_folder_shows_a_lock_state_in_every_view(cx: &mut TestAppContext
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(locked.clone(), cx));
     for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Icons, ViewMode::Gallery] {
         pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
-        cx.run_until_parked();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        cx.run_until_parked();
+        // The listing fails on a background thread; wait for the lock state, not a fixed time.
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if cx.debug_bounds("folder-unreadable").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(cx.debug_bounds("folder-unreadable").is_some(), "{mode:?} shows the lock state");
         assert!(cx.debug_bounds("folder-retry").is_some(), "{mode:?} offers Retry");
         assert!(
@@ -18320,9 +18938,7 @@ fn a_closed_palette_fades_out_in_full_and_is_gone_at_once_in_off(cx: &mut TestAp
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: still closed");
         // After the fade the picture is dropped.
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SHEET_OUT + 40));
-        view.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        step_motion(&view, &mut cx, crow_core::motion::ms::SHEET_OUT + 40);
         assert!(cx.debug_bounds("sheet-panel").is_none(), "{mode:?}: gone after the fade");
         assert!(view.read_with(&cx, |w, _| w.exits.palette.is_none()), "{mode:?}: the holder is dropped");
     }
@@ -18390,9 +19006,7 @@ fn toggling_the_right_column_slides_in_full_and_is_instant_in_off(cx: &mut TestA
         if !now_visible && slides {
             assert!(cx.debug_bounds("preview").is_some(), "{mode:?}: the hiding column is still drawn");
         }
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
-        view.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        finish_motion(&view, &mut cx);
         assert!(view.read_with(&cx, |w, _| w.pane_slide.is_none()), "{mode:?}: the slide ends");
         assert_eq!(cx.debug_bounds("preview").is_some(), now_visible, "{mode:?}: the end state");
     }
@@ -18457,9 +19071,7 @@ fn a_collapsing_sidebar_section_leaves_fading_rows_only_in_full(cx: &mut TestApp
             sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken.contains("Recent section, collapsed")),
             "{mode:?}: the logical state changes at once"
         );
-        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SECTION + 40));
-        sidebar.update(&mut cx, |_, cx| cx.notify());
-        cx.run_until_parked();
+        step_motion(&view, &mut cx, crow_core::motion::ms::SECTION + 40);
         assert!(cx.debug_bounds("sidebar-section-ghost").is_none(), "{mode:?}: gone after the motion");
     }
 }
@@ -18511,6 +19123,42 @@ fn the_view_switcher_fill_glides_only_in_full(cx: &mut TestAppContext) {
             assert_eq!(fill.size, icons.size, "{mode:?}: the fill is a button's size");
         }
     }
+}
+
+#[gpui::test]
+fn narrow_search_band_keeps_regex_and_match_controls_clear_of_save_and_done(cx: &mut TestAppContext) {
+    let root = fixture("narrow-search-band");
+    let (view, mut cx) = open_sized(cx, &root, 640., 540.);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = crow_core::motion::Effective::Off);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("/notes/");
+    settle(&view, &mut cx);
+
+    let query = cx.debug_bounds("search-query").expect("editable query");
+    assert!(query.size.width >= px(70.), "query has room to show text: {query:?}");
+
+    let toolbar = cx.debug_bounds("toolbar").expect("toolbar");
+    let field = cx.debug_bounds("search-field").expect("query field");
+    let regex = cx.debug_bounds("search-regex").expect("regex badge");
+    let contents = cx.debug_bounds("search-match-contents").expect("Contents control");
+    let save = cx.debug_bounds("search-save").expect("Save control");
+    let done = cx.debug_bounds("search-done").expect("Done control");
+
+    assert!(field.right() <= save.left() && save.right() <= done.left());
+    assert!(regex.right() <= field.right());
+    assert!(
+        contents.bottom() <= save.top() || contents.top() >= save.bottom() || contents.right() <= save.left(),
+        "Contents {contents:?} overlaps Save {save:?}"
+    );
+    for bounds in [field, query, regex, contents, save, done] {
+        assert!(bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right());
+        assert!(bounds.top() >= toolbar.top() && bounds.bottom() <= toolbar.bottom());
+    }
+
+    cx.simulate_click(contents.center(), gpui::Modifiers::none());
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |view, _| view.search.is_none()));
 }
 
 #[gpui::test]
@@ -18641,6 +19289,38 @@ fn keys_toml_moves_a_command_to_a_new_key_live(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-3");
     settle(&view, &mut cx);
     assert_eq!(mode(&cx), ViewMode::Columns, "defaults are back");
+}
+
+#[gpui::test]
+fn keys_toml_keeps_copy_in_list_and_search_results(cx: &mut TestAppContext) {
+    let root = fixture("keys-copy-context");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\ncopy = [\"cmd-shift-c\"]\n");
+    let clipboard =
+        |cx: &VisualTestContext| cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|c| c.paths.to_vec()));
+
+    cx.simulate_keystrokes("cmd-c");
+    assert_eq!(clipboard(&cx), None);
+    cx.simulate_keystrokes("cmd-shift-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("alpha")]));
+
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("tab cmd-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("alpha")]));
+    cx.simulate_keystrokes("cmd-shift-c");
+    assert_eq!(clipboard(&cx), Some(vec![root.join("notes.txt")]));
+}
+
+#[gpui::test]
+fn override_conflicts_include_the_search_results_context(cx: &mut TestAppContext) {
+    let root = fixture("keys-search-conflict");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\ncopy = [\"cmd-shift-c\"]\n");
+    let conflicts =
+        cx.read(|cx| crate::keymap::conflicts(crow_core::KeymapLayer::Finder, CommandId::Copy, "cmd-r", cx));
+    assert!(conflicts.iter().any(|conflict| conflict.command == Some(CommandId::SearchReveal)), "{conflicts:?}");
 }
 
 #[gpui::test]
@@ -18894,6 +19574,30 @@ fn a_sidebar_heading_slides_its_title_over_when_the_chevron_shows_on_hover(cx: &
 }
 
 #[gpui::test]
+fn a_long_sidebar_heading_stays_inside_its_header_in_every_style(cx: &mut TestAppContext) {
+    let root = fixture("long-sidebar-heading");
+    let (view, mut cx) = open_sized(cx, &root, 640., 540.);
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        "[[group]]\nname = \"A long group title with the same length as a deep Projects root\"\nitems = [{ path = \"/tmp\" }]\n",
+    );
+    for style in ["ledger", "cards", "accordion", "floating-panel", "pills"] {
+        write_config(&view, &mut cx, "settings.toml", &format!("sidebar_style = \"{style}\"\nmotion = \"off\"\n"));
+        settle(&view, &mut cx);
+        let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("heading row");
+        let lead = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("heading content");
+        assert!(lead.right() <= header.right() - px(8.), "{style}: {lead:?} exceeds {header:?}");
+        cx.simulate_mouse_move(header.center(), None, gpui::Modifiers::none());
+        settle(&view, &mut cx);
+        let hovered = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("hovered heading content");
+        assert!(hovered.right() <= header.right() - px(8.), "{style} on hover: {hovered:?} exceeds {header:?}");
+        assert_eq!(cx.debug_bounds("sidebar-header-favorites-group-0"), Some(header));
+    }
+}
+
+#[gpui::test]
 fn the_title_reveals_a_draggable_folder_icon_on_hover(cx: &mut TestAppContext) {
     use crow_core::motion::Effective;
     let root = fixture("title-proxy");
@@ -19098,4 +19802,237 @@ fn a_tag_destination_may_own_focus(cx: &mut TestAppContext) {
         crate::script![Step::Keys("tab".into()), Step::Keys("alt-down".into()), Step::Keys("right".into())],
     );
     assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
+fn no_overlay_opens_over_another(cx: &mut TestAppContext) {
+    let root = fixture("overlay-exclusion");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+        assert!(this.overlay_open());
+        // Each opener refuses while the review is up.
+        this.edit_path(&crate::actions::EditPath, window, cx);
+        assert!(this.path_edit.is_none(), "Edit Path stays closed behind the review");
+        this.open_tag_picker(window, cx);
+        assert!(this.tag_picker.is_none());
+        this.choose_list_columns(&crate::actions::ChooseListColumns, window, cx);
+        assert!(this.column_picker.is_none());
+    });
+    cx.simulate_keystrokes("escape");
+    view.update_in(&mut cx, |this, window, cx| {
+        assert!(!this.overlay_open());
+        this.open_tag_picker(window, cx);
+        assert!(this.tag_picker.is_some() && this.overlay_open());
+        this.open_git_review(root.to_path_buf(), window, cx);
+        assert!(this.git_review.is_none(), "a review does not open over the tag picker");
+        this.edit_path(&crate::actions::EditPath, window, cx);
+        assert!(this.path_edit.is_none(), "Edit Path stays closed behind the tag picker");
+        this.open_picker(Vec::new(), window, cx);
+        assert!(this.picker.is_none(), "a late theme list does not open over another overlay");
+    });
+}
+
+#[gpui::test]
+fn a_size_calculated_once_is_visible_to_every_view(cx: &mut TestAppContext) {
+    // Gallery, Preview and Info read `visible_size`; with sizes Off it must still
+    // answer for a folder View > Calculate Folder Sizes measured, and only for it.
+    let root = fixture("manual-size-everywhere");
+    let (_view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(FixedSizer)));
+    let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+    cx.update(|_, cx| {
+        assert_eq!(cx.global::<crate::ui::Ui>().settings.folder_sizes, crow_core::FolderSizesMode::Off);
+        assert!(crate::folder_sizes::visible_size(&alpha, cx).is_none());
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| {
+            service.measure_once(std::slice::from_ref(&alpha), cx);
+            service.measure_now(cx);
+        });
+        assert!(crate::folder_sizes::visible_size(&alpha, cx).is_some(), "the calculated folder shows its size");
+        assert!(crate::folder_sizes::visible_size(&beta, cx).is_none(), "others stay unmeasured");
+    });
+}
+
+#[gpui::test]
+fn a_context_menu_that_cannot_open_leaves_no_menu_state(cx: &mut TestAppContext) {
+    let root = fixture("menu-refused");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").refuse_context_menu(true));
+    let at = row_center(&mut cx, "row-notes.txt");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.context_menu().is_none()), "no menu is open");
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").refuse_context_menu(false));
+}
+
+#[gpui::test]
+fn the_git_review_groups_its_scope_tabs(cx: &mut TestAppContext) {
+    // The debug recorder lists only elements with handlers, so the tab list's role is
+    // read from the source; this pins that the group exists around both tabs.
+    let root = fixture("git-review-tablist");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    settle(&view, &mut cx);
+    let group = cx.debug_bounds("git-review-scopes").expect("the tab group is drawn");
+    for tab in ["git-review-scope-0", "git-review-scope-1"] {
+        let bounds = cx.debug_bounds(tab).expect("a scope tab");
+        assert!(group.contains(&bounds.center()), "{tab} sits in the group");
+    }
+}
+
+#[gpui::test]
+fn turning_git_off_under_the_review_returns_focus_to_the_listing(cx: &mut TestAppContext) {
+    let root = fixture("git-review-focus");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    settle(&view, &mut cx);
+    cx.update(|_, cx| crate::git::set_enabled_for_test(cx, false));
+    view.update_in(&mut cx, |_, _, cx| cx.notify());
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |this, _| this.git_review.is_none()), "the review closes");
+    let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
+    assert!(cx.update(|window, cx| pane_focus.contains_focused(window, cx)), "focus is back on the listing");
+}
+
+// ----- keystroke tests for bindings that had none (audit TST-7) -----
+
+#[gpui::test]
+fn cmd_o_opens_the_selected_folder(cx: &mut TestAppContext) {
+    let root = fixture("key-cmd-o");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-alpha");
+    cx.simulate_keystrokes("cmd-o");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+}
+
+#[gpui::test]
+fn cmd_alt_v_moves_the_copied_file_into_the_folder(cx: &mut TestAppContext) {
+    let root = fixture("key-cmd-alt-v");
+    let (view, mut cx) = open(cx, &root);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.simulate_keystrokes("cmd-c");
+    click_selector(&mut cx, "row-alpha");
+    cx.simulate_keystrokes("cmd-o");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+    cx.simulate_keystrokes("cmd-alt-v");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/notes.txt").exists(), "the file arrived");
+    assert!(!root.join("notes.txt").exists(), "Paste Item and Move it moves rather than copies");
+}
+
+#[gpui::test]
+fn ctrl_shift_tab_goes_to_the_previous_tab(cx: &mut TestAppContext) {
+    let root = fixture("key-prev-tab");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-t");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 1);
+    cx.simulate_keystrokes("ctrl-shift-tab");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 0);
+}
+
+#[gpui::test]
+fn cmd_alt_up_moves_a_favorite_up(cx: &mut TestAppContext) {
+    let root = fixture("key-favorite-up");
+    let (view, mut cx) = open(cx, &root);
+    let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+    cx.simulate_keystrokes("tab down cmd-alt-up");
+    settle(&view, &mut cx);
+    assert_eq!(sidebar_paths(&cx), [beta, alpha], "Cmd-Option-Up moves the second favorite above the first");
+}
+
+#[gpui::test]
+fn cmd_e_ejects_the_volume_under_the_sidebar_cursor(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("key-eject");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+    cx.update(|_, cx| {
+        cx.global_mut::<Ui>().volumes = vec![crow_macos::Volume {
+            name: "Test HD".into(),
+            path: root.to_path_buf(),
+            total_bytes: 1_000_000,
+            free_bytes: 500_000,
+            ejectable: true,
+        }];
+        cx.refresh_windows();
+    });
+    cx.run_until_parked();
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    // Walk the cursor down to the volume row.
+    for _ in 0..12 {
+        let looks = sidebar_looks(&view, &mut cx);
+        if looks.iter().any(|look| look.ring && look.label == "Test HD") {
+            break;
+        }
+        cx.simulate_keystrokes("down");
+    }
+    cx.simulate_keystrokes("cmd-e");
+    settle(&view, &mut cx);
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::Eject(root.to_path_buf())), "{calls:?}");
+}
+
+#[gpui::test]
+fn vim_shift_j_and_shift_k_extend_the_selection(cx: &mut TestAppContext) {
+    let root = fixture("key-vim-extend");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("shift-j");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"], "Shift-J grows the selection down");
+    cx.simulate_keystrokes("shift-j");
+    assert_eq!(selected_names(&view, &cx).len(), 3);
+    cx.simulate_keystrokes("shift-k");
+    assert_eq!(selected_names(&view, &cx).len(), 2, "Shift-K shrinks it back");
+}
+
+#[gpui::test]
+fn vim_yy_dd_p_u_and_ctrl_r_copy_cut_paste_undo_and_redo(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("key-vim-files");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("shift-g");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("y y");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.contains(&Call::WriteFileUrls(vec![root.join("notes.txt")])), "yy copies: {calls:?}");
+
+    // p pastes beside the file: a copy appears; u takes it away; ctrl-r brings it back.
+    cx.simulate_keystrokes("p");
+    settle(&view, &mut cx);
+    assert!(root.join("notes copy.txt").exists(), "p pastes the copy");
+    cx.simulate_keystrokes("u");
+    settle(&view, &mut cx);
+    assert!(!root.join("notes copy.txt").exists(), "u undoes the paste");
+    cx.simulate_keystrokes("ctrl-r");
+    settle(&view, &mut cx);
+    assert!(root.join("notes copy.txt").exists(), "ctrl-r redoes it");
+
+    // dd marks the file to move; nothing is deleted.
+    cx.simulate_keystrokes("g g");
+    cx.simulate_keystrokes("d d");
+    let (paths, cut) = cx.read(crate::operations::pasteboard_paths);
+    assert!(cut, "dd cuts");
+    assert_eq!(&*paths, [root.join("alpha")]);
+    assert!(root.join("alpha").exists(), "dd deletes nothing");
 }

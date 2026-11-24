@@ -464,12 +464,29 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     let name = name.to_string_lossy();
                     let hidden = is_hidden(name.as_ref(), metadata.as_ref());
                     let path = entry.path();
+                    // These folders can match themselves, but a predicate miss
+                    // must still prune their descendants.
+                    let skip_reason = if is_dir && !enter_hidden && name.starts_with('.') {
+                        Some(SkipReason::HiddenFolder)
+                    } else if is_dir && !enter_packages && crow_fs::is_package_name(name.as_ref()) {
+                        Some(SkipReason::Package)
+                    } else {
+                        None
+                    };
+                    let descent = if let Some(reason) = skip_reason {
+                        if let Ok(mut list) = skipped.lock() {
+                            list.push(Skip { path: path.to_path_buf(), reason });
+                        }
+                        WalkState::Skip
+                    } else {
+                        WalkState::Continue
+                    };
                     // Kind and age are cheap; tags are a metadata read, so only do
                     // it for candidates that already passed them.
                     let mut tags: Option<Vec<String>> = None;
                     if !predicates.tags.is_empty() {
                         if !predicates.matches_cheap(path, is_dir, modified, run_started) {
-                            return WalkState::Continue;
+                            return descent;
                         }
                         let read = tag_reader
                             .as_ref()
@@ -481,12 +498,12 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                             }
                             Err(_) => {
                                 tag_errors.fetch_add(1, Ordering::Relaxed);
-                                return WalkState::Continue;
+                                return descent;
                             }
                         }
                     }
                     if !predicates.matches_with_tags(path, is_dir, modified, run_started, tags.as_deref()) {
-                        return WalkState::Continue;
+                        return descent;
                     }
                     if metadata_only {
                         metadata_matched.fetch_add(1, Ordering::Relaxed);
@@ -554,24 +571,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                             }
                         }
                     }
-                    // A dot folder is visited, so its name matches, but not descended
-                    // into while Show Hidden Files is off: one visible skip instead of
-                    // walking every dot folder in the home folder. Search everything enters it.
-                    if is_dir && !enter_hidden && name.starts_with('.') {
-                        if let Ok(mut list) = skipped.lock() {
-                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::HiddenFolder });
-                        }
-                        return WalkState::Skip;
-                    }
-                    // A package is a name hit, not a folder to walk; Finder opens it
-                    // rather than browsing it. Search everything looks inside.
-                    if is_dir && !enter_packages && crow_fs::is_package_name(name.as_ref()) {
-                        if let Ok(mut list) = skipped.lock() {
-                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::Package });
-                        }
-                        return WalkState::Skip;
-                    }
-                    WalkState::Continue
+                    descent
                 })
             });
             if metadata_only {
@@ -841,6 +841,29 @@ impl ContentSearch {
     }
 }
 
+/// The longest excerpt a content hit carries, and the most highlighted ranges in it.
+const MAX_EXCERPT_BYTES: usize = 4096;
+const MAX_EXCERPT_RANGES: usize = 256;
+
+/// The part of `text` to show: all of it when short, otherwise `MAX_EXCERPT_BYTES`
+/// of it starting a little before the first match (`first`), at character boundaries.
+fn excerpt_window(text: &str, first: Option<usize>) -> std::ops::Range<usize> {
+    if text.len() <= MAX_EXCERPT_BYTES {
+        return 0..text.len();
+    }
+    let mut start = first.map_or(0, |at| at.saturating_sub(MAX_EXCERPT_BYTES / 16));
+    // Keep the window full when the match is near the end.
+    start = start.min(text.len() - MAX_EXCERPT_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = (start + MAX_EXCERPT_BYTES).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    start..end
+}
+
 struct ContentSink<'a> {
     matcher: &'a RegexMatcher,
     path: &'a Path,
@@ -860,26 +883,43 @@ impl Sink for ContentSink<'_> {
         if self.control.is_cancelled() || self.control.contents_stopped() {
             return Ok(false);
         }
+        let raw = mat.bytes();
+        let text = String::from_utf8_lossy(raw);
+        let text = text.trim_end_matches(['\n', '\r']);
+        // An empty line (`^$`, `^`) is not an excerpt; it must not hide the lines
+        // after it, so it is not counted either.
+        if text.is_empty() {
+            return Ok(true);
+        }
         self.matches += 1;
         // The first line is the excerpt the UI shows; the rest are only counted.
         if self.matches > 1 {
             return Ok(true);
         }
-        let raw = mat.bytes();
-        let text = String::from_utf8_lossy(raw);
-        let text = text.trim_end_matches(['\n', '\r']);
-        if text.is_empty() {
-            return Ok(true);
-        }
+        // One minified line can be megabytes: show a bounded window of it, around the
+        // first match. Ranges are found on the whole line (anchors keep their meaning)
+        // and kept when they fall inside the window.
+        let first = self.matcher.find(text.as_bytes()).map_err(|e| io::Error::other(e.to_string()))?.map(|m| m.start());
+        let window = excerpt_window(text, first);
         let mut ranges = Vec::new();
         self.matcher
             .find_iter(text.as_bytes(), |m| {
-                if m.end() > m.start() {
-                    ranges.push(m.start()..m.end());
+                if m.start() >= window.end || ranges.len() >= MAX_EXCERPT_RANGES {
+                    return false;
+                }
+                // `(?-u)` patterns can match half a character; only whole ones are shown.
+                if m.end() > m.start()
+                    && m.start() >= window.start
+                    && m.end() <= window.end
+                    && text.is_char_boundary(m.start())
+                    && text.is_char_boundary(m.end())
+                {
+                    ranges.push(m.start() - window.start..m.end() - window.start);
                 }
                 true
             })
             .map_err(|e| io::Error::other(e.to_string()))?;
+        let text = &text[window];
         self.hits.push(Hit {
             path: self.path.to_path_buf(),
             is_dir: false,
@@ -1509,6 +1549,48 @@ mod tests {
         assert_eq!(extra_matches(&hits), 1, "the third line is counted, not carried");
     }
 
+    #[test]
+    fn an_empty_first_matching_line_does_not_hide_the_file() {
+        let root = root("content-empty-first");
+        write(&root, "blank.txt", b"\nfoo\nbar\n");
+        let (hits, summary) = run(&root, None, Some("/^.*$/"), false, true);
+        assert_eq!(summary.error, None);
+        assert_eq!(content(&hits)[0].0, 2, "the first non-empty matching line is the excerpt");
+        assert_eq!(extra_matches(&hits), 1);
+    }
+
+    #[test]
+    fn excerpts_are_bounded_and_ranges_stay_on_characters() {
+        let root = root("content-bounds");
+        let long = format!("{}needle{}", "x".repeat(10_000), "y".repeat(10_000));
+        write(&root, "min.js", long.as_bytes());
+        write(&root, "accent.txt", "caf\u{e9}\n".as_bytes());
+        let (hits, _) = run(&root, None, Some("/x{3,}/"), false, true);
+        for (_, text, ranges) in content(&hits) {
+            assert!(text.len() <= MAX_EXCERPT_BYTES);
+            assert!(ranges.len() <= MAX_EXCERPT_RANGES);
+            assert!(ranges.iter().all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)));
+        }
+        let (hits, _) = run(&root, None, Some(r"/(?-u:\xC3)/"), false, true);
+        for (_, text, ranges) in content(&hits) {
+            assert!(ranges.iter().all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)));
+        }
+    }
+
+    #[test]
+    fn a_match_far_into_a_long_line_stays_in_the_excerpt() {
+        let root = root("content-window");
+        let long = format!("{}needle{}", "x".repeat(50_000), "y".repeat(50_000));
+        write(&root, "app.min.js", long.as_bytes());
+        let (hits, _) = run(&root, None, Some("needle"), false, true);
+        let found = content(&hits);
+        assert_eq!(found.len(), 1);
+        let (_, text, ranges) = &found[0];
+        assert!(text.len() <= MAX_EXCERPT_BYTES);
+        assert_eq!(ranges.len(), 1, "the match is highlighted");
+        assert_eq!(&text[ranges[0].clone()], "needle");
+    }
+
     fn hit(path: &str) -> Hit {
         Hit {
             path: PathBuf::from(path),
@@ -1886,6 +1968,57 @@ mod tests {
         fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
             self.0.get(path).cloned().unwrap_or_else(|| Ok(Vec::new()))
         }
+    }
+
+    fn assert_predicate_respects_folder_skips(predicates: Predicates) {
+        let root = root("filtered-skip");
+        let files = ["Foo.app/Contents/a.pdf", ".git/b.pdf", "docs/c.pdf"];
+        for file in files {
+            write(&root, file, b"x");
+        }
+        for folder in ["Foo.app", ".git", "docs"] {
+            std::fs::File::open(root.join(folder)).unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        }
+        let tags = files.into_iter().map(|file| (root.join(file), Ok(vec!["Work".into()]))).collect();
+        let query = Query {
+            names: None,
+            contents: None,
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: Arc::new(RuleSet::empty()),
+            everything: false,
+            read_gate: None,
+            predicates,
+            tag_reader: Some(Arc::new(FakeTags(tags))),
+        };
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &Control::new());
+        assert_eq!(paths(&hits), [root.join("docs/c.pdf")]);
+        assert_eq!(
+            summary.skipped,
+            [
+                Skip { path: root.join(".git"), reason: SkipReason::HiddenFolder },
+                Skip { path: root.join("Foo.app"), reason: SkipReason::Package },
+            ]
+        );
+    }
+
+    #[test]
+    fn kind_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates { kind: Some(Kind::Pdf), ..Predicates::default() });
+    }
+
+    #[test]
+    fn age_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates {
+            modified_within: Some(Duration::from_secs(86_400)),
+            ..Predicates::default()
+        });
+    }
+
+    #[test]
+    fn tag_predicates_do_not_descend_into_skipped_folders() {
+        assert_predicate_respects_folder_skips(Predicates { tags: vec!["Work".into()], ..Predicates::default() });
     }
 
     #[test]

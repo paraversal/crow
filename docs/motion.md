@@ -88,6 +88,7 @@ Milliseconds, Full unless a surface says otherwise.
 | Right sidebar (⇧⌘P, ⌥⌘P, ⌘I) and left sidebar (⌃⌘S) | Width eases (`PANE_SLIDE`), content fades after half | Width snaps, content fades |
 | Sidebar sections | Rows grow and fade in, closing rows fade while the gap shrinks, chevrons crossfade | Rows fade in; collapse is instant |
 | Window tabs | New tab grows, closed tab shrinks away, active fill glides | New tab fades; close is instant |
+| Batch rename sheet | Tab ink slides, the rule slides sideways, changed rows stagger in | Nothing moves: the ink jumps, changed text fades |
 | Toolbar view switcher | Selected segment glides | Snaps |
 | Search band (⌘F) | Field widens across the band, then controls fade in; reverses on Done | Swap and fade |
 | `/` filter row | Row opens its height; closing shrinks a picture of the field | Fade in; close is instant |
@@ -109,7 +110,8 @@ hover fills, column resize, divider drags, search results streaming in, context 
 
 ## Measuring
 
-`crow --motion-lab` fires every row effect in the three modes at ×5 slow motion. For frame
+`crow --motion-lab` (a build with `cargo run -p crow-app --features motion-lab -- --motion-lab`; the bundle
+has no lab) fires every row effect in the three modes at ×5 slow motion. For frame
 times use `CROW_BENCH_TRASH=N target/release/crow --bench target/fixture-100k`: it reports
 frames over 1.5× the idle median as hitches. Compare against `main` before calling a
 change a regression.

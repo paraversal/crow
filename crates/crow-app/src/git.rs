@@ -26,6 +26,9 @@ const MAX_WATCHED_REPOS: usize = 16;
 const MAX_SUMMARY_FILES: usize = 64;
 /// How many line batches can run concurrently, and rows started per poll.
 const MAX_LINE_JOBS: usize = 4;
+/// Folders and repositories kept in the status caches. The oldest check goes first.
+const MAX_CACHED_FOLDERS: usize = 256;
+const MAX_CACHED_REPOS: usize = 64;
 const MAX_LINE_ROWS: usize = 64;
 /// A repository watcher burst is merged for this long before rescanning.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -119,6 +122,35 @@ pub struct Git {
 }
 
 impl Global for Git {}
+
+impl Git {
+    /// Keep the per-folder and per-repository caches bounded: a long session that
+    /// visits many repositories must not hold every snapshot. Watched repositories
+    /// stay; the oldest checks go first, with their line counts.
+    fn trim_caches(&mut self) {
+        while self.folders.len() > MAX_CACHED_FOLDERS {
+            let Some(oldest) = self.folders.iter().min_by_key(|(_, cache)| cache.checked).map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.folders.remove(&oldest);
+        }
+        while self.repos.len() > MAX_CACHED_REPOS {
+            let watched = |path: &PathBuf| self.watches.iter().any(|watch| &watch.worktree == path);
+            let Some(oldest) = self
+                .repos
+                .iter()
+                .filter(|(path, _)| !watched(path))
+                .min_by_key(|(_, cache)| cache.checked)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.repos.remove(&oldest);
+            self.lines.retain(|(repo, _), _| repo != &oldest);
+        }
+    }
+}
 
 pub fn init_at(cx: &mut App) {
     cx.set_global(Git::new(false));
@@ -373,6 +405,7 @@ fn request_folder(cx: &mut App, folder: &Path) {
             let changed = old_repo != repo.as_ref();
             let invalidated = changed && old_repo.is_some();
             git.folders.insert(folder.clone(), FolderCache { repo, checked: now });
+            git.trim_caches();
             if let Some(identity) = watch {
                 ensure_watch(cx, identity);
             }
@@ -528,6 +561,7 @@ pub fn poll(cx: &mut App) {
                     repo_refreshes.push((worktree.clone(), refresh));
                 }
                 git.repos.insert(worktree, RepoCache { snapshot, checked: now });
+                git.trim_caches();
             }
             GitEvent::Watch { changed, watcher } => {
                 if let Some(watch) = git.watches.iter_mut().find(|watch| Arc::ptr_eq(&watch.changed, &changed)) {
@@ -535,7 +569,7 @@ pub fn poll(cx: &mut App) {
                 }
             }
             GitEvent::Lines { worktree, snapshot, results } => {
-                git.pending_line_jobs -= 1;
+                git.pending_line_jobs = git.pending_line_jobs.saturating_sub(1);
                 let current = git.snapshot(&worktree).is_some_and(|active| Arc::ptr_eq(active, &snapshot));
                 for (relative, counts) in results {
                     let key = (worktree.clone(), relative);
@@ -595,15 +629,20 @@ fn schedule_lines(cx: &mut App) {
         }
         groups.entry(worktree.clone()).or_default().push(relative.clone());
     }
-    git.pending_line_jobs += groups.len();
     let sender = git.tx.clone();
     let cancel = git.cancel.clone();
     let gate = crate::cloud_status::read_gate(cx);
     for (worktree, rows) in groups {
         let gate = gate.clone();
         let git = cx.global_mut::<Git>();
+        // A worktree whose status is gone has nothing to diff against; its rows
+        // are asked for again when a snapshot arrives.
+        let Some(snapshot) = git.snapshot(&worktree).cloned() else {
+            git.wanted_lines.retain(|(repo, _), _| repo != &worktree);
+            continue;
+        };
+        git.pending_line_jobs += 1;
         git.pending_lines.extend(rows.iter().map(|relative| (worktree.clone(), relative.clone())));
-        let snapshot = git.snapshot(&worktree).expect("lines need a snapshot").clone();
         let sender = sender.clone();
         let cancel = cancel.clone();
         cx.background_spawn(async move {
@@ -954,6 +993,43 @@ mod tests {
         });
         cx.update(poll);
         assert!(cx.update(|cx| projects_rows(cx, Vec::new(), Path::new("/tmp"))).is_empty());
+    }
+
+    #[gpui::test]
+    fn line_scheduling_without_a_snapshot_neither_panics_nor_leaks_a_job(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::ui::init_for_tests);
+        cx.update(|cx| set_enabled_for_test(cx, true));
+        cx.update(|cx| {
+            let git = cx.global_mut::<Git>();
+            git.wanted_lines.insert(
+                (PathBuf::from("/tmp/no-status"), PathBuf::from("a.txt")),
+                HashSet::from([PathBuf::from("/tmp/no-status/a.txt")]),
+            );
+            schedule_lines(cx);
+            let git = cx.global::<Git>();
+            assert_eq!(git.pending_line_jobs, 0, "no job was started");
+            assert!(git.wanted_lines.is_empty(), "the unanswerable request is dropped");
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_caches_stay_bounded(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::ui::init_for_tests);
+        cx.update(|cx| set_enabled_for_test(cx, true));
+        cx.update(|cx| {
+            let git = cx.global_mut::<Git>();
+            for n in 0..(MAX_CACHED_FOLDERS + 40) {
+                git.folders
+                    .insert(PathBuf::from(format!("/tmp/f{n}")), FolderCache { repo: None, checked: Instant::now() });
+            }
+            for n in 0..(MAX_CACHED_REPOS + 10) {
+                git.repos
+                    .insert(PathBuf::from(format!("/tmp/r{n}")), RepoCache { snapshot: None, checked: Instant::now() });
+            }
+            git.trim_caches();
+            assert_eq!(git.folders.len(), MAX_CACHED_FOLDERS);
+            assert_eq!(git.repos.len(), MAX_CACHED_REPOS);
+        });
     }
 
     #[gpui::test]

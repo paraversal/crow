@@ -349,7 +349,11 @@ fn probe_identity(text: &str, limits: &Limits) -> (Option<PluginId>, Option<Stri
         .and_then(toml::Value::as_str)
         .filter(|name| name.len() <= limits.max_display_bytes && !name.chars().any(char::is_control))
         .map(str::to_owned);
-    let version = value.get("version").and_then(toml::Value::as_str).map(str::to_owned);
+    let version = value
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .filter(|version| version.len() <= limits.max_version_bytes && !version.chars().any(char::is_control))
+        .map(str::to_owned);
     (id, name, version)
 }
 
@@ -442,6 +446,16 @@ permissions = { fs = "none", spawn = [], net = false }
 
     fn limits() -> Limits {
         Limits::default()
+    }
+
+    #[test]
+    fn an_invalid_bundle_shows_only_a_short_clean_version() {
+        let clean = probe_identity("id = \"example.x\"\nversion = \"not.semver\"", &limits());
+        assert_eq!(clean.2.as_deref(), Some("not.semver"));
+        let control = probe_identity("id = \"example.x\"\nversion = \"1\\n2\"", &limits());
+        assert_eq!(control.2, None);
+        let long = format!("id = \"example.x\"\nversion = \"{}\"", "9".repeat(limits().max_version_bytes + 1));
+        assert_eq!(probe_identity(&long, &limits()).2, None);
     }
 
     #[test]

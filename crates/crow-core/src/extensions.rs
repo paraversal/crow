@@ -704,7 +704,7 @@ impl Previewer for TextPreviewer {
             return None;
         }
         let mut head = Vec::with_capacity(Self::MAX_BYTES);
-        std::fs::File::open(&entry.path).ok()?.take(Self::MAX_BYTES as u64).read_to_end(&mut head).ok()?;
+        open_regular(&entry.path)?.take(Self::MAX_BYTES as u64).read_to_end(&mut head).ok()?;
         // Text, not binary: no NUL bytes. Cut at the last newline when the file was
         // truncated, so a multi-byte character split by the cap never fails the check.
         if head.contains(&0) {
@@ -719,6 +719,21 @@ impl Previewer for TextPreviewer {
         Some(PreviewContent::Text(text.lines().take(Self::MAX_LINES).collect::<Vec<_>>().join("\n")))
     }
 }
+
+/// Open `path` for reading only when it is a regular file. A FIFO (or a symlink to
+/// one) would block an open for reading until a writer shows up, so the open does
+/// not wait and anything but a regular file is refused.
+fn open_regular(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(path).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+/// `O_NONBLOCK` on macOS and Linux.
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(not(target_os = "macos"))]
+const O_NONBLOCK: i32 = 0o4000;
 
 /// A window of a text file around a content match, for the search preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -741,7 +756,7 @@ pub fn text_excerpt(path: &Path, line: u64, before: usize, total: usize, gate: &
         return None;
     }
     let mut bytes = Vec::with_capacity(8192);
-    std::fs::File::open(path).ok()?.take(MAX_BYTES as u64).read_to_end(&mut bytes).ok()?;
+    open_regular(path)?.take(MAX_BYTES as u64).read_to_end(&mut bytes).ok()?;
     if bytes.contains(&0) {
         return None;
     }
@@ -767,6 +782,17 @@ mod tests {
 
     fn entry_for(path: &std::path::Path) -> Entry {
         crow_fs::stat_entry(path).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = crate::test_support::TempDir::new("crow-core-fifo-");
+        let fifo = dir.join("pipe.txt");
+        let made = std::process::Command::new("/usr/bin/mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        assert!(open_regular(&fifo).is_none());
+        let gate = AllowAll;
+        assert!(text_excerpt(&fifo, 1, 0, 3, &gate).is_none());
     }
 
     #[test]

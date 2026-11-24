@@ -188,10 +188,11 @@ if [ -n "${CROW_SHOT_PERSONA:-}" ]; then
   "$root/scripts/demo/make-lucide-pack.sh" "$work/config/icon-packs/lucide" >/dev/null
 fi
 
-# The bundled Git package runs only with a grant for its exact digest; a demo-home
-# shot copies just that record from your config, so badges and Projects show.
-if [ -n "${CROW_SHOT_HOME:-}" ] && [ -f "$HOME/.config/crow/plugins.toml" ]; then
-  awk '/^\[/{keep = ($0 == "[plugin.git]")} keep && !/^#/' "$HOME/.config/crow/plugins.toml" >"$work/config/plugins.toml"
+# The bundled Git package runs only with a grant for its exact digest. A demo-home
+# shot has the app write that grant for its own embedded bundle into this run's
+# throwaway config (never your real one: the flag refuses it), so badges and Projects show.
+if [ -n "${CROW_SHOT_HOME:-}" ]; then
+  "$app" --grant-bundled git --config-dir "$work/config"
 fi
 
 # No zoxide on PATH: Recent must not pick up folders this run never visited.

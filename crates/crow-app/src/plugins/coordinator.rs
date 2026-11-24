@@ -196,13 +196,20 @@ impl RowCache {
         self.evict();
     }
 
+    /// Past a limit, drop the least recently used rows down to 90% of it in one
+    /// sorted pass. Evicting one row per insert scanned the whole map each time:
+    /// 128 inserts in a batch cost half a million steps on the main thread.
     fn evict(&mut self) {
-        while self.values.len() > MAX_ROW_VALUES || self.bytes > MAX_ROW_BYTES {
-            let Some((key, _)) =
-                self.values.iter().min_by_key(|(_, row)| row.touch).map(|(key, row)| (key.clone(), row.touch))
-            else {
+        if self.values.len() <= MAX_ROW_VALUES && self.bytes <= MAX_ROW_BYTES {
+            return;
+        }
+        let (target_values, target_bytes) = (MAX_ROW_VALUES / 10 * 9, MAX_ROW_BYTES / 10 * 9);
+        let mut by_age: Vec<(u64, RowKey)> = self.values.iter().map(|(key, row)| (row.touch, key.clone())).collect();
+        by_age.sort_unstable_by_key(|(touch, _)| *touch);
+        for (_, key) in by_age {
+            if self.values.len() <= target_values && self.bytes <= target_bytes {
                 break;
-            };
+            }
             if let Some(row) = self.values.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(row.value.bytes());
             }
@@ -334,6 +341,8 @@ struct PendingHook {
     due: Instant,
     event: HookEvent,
     scope: Option<ScopeKey>,
+    /// Hook extensions that already took this event; a busy one is retried alone.
+    delivered: HashSet<ExtensionId>,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -576,7 +585,7 @@ impl PluginSurfaces {
     }
 
     fn can_submit(&self, extension: &ExtensionId) -> bool {
-        self.tickets.len() < MAX_PASSIVE_REQUESTS && self.in_flight_for(extension) < MAX_PASSIVE_PER_PLUGIN
+        self.tickets.len() < MAX_PASSIVE_REQUESTS && self.in_flight_for(extension) < MAX_PASSIVE_PER_EXTENSION
     }
 
     /// Ask each Status descriptor once per active scope/revision. The display
@@ -1454,6 +1463,9 @@ impl PluginSurfaces {
     }
 
     pub fn drop_surface(&mut self, surface: SurfaceId) {
+        // A closed surface must not fire one last debounced hook.
+        self.hooks.remove(&HookSlot::Scope(surface));
+        self.hooks.remove(&HookSlot::Selection(surface));
         self.surfaces.remove(&surface);
         self.pending_rows.remove(&surface);
         self.status.remove(&surface);
@@ -1499,7 +1511,7 @@ impl PluginSurfaces {
     }
 
     fn queue_hook(&mut self, slot: HookSlot, event: HookEvent, scope: Option<ScopeKey>, now: Instant) {
-        self.hooks.insert(slot, PendingHook { due: now + HOOK_DEBOUNCE, event, scope });
+        self.hooks.insert(slot, PendingHook { due: now + HOOK_DEBOUNCE, event, scope, delivered: HashSet::new() });
     }
 
     /// Send due hooks. Runs from the 100 ms app poll, so one poll interval is
@@ -1521,14 +1533,14 @@ impl PluginSurfaces {
             self.snapshot.of_kind(ExtensionKind::Hook).map(|(_, extension)| &extension.descriptor).collect();
         let mut sent = false;
         for slot in due {
-            let Some((event, event_scope)) = self.hooks.get(&slot).map(|hook| (hook.event.clone(), hook.scope.clone()))
+            let Some((event, event_scope, delivered)) =
+                self.hooks.get(&slot).map(|hook| (hook.event.clone(), hook.scope.clone(), hook.delivered.clone()))
             else {
                 continue;
             };
             let mut busy = false;
-            let mut slot_sent = false;
             for descriptor in &hooks {
-                if self.suppressed.contains(&descriptor.id.plugin) {
+                if self.suppressed.contains(&descriptor.id.plugin) || delivered.contains(&descriptor.id) {
                     continue;
                 }
                 if !self.can_submit(&descriptor.id) {
@@ -1549,7 +1561,9 @@ impl PluginSurfaces {
                             },
                         );
                         sent = true;
-                        slot_sent = true;
+                        if let Some(hook) = self.hooks.get_mut(&slot) {
+                            hook.delivered.insert(descriptor.id.clone());
+                        }
                     }
                     Err(SubmitError::Busy) => busy = true,
                     Err(SubmitError::Stopped) => {
@@ -1558,7 +1572,9 @@ impl PluginSurfaces {
                     }
                 }
             }
-            if busy && !slot_sent {
+            // A busy plugin keeps the event queued for itself; the ones that took it
+            // are not sent it twice.
+            if busy {
                 if let Some(hook) = self.hooks.get_mut(&slot) {
                     hook.due = now + HOOK_DEBOUNCE;
                 }
@@ -1709,7 +1725,7 @@ impl PluginSurfaces {
 
 pub const MAX_ROW_VALUES: usize = 4_096;
 pub const MAX_ROW_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_PASSIVE_PER_PLUGIN: usize = 2;
+pub const MAX_PASSIVE_PER_EXTENSION: usize = 2;
 pub const MAX_PASSIVE_REQUESTS: usize = 16;
 pub const MAX_BATCH: usize = 128;
 pub const HOOK_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -2188,6 +2204,45 @@ mod tests {
         surfaces.track_ticket_for_test(hook.id.clone(), stamp(5, 2), Arc::new(AtomicBool::new(false)), scope.clone());
         assert!(surfaces.finish(&hook.id, stamp(5, 2), RequestResult::Refresh, Instant::now()));
         assert!(surfaces.row_value(&column.id, &scope, &path, 1).is_none());
+    }
+
+    #[test]
+    fn a_closed_surface_leaves_no_queued_hook_behind() {
+        let mut surfaces = PluginSurfaces::default();
+        let now = Instant::now();
+        let (open, closed) = (new_surface(), new_surface());
+        surfaces.notify_scope_changed(open, "/a".into(), now);
+        surfaces.notify_scope_changed(closed, "/b".into(), now);
+        assert_eq!(surfaces.pending_hooks(), 4);
+        surfaces.drop_surface(closed);
+        assert_eq!(surfaces.pending_hooks(), 2, "only the open surface's two hooks remain");
+    }
+
+    #[test]
+    fn cache_eviction_runs_in_batches_and_keeps_the_newest_rows() {
+        let extension = descriptor(ExtensionKind::Column, "lines").id;
+        let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
+        let key = |i: usize| RowKey {
+            extension: extension.clone(),
+            generation: 1,
+            scope: scope.clone(),
+            path: PathBuf::from(format!("/tmp/{i}")),
+            version: 1,
+        };
+        let value = || RowValue { text: "x".into(), spoken: None, tint: None, dim: false };
+        let mut cache = RowCache::default();
+        for i in 0..=MAX_ROW_VALUES {
+            cache.insert(key(i), value());
+        }
+        assert!(cache.len() <= MAX_ROW_VALUES / 10 * 9, "one pass drops well below the limit: {}", cache.len());
+        assert!(cache.peek(&key(MAX_ROW_VALUES)).is_some(), "the newest row stays");
+        assert!(cache.peek(&key(0)).is_none(), "the oldest row went");
+        // The next 100 inserts fit without evicting again.
+        let before = cache.len();
+        for i in MAX_ROW_VALUES + 1..MAX_ROW_VALUES + 101 {
+            cache.insert(key(i), value());
+        }
+        assert_eq!(cache.len(), before + 100);
     }
 
     #[test]

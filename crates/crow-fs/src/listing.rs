@@ -75,10 +75,28 @@ impl Entry {
 
 /// Application bundles and other packages open rather than navigate.
 pub fn is_package_name(name: &str) -> bool {
-    matches!(
-        Path::new(name).extension().and_then(|e| e.to_str()),
-        Some("app" | "bundle" | "framework" | "photoslibrary")
-    )
+    Path::new(name).extension().and_then(|e| e.to_str()).is_some_and(is_package_ext)
+}
+
+/// Extensions of folders that open as one item. The single list for listing,
+/// sizes, rename and duplicate, so they never disagree.
+const PACKAGE_EXTS: [&str; 5] = ["app", "bundle", "framework", "photoslibrary", "pkg"];
+
+/// Whether a folder with this extension is a package. Case-insensitive, like Finder.
+pub(crate) fn is_package_ext(ext: &str) -> bool {
+    PACKAGE_EXTS.iter().any(|known| known.eq_ignore_ascii_case(ext))
+}
+
+/// `is_package_ext` over raw bytes, for names that are not UTF-8.
+pub(crate) fn is_package_ext_bytes(ext: &[u8]) -> bool {
+    PACKAGE_EXTS.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(ext))
+}
+
+/// The error `getattrlistbulk` gives on volumes that cannot do bulk listing
+/// (SMB, NFS, FUSE). macOS spells it two ways.
+#[cfg(target_os = "macos")]
+pub(crate) fn is_unsupported(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP)
 }
 
 /// The same test for a path, for the size walk.
@@ -92,7 +110,7 @@ pub fn list_dir(dir: &Path, show_hidden: bool, mut on_batch: impl FnMut(Vec<Entr
     #[cfg(target_os = "macos")]
     {
         match bulk::list(dir, show_hidden, &mut on_batch) {
-            Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
+            Err(e) if is_unsupported(&e) => {}
             other => return other,
         }
     }
@@ -136,7 +154,7 @@ pub fn list_sample(
     #[cfg(target_os = "macos")]
     {
         match bulk::sample(dir, show_hidden, max_entries, max_examined, cancel) {
-            Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
+            Err(e) if is_unsupported(&e) => {}
             other => return other,
         }
     }
@@ -310,8 +328,9 @@ mod bulk {
         }
         fn time(&mut self) -> Option<SystemTime> {
             let (secs, nanos) = (self.i64()?, self.i64()?);
-            let since = Duration::new(secs.unsigned_abs(), nanos.clamp(0, 999_999_999) as u32);
-            Some(if secs >= 0 { UNIX_EPOCH + since } else { UNIX_EPOCH - since })
+            let seconds = Duration::from_secs(secs.unsigned_abs());
+            let whole = if secs >= 0 { UNIX_EPOCH.checked_add(seconds)? } else { UNIX_EPOCH.checked_sub(seconds)? };
+            whole.checked_add(Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64))
         }
         fn finder_flags(&mut self) -> Option<u16> {
             let finder_info = self.take::<32>()?;
@@ -564,6 +583,33 @@ mod bulk {
         let flags = if common & libc::ATTR_CMN_FLAGS != 0 { c.u32().unwrap_or(0) } else { 0 };
         let added = if common & libc::ATTR_CMN_ADDEDTIME != 0 { c.time() } else { None };
         (flags & UF_HIDDEN != 0, added, finder_flags)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn read_time(seconds: i64, nanoseconds: i64) -> Option<SystemTime> {
+            let mut bytes = Vec::new();
+            bytes.extend(seconds.to_ne_bytes());
+            bytes.extend(nanoseconds.to_ne_bytes());
+            bytes.extend(42_u32.to_ne_bytes());
+            let mut cursor = Cursor { entry: &bytes, at: 0 };
+            let timestamp = cursor.time();
+            assert_eq!(cursor.u32(), Some(42));
+            timestamp
+        }
+
+        #[test]
+        fn minimum_seconds_with_fraction_stays_in_range() {
+            let minimum = UNIX_EPOCH.checked_sub(Duration::from_secs(i64::MIN.unsigned_abs())).unwrap();
+            assert_eq!(read_time(i64::MIN, 1), Some(minimum + Duration::from_nanos(1)));
+        }
+
+        #[test]
+        fn timespec_fraction_is_added_to_signed_seconds() {
+            assert_eq!(read_time(-1, 500_000_000), Some(UNIX_EPOCH - Duration::from_millis(500)));
+            assert_eq!(read_time(1, 5), Some(UNIX_EPOCH + Duration::new(1, 5)));
+        }
     }
 }
 

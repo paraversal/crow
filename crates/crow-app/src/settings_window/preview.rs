@@ -574,10 +574,10 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    pub(super) fn keep_preview_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn keep_preview_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.menu {
             Some(ControlId::PreviewRuleSelect) => {
-                self.choose_preview_rule(self.preview_rule_cursor, cx);
+                self.choose_preview_rule(self.preview_rule_cursor, window, cx);
             }
             Some(ControlId::PreviewAdd) => {
                 let id = self.preview_add_ids.get(self.preview_add_cursor).cloned();
@@ -591,9 +591,9 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    pub(super) fn choose_preview_rule(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn choose_preview_rule(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let options = self.preview_rule_options_cache.clone();
-        self.choose_preview_rule_at(&options, index, cx);
+        self.choose_preview_rule_at(&options, index, window, cx);
     }
 
     /// Select from the options the row was drawn with, so an inventory change
@@ -602,6 +602,7 @@ impl SettingsWindow {
         &mut self,
         options: &[Option<crow_core::RuleLocator>],
         index: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.preview_write_pending {
@@ -625,6 +626,8 @@ impl SettingsWindow {
                 if !self.preview_rule_new {
                     self.preview_new_providers.clear();
                     self.preview_pattern_text.clear();
+                    // The box shows what the draft holds: nothing.
+                    self.preview_pattern.update(cx, |input, cx| input.set_text("", window, cx));
                 }
                 self.preview_rule = None;
                 self.preview_rule_new = true;
@@ -796,8 +799,9 @@ impl SettingsWindow {
                     let toggle =
                         callback(cx, |this, window, cx| this.toggle_menu(ControlId::PreviewRuleSelect, window, cx));
                     let rule_options = self.preview_rule_options_cache.clone();
-                    let pick = select_callback(cx, move |this, index, _, cx| {
-                        this.choose_preview_rule_at(&rule_options, index, cx)
+                    let pick = select_callback(cx, move |this, index, window, cx| {
+                        this.choose_preview_rule_at(&rule_options, index, window, cx);
+                        this.close_menu(window, cx);
                     });
                     let labels = self.preview_rule_labels.clone();
                     let row = controls::dropdown(
@@ -979,8 +983,10 @@ impl SettingsWindow {
             });
             let add_toggle = callback(cx, |this, window, cx| this.toggle_menu(ControlId::PreviewAdd, window, cx));
             let add_ids = self.preview_add_ids.clone();
-            let add_pick =
-                select_callback(cx, move |this, index, _, cx| this.preview_add_provider_at(&add_ids, index, cx));
+            let add_pick = select_callback(cx, move |this, index, window, cx| {
+                this.preview_add_provider_at(&add_ids, index, cx);
+                this.close_menu(window, cx);
+            });
             let add = controls::menu_button(
                 ControlMeta {
                     id: ControlId::PreviewAdd.key(),
@@ -998,14 +1004,16 @@ impl SettingsWindow {
             .on_key_down(cx.listener(|this, event, _, cx| this.preview_type_ahead(ControlId::PreviewAdd, event, cx)));
             let clear_label =
                 if self.preview_scope == PreviewScope::Defaults { "Use built-in Native" } else { "Use inherited list" };
-            let clear = controls::button(
-                ControlId::PreviewClear.key(),
-                clear_label,
-                false,
-                self.preview_control_enabled(ControlId::PreviewClear, cx),
-                self.style(ControlId::PreviewClear, window, theme),
-                callback(cx, |this, _, cx| this.preview_clear(cx)),
-            );
+            let clear = self.preview_control_visible(ControlId::PreviewClear, cx).then(|| {
+                controls::button(
+                    ControlId::PreviewClear.key(),
+                    clear_label,
+                    false,
+                    self.preview_control_enabled(ControlId::PreviewClear, cx),
+                    self.style(ControlId::PreviewClear, window, theme),
+                    callback(cx, |this, _, cx| this.preview_clear(cx)),
+                )
+            });
             rows.push(
                 div()
                     .flex()
@@ -1016,7 +1024,7 @@ impl SettingsWindow {
                     .child(down)
                     .child(remove)
                     .child(add)
-                    .child(clear)
+                    .children(clear)
                     .into_any_element(),
             );
         }

@@ -3,9 +3,29 @@ use std::os::unix::fs::symlink;
 use std::sync::Arc;
 
 use crow_fs::{IconKind, stat_entry};
-use crow_macos::{icon_png, symbol_png, type_icon_png};
+use crow_macos::{ComboDrag, begin_drag, icon_png, symbol_png, type_icon_png};
+use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
 
 fn main() {
+    struct UnneededWindow;
+    impl HasWindowHandle for UnneededWindow {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            panic!("an empty drag must not ask for a window handle");
+        }
+    }
+
+    let empty_drag = ComboDrag {
+        paths: &[],
+        icon_png: &[],
+        label: "",
+        width: 22.,
+        height: 22.,
+        pill_width: 0.,
+        cursor_from_left: 0.,
+        cursor_from_top: 0.,
+    };
+    assert!(!begin_drag(&UnneededWindow, &empty_drag));
+
     let root = tempfile::tempdir().expect("temporary icon fixtures");
     for (alias, plain) in [("link", ".localized"), ("a.txt", "b.txt")] {
         let plain = root.path().join(plain);

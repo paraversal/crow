@@ -562,7 +562,7 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
         })
         .children(footer);
 
-    let now = Instant::now();
+    let now = crate::clock::now();
     let mode = cx.global::<crate::ui::Ui>().feedback.mode;
     let reveal = pane
         .gallery
@@ -614,7 +614,7 @@ fn render_rows(
     let cursor = folder.cursor_ix();
     let multi = folder.selected_count() > 1;
     let motion = pane.view_motion.as_ref().and_then(|motion| {
-        motion.progress(cx.global::<crate::ui::Ui>().feedback.mode, Instant::now()).map(|t| (motion, t))
+        motion.progress(cx.global::<crate::ui::Ui>().feedback.mode, crate::clock::now()).map(|t| (motion, t))
     });
     let rows: Vec<(usize, Entry, bool, Option<std::ops::Range<usize>>)> = range
         .clone()
@@ -942,12 +942,10 @@ fn render_preview(
 }
 
 fn folder_size(_pane: &Pane, entry: &Entry, cx: &gpui::App) -> Option<KnownSize> {
-    if !entry.is_dir || cx.global::<crate::ui::Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+    if !entry.is_dir {
         return None;
     }
-    cx.try_global::<crate::folder_sizes::SizeService>()
-        .and_then(|service| service.0.read(cx).size(&entry.path))
-        .map(Into::into)
+    crate::folder_sizes::visible_size(&entry.path, cx).map(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1202,7 +1200,7 @@ fn folder_heading(
                         .text_ellipsis()
                         .text_size(px(14.))
                         .child(crate::style::display_text(&entry.name).into_owned()),
-                    entry.name.clone(),
+                    crate::style::display_text(&entry.name).into_owned(),
                     None,
                 ))
                 .child(div().text_size(px(11.)).text_color(muted).child(detail)),

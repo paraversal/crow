@@ -15,8 +15,6 @@ use crate::style::{BAND_HEIGHT, color, ui_font};
 use crate::ui::Ui;
 
 /// How a keycap draws: an outlined chord, one filled cap per key, or plain text.
-// U1 only uses Text; U3–U7 draw Outline and Key.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeycapWeight {
     Outline,
@@ -37,8 +35,6 @@ pub struct Keycap {
     text_role: Option<&'static str>,
 }
 
-// `from_binding` and `for_action` are the builders U3–U7 use.
-#[allow(dead_code)]
 impl Keycap {
     /// A literal shortcut, e.g. `"esc"` (`Key` splits it on nothing: use
     /// `from_binding` for a chord).
@@ -216,6 +212,15 @@ pub fn collapse_chevron(
         .on_click(move |_, window, cx| window.dispatch_action(dispatch.boxed_clone(), cx))
 }
 
+/// Tooltip text is often a file name; control characters in it must not reach text
+/// shaping, which rejects newlines.
+fn tooltip_label(label: SharedString) -> SharedString {
+    match crate::style::display_text(&label) {
+        std::borrow::Cow::Borrowed(_) => label,
+        std::borrow::Cow::Owned(clean) => clean.into(),
+    }
+}
+
 /// Attach a tooltip with an optional displayed key. The element keeps its aria
 /// label; the tooltip's own label is `label` plus the key.
 pub fn with_tooltip<E: StatefulInteractiveElement>(
@@ -223,7 +228,7 @@ pub fn with_tooltip<E: StatefulInteractiveElement>(
     label: impl Into<SharedString>,
     keys: Option<SharedString>,
 ) -> E {
-    let label = label.into();
+    let label = tooltip_label(label.into());
     let spoken = tooltip_text(&label, keys.as_deref());
     tooltip(element, label, keys, spoken)
 }
@@ -237,7 +242,7 @@ pub fn with_action_tooltip<E: StatefulInteractiveElement>(
     scope: KeyScope,
     cx: &App,
 ) -> E {
-    let label = label.into();
+    let label = tooltip_label(label.into());
     let keys = keys::text(action, scope, cx);
     let spoken = match keys::spoken_for(action, scope, cx) {
         Some(spoken) => tooltip_text(&label, Some(&spoken)),
@@ -251,6 +256,12 @@ mod tests {
     use super::*;
     use crate::actions::MoveUp;
     use gpui::{TestAppContext, VisualTestContext, point, size};
+
+    #[test]
+    fn tooltip_labels_lose_control_characters() {
+        assert_eq!(tooltip_label("a\nb".into()), "a b");
+        assert_eq!(tooltip_label("plain".into()), "plain");
+    }
 
     #[test]
     fn tooltip_text_joins_label_and_key() {
@@ -302,6 +313,8 @@ pub enum SheetWidth {
     Compact,
     Narrow,
     Wide,
+    /// A width in px chosen by the sheet from its content.
+    Fit(u16),
 }
 
 impl SheetWidth {
@@ -310,6 +323,7 @@ impl SheetWidth {
             SheetWidth::Compact => 360.,
             SheetWidth::Narrow => 520.,
             SheetWidth::Wide => 620.,
+            SheetWidth::Fit(width) => f32::from(width),
         }
     }
 }

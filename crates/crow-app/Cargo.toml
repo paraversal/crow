@@ -14,6 +14,11 @@ path = "src/main.rs"
 # The fuzzer, its generator and invariants. Never enabled in the bundle; H3
 # builds `crow --fuzz` with it, tests get it through `cfg(test)`.
 fuzz = ["dep:rand", "dep:rand_chacha"]
+# `crow --motion-lab`, a fake folder for judging motion and sounds. Off in the bundle.
+motion-lab = []
+# `crow --component-shot`: renders a Crow component to a PNG through GPUI's headless
+# Metal renderer (gpui's `test-support`). Never enabled in the bundle.
+component-shots = ["fuzz", "dep:image", "dep:gpui_apple", "gpui/test-support", "gpui_platform/test-support"]
 
 [dependencies]
 crow-core.workspace = true
@@ -29,6 +34,9 @@ gpui.workspace = true
 gpui_platform.workspace = true
 chrono.workspace = true
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# The Mac text system without a platform (the platform needs the main thread; tests have none).
+gpui_apple = { path = "../../vendor/zed/crates/gpui_apple", features = ["font-kit"], optional = true }
 libc = "0.2"
 notify.workspace = true
 rand = { version = "0.9", optional = true }
@@ -41,7 +49,11 @@ unicode-segmentation = "1"
 url = "2"
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+gpui_apple = { path = "../../vendor/zed/crates/gpui_apple", features = ["font-kit"] }
+# `current_headless_renderer`, for the component shots' tests.
+gpui_platform = { workspace = true, features = ["test-support"] }
 rand = "0.9"
 rand_chacha = "0.9"

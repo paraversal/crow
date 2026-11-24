@@ -77,10 +77,15 @@ pub struct RecoveryItem {
     pub intended: PathBuf,
 }
 
+#[cfg(test)]
+type AfterStageHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
 /// Test-only gates for the batch executor. Production calls it with defaults.
 #[derive(Clone, Default)]
 pub(crate) struct BatchHooks {
     pub before_stage: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    #[cfg(test)]
+    pub after_stage: Option<AfterStageHook>,
     pub before_place: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     pub before_restore: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
@@ -601,7 +606,7 @@ impl Drop for Staging {
     fn drop(&mut self) {
         unregister_staging(&self.container);
         if !self.keep
-            && let Err(err) = remove_tree(&self.container)
+            && let Err(err) = std::fs::remove_dir(&self.container)
         {
             warn(&format!("could not remove batch staging {}: {err}", self.container.display()));
         }
@@ -678,6 +683,17 @@ pub(crate) fn execute_batch(
             };
             return rollback(moves, containers, staged, Vec::new(), error, hooks);
         }
+        staged.push(Staged {
+            index,
+            original: move_.source.clone(),
+            staged: staged_path.clone(),
+            target: move_.target.clone(),
+            identity: move_.identity.clone(),
+        });
+        #[cfg(test)]
+        if let Some(hook) = &hooks.after_stage {
+            hook(&staged_path);
+        }
         match identity(&staged_path) {
             Ok(after) if after.same_after_rename(&move_.identity) => {}
             Ok(_) => {
@@ -694,13 +710,6 @@ pub(crate) fn execute_batch(
                 return rollback(moves, containers, staged, Vec::new(), io_err(&staged_path)(err), hooks);
             }
         }
-        staged.push(Staged {
-            index,
-            original: move_.source.clone(),
-            staged: staged_path,
-            target: move_.target.clone(),
-            identity: move_.identity.clone(),
-        });
     }
 
     if cancel() {
@@ -792,4 +801,19 @@ fn rollback(
         staging.keep = false;
     }
     Err(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_staging_preserves_a_nonempty_container() {
+        let dir = crate::test_support::TempDir::new("batch-drop-nonempty");
+        let staging = Staging::create(&dir).unwrap();
+        let item = staging.container.join("item-0");
+        std::fs::write(&item, "contents").unwrap();
+        drop(staging);
+        assert_eq!(std::fs::read_to_string(item).unwrap(), "contents");
+    }
 }

@@ -117,6 +117,9 @@ type KeyHandler = Box<dyn Fn(QuickLookKey)>;
 
 /// Set what happens when an arrow key reaches an open Quick Look panel.
 pub fn set_quick_look_key_handler(handler: impl Fn(QuickLookKey) + 'static) {
+    if main_thread().is_none() {
+        return;
+    }
     KEY_HANDLER.with(|slot| *slot.borrow_mut() = Some(Box::new(handler)));
 }
 

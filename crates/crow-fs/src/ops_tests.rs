@@ -1588,6 +1588,30 @@ fn batch_stage_failure_restores_the_earlier_items() {
 }
 
 #[test]
+fn batch_post_stage_identity_failure_restores_the_staged_item() {
+    let f = Fixture::new("batch-post-stage-fail");
+    f.file("a.txt", "A");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt")]);
+    f.file("replacement.txt", "replacement bytes");
+    let replacement = f.path("replacement.txt");
+    let hooks = BatchHooks {
+        after_stage: Some(Arc::new(move |staged| {
+            std::fs::rename(&replacement, staged).unwrap();
+        })),
+        ..Default::default()
+    };
+
+    let result = execute_batch(&moves, &|| false, &mut |_| {}, &hooks);
+    assert!(matches!(result, Err(OpError::BatchChanged(_))), "{result:?}");
+    assert_eq!(std::fs::read_to_string(f.path("a.txt")).unwrap(), "replacement bytes");
+    assert!(
+        !std::fs::read_dir(&f.root)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-batch-") })
+    );
+}
+
+#[test]
 fn batch_placement_failure_rolls_back_without_touching_an_external_file() {
     let f = Fixture::new("batch-place-fail");
     f.file("a.txt", "A");
@@ -1742,4 +1766,78 @@ fn batch_blocked_vacating_row_also_blocks_the_row_behind_it() {
     let checked = validate_batch_rename(&inputs, &AtomicBool::new(false)).unwrap();
     assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
     assert!(checked.moves.is_empty(), "a blocked tail invalidates every row waiting behind it");
+}
+
+// ----- audit leftovers: names, hard links, symlinks, deep trees -----
+
+#[test]
+fn keep_both_skips_taken_names_without_spending_its_retries() {
+    let f = Fixture::new("keep-both-many");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    for n in 2..=70 {
+        f.file(&format!("dest/a {n}.txt"), "taken");
+    }
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let mut options = job_options(TestHooks::default());
+    options.resolutions.insert(dest.join("a.txt"), Resolution::KeepBoth);
+    let outcome = f.start_plan(planned, options).terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a 71.txt"], "new");
+    assert_eq!(f.snapshot()["dest/a.txt"], "old");
+}
+
+#[test]
+fn renaming_onto_another_hard_link_is_a_name_conflict() {
+    let f = Fixture::new("hard-link-rename");
+    let a = f.file("a.txt", "x");
+    std::fs::hard_link(&a, f.path("b.txt")).unwrap();
+    let error = plan(Request::Rename { path: a.clone(), new_name: "b.txt".into() }).unwrap_err();
+    assert!(matches!(error, OpError::NameTaken(_)), "{error:?}");
+    assert!(f.path("a.txt").exists() && f.path("b.txt").exists());
+}
+
+#[test]
+fn a_symlink_to_a_folder_is_duplicated_as_a_file() {
+    let f = Fixture::new("symlink-duplicate");
+    f.dir("target");
+    std::os::unix::fs::symlink("target", f.path("link.txt")).unwrap();
+    let outcome = f.run(Request::Duplicate { paths: paths(vec![f.path("link.txt")]) });
+    ok(&outcome);
+    assert!(f.path("link copy.txt").symlink_metadata().is_ok(), "{:?}", f.snapshot());
+}
+
+#[test]
+fn undoing_a_move_across_volumes_reports_a_source_that_cannot_be_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("undo-source-kept");
+    f.file("dest/x.txt", "x");
+    f.dir("src");
+    let record = Record {
+        label: "Move".into(),
+        steps: vec![Step::Moved { from: f.path("src/x.txt"), to: f.path("dest/x.txt") }],
+    };
+    std::fs::set_permissions(f.path("dest"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    FORCE_CROSS_DEVICE.store(true, Ordering::Relaxed);
+    let result = undo(&record, &f.trash);
+    FORCE_CROSS_DEVICE.store(false, Ordering::Relaxed);
+    std::fs::set_permissions(f.path("dest"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(result, Err(OpError::SourceKept { .. })), "{result:?}");
+    assert_eq!(f.snapshot()["src/x.txt"], "x", "the copy is in place");
+}
+
+#[test]
+fn a_very_deep_tree_is_measured_and_planned_without_recursion() {
+    // Deep enough to need a heap worklist and still inside PATH_MAX.
+    let f = Fixture::new("deep");
+    let mut rel = String::from("deep");
+    for _ in 0..180 {
+        rel.push_str("/d");
+    }
+    f.file(&format!("{rel}/leaf.txt"), "12345");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("deep")]), into: f.dir("dest") }).unwrap();
+    assert_eq!(planned.items[0].bytes, 5);
+    let measured = crate::sizes::measure(&f.path("deep"), &crate::sizes::Cancel::new()).unwrap();
+    assert_eq!((measured.bytes, measured.folders), (5, 180));
 }
