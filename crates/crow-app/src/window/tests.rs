@@ -438,6 +438,60 @@ fn layout_oracle_holds_across_window_widths(cx: &mut TestAppContext) {
     }
 }
 
+/// The layout oracle is not vacuous: bands that overlap, or leave the window, are named.
+#[gpui::test]
+fn layout_oracle_catches_overlapping_and_escaping_chrome(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, ParentElement, Render, Styled, div};
+    struct Bad;
+    impl Render for Bad {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().debug_selector(|| "toolbar".into()).w(px(300.)).h(px(50.)))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(20.))
+                        .left(px(0.))
+                        .w(px(300.))
+                        .h(px(50.))
+                        .debug_selector(|| "path-bar".into()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(200.))
+                        .left(px(-120.))
+                        .w(px(300.))
+                        .h(px(50.))
+                        .debug_selector(|| "preview".into()),
+                )
+        }
+    }
+    let (_view, cx) = cx.add_window_view(|_, _| Bad);
+    cx.simulate_resize(size(px(800.), px(600.)));
+    let found = cx.update(|window, _| crate::fuzz::layout_violations(window));
+    assert!(found.iter().any(|v| v.detail.contains("toolbar") && v.detail.contains("overlaps path-bar")), "{found:?}");
+    assert!(found.iter().any(|v| v.detail.contains("preview") && v.detail.contains("leaves the window")), "{found:?}");
+}
+
+/// The sidebar-toggle and Projects oracles name a mismatch.
+#[gpui::test]
+fn sidebar_oracles_name_a_mismatch(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-oracles");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, false)).is_empty());
+    let found = cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, true));
+    assert!(found.iter().any(|v| v.detail.contains("hidden but drawn")), "{found:?}");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, true)).is_empty());
+    let found = cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, false));
+    assert!(found.iter().any(|v| v.detail.contains("not on screen")), "{found:?}");
+}
+
 #[gpui::test]
 fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
     let root = fixture("assembled");

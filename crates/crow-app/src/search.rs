@@ -2029,8 +2029,8 @@ impl SearchView {
     /// inside the folder and still exists, and a plain one-word name query finds every
     /// visible, unskipped name that contains it (the engine's fuzzy hits are a superset
     /// of the substring ones). `strict` is off while the disk changes under a run: the
-    /// overlay does not watch it, so only the folder check applies. Only for the Cmd-F overlay over a folder; destinations
-    /// read Spotlight's index and `This Mac` leaves the folder.
+    /// overlay does not watch it, so only the folder check applies. Only for the Cmd-F overlay
+    /// over a folder; destinations read Spotlight's index and `This Mac` leaves the folder.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn disk_violations(&self, cx: &App, strict: bool) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
