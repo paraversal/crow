@@ -110,6 +110,24 @@ pub fn play(event: Event, cx: &mut App) {
     }
 }
 
+/// The gap between the sounds of [`play_set`].
+const SAMPLE_GAP: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Play each sound of the current set in turn, for the Settings Play button.
+pub fn play_set(cx: &mut App) {
+    let events = motion::sample(cx.global::<Ui>().feedback.sound);
+    let Some((&first, rest)) = events.split_first() else { return };
+    play(first, cx);
+    let rest = rest.to_vec();
+    cx.spawn(async move |cx| {
+        for event in rest {
+            cx.background_executor().timer(SAMPLE_GAP).await;
+            cx.update(|cx| play(event, cx));
+        }
+    })
+    .detach();
+}
+
 /// After `clip.keep`, ramp the volume to zero over `clip.fade` and stop, unless a
 /// newer sound started meanwhile (it owns the volume then).
 fn clip_after(sound: Sound, volume: f32, clip: Clip, generation: u64, cx: &mut App) {

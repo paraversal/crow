@@ -547,7 +547,7 @@ impl ControlId {
     /// carry one (see the caption rules in the Settings plan); keep them short.
     fn description(self, _cx: &App) -> Option<SharedString> {
         let text = match self {
-            ControlId::FolderTarget => "For New Folder, New File and Paste.",
+            ControlId::FolderTarget => "For New Folder, New File, Paste and the folder menu.",
             ControlId::Terminal => "The app Open Terminal Here opens.",
             ControlId::Motion => "Auto follows Reduce Motion in macOS.",
             ControlId::Theme => "Add more in ~/.config/themes.",
@@ -570,10 +570,10 @@ impl ControlId {
     fn enabled(self, cx: &App) -> bool {
         let ui = cx.global::<Ui>();
         match self {
+            ControlId::PlaySound => ui.feedback.sound != crow_core::motion::SoundSet::Off,
             ControlId::EditSettings
             | ControlId::ShowConfig
             | ControlId::Plugins
-            | ControlId::PlaySound
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
@@ -1700,7 +1700,7 @@ impl SettingsWindow {
             | ControlId::Keymap
             | ControlId::Tips
             | ControlId::FolderSizes => self.toggle_bool(id, cx),
-            ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
+            ControlId::PlaySound => crate::feedback::play_set(cx),
             ControlId::EditSettings => ui::edit_settings_file(cx),
             ControlId::Plugins => self.activate_plugin(cx),
             ControlId::NewSavedQuery => self.open_saved_query_editor(None, window, cx),
@@ -6624,5 +6624,32 @@ permissions = { fs = "none" }
         vcx.simulate_keystrokes("enter");
         assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()), "a broken keys.toml blocks capture");
         assert!(view.read_with(&vcx, |v, _| v.keyboard.notice.is_some()));
+    }
+    #[gpui::test]
+    fn play_sounds_the_set_in_turn_and_is_off_with_sounds_off(cx: &mut TestAppContext) {
+        let (_view, mut vcx) = open_settings(cx);
+        let plays = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                crate::effects::recording(cx)
+                    .expect("recording effects")
+                    .take_calls()
+                    .iter()
+                    .filter(|call| matches!(call, crate::effects::Call::PlaySound(..)))
+                    .count()
+            })
+        };
+        vcx.update(|_, cx| {
+            cx.global_mut::<Ui>().feedback.sound = SoundSet::Crow;
+            assert!(ControlId::PlaySound.enabled(cx));
+            crate::feedback::play_set(cx);
+        });
+        assert_eq!(plays(&mut vcx), 1, "the first sound is immediate");
+        vcx.executor().advance_clock(std::time::Duration::from_secs(5));
+        vcx.run_until_parked();
+        assert_eq!(plays(&mut vcx), 5, "the rest follow, six in all");
+        vcx.update(|_, cx| {
+            cx.global_mut::<Ui>().feedback.sound = SoundSet::Off;
+            assert!(!ControlId::PlaySound.enabled(cx), "nothing to play with Sounds off");
+        });
     }
 }
