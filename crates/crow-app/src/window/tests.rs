@@ -19220,6 +19220,39 @@ fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContex
     assert!(finals.windows(2).all(|w| w[0] == w[1]), "every mode ends on the same band: {finals:?}");
 }
 
+/// The band's last animated frame is the settled layout, so nothing jumps when the
+/// motion ends (the field once stopped 20 px short and the buttons were 5 px off).
+#[gpui::test]
+fn the_search_band_ends_its_motion_without_a_jump(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for width in [900., 1280.] {
+        let root = fixture("band-jump");
+        let (view, mut cx) = open_sized(cx, &root, width, 700.);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+        cx.simulate_keystrokes("cmd-f");
+        let ids = ["search-field", "search-save", "search-done", "search-match-all"];
+        let sample = |cx: &mut VisualTestContext| -> Vec<(f32, f32)> {
+            ids.iter()
+                .map(|id| {
+                    let b = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} at {width}"));
+                    (f32::from(b.origin.x), f32::from(b.size.width))
+                })
+                .collect()
+        };
+        // Just inside the motion's last frame.
+        step_motion(&view, &mut cx, crow_core::motion::ms::SEARCH_BAND - 4);
+        let last = sample(&mut cx);
+        step_motion(&view, &mut cx, 20);
+        let settled = sample(&mut cx);
+        for ((id, last), settled) in ids.iter().zip(&last).zip(&settled) {
+            assert!(
+                (last.0 - settled.0).abs() < 1.0 && (last.1 - settled.1).abs() < 1.0,
+                "{id} at {width}: last frame {last:?} vs settled {settled:?}"
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn the_filter_row_opens_and_closes_its_height_in_full_only(cx: &mut TestAppContext) {
     use crow_core::motion::Effective;
