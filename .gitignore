@@ -3,6 +3,7 @@
 .DS_Store
 /ignore
 /.pi
+/.claude
 
 # Plans, progress logs, the roadmap and design boards stay local.
 /docs/plans/
