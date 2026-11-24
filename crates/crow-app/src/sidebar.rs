@@ -1049,6 +1049,35 @@ impl Sidebar {
         self.focus_handle(cx)
     }
 
+    /// The Projects oracle: every Projects row is a direct child of the configured root
+    /// (the rows are canonical paths, so a symlinked root is compared canonicalised
+    /// too), and there are none without a root.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn project_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let ui = cx.global::<Ui>();
+        let root = ui.sidebar.project_root(&ui.home);
+        // io-ok: fuzz invariant, test/fuzz builds only
+        let canonical = root.as_ref().and_then(|root| root.canonicalize().ok());
+        let mut out = Vec::new();
+        for row in self.selectable(cx) {
+            let Row::PluginItem { section, row } = &row else { continue };
+            if section != crate::git::PROJECTS_SECTION {
+                continue;
+            }
+            let Some(path) = row.folder_path() else { continue };
+            let parent = path.parent();
+            let child_of_root = parent.is_some() && (parent == root.as_deref() || parent == canonical.as_deref());
+            if !child_of_root {
+                out.push(Violation::new(
+                    "projects",
+                    format!("Projects row {} is not directly inside the root {root:?}", path.display()),
+                ));
+            }
+        }
+        out
+    }
+
     /// Bounds for selectable row `i`, from the prepaint layout.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn debug_row_bounds(&self, i: usize, _cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {

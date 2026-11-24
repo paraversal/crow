@@ -340,6 +340,29 @@ fn search_count_is_announced(cx: &mut TestAppContext) {
     assert_eq!(search.read_with(&cx, |search, _| search.footer_summary_text()), "1 result");
 }
 
+/// The search oracle accepts a finished search, and names a ghost hit and a missed name.
+#[gpui::test]
+fn search_oracle_checks_hits_against_the_disk(cx: &mut TestAppContext) {
+    let root = fixture("search-oracle");
+    std::fs::write(root.join("alpha/notes-two.txt"), "x").expect("second hit");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    let check = |cx: &mut VisualTestContext| search.read_with(cx, |search, cx| search.disk_violations(cx, true));
+    assert!(search.read_with(&cx, |search, _| search.result_count()) >= 2);
+    assert!(check(&mut cx).is_empty(), "a finished search agrees with the disk: {:?}", check(&mut cx));
+    // A hit whose file is gone is a ghost.
+    std::fs::remove_file(root.join("notes.txt")).expect("remove a hit");
+    let found = check(&mut cx);
+    assert!(found.iter().any(|v| v.check == "search" && v.detail.contains("not on disk")), "{found:?}");
+    // A name the results omit is reported.
+    std::fs::write(root.join("beta/notes-three.txt"), "x").expect("new match");
+    let found = check(&mut cx);
+    assert!(found.iter().any(|v| v.detail.contains("notes-three.txt") && v.detail.contains("omit")), "{found:?}");
+}
+
 #[gpui::test]
 fn back_closes_search_like_escape(cx: &mut TestAppContext) {
     let root = fixture("search-back");
@@ -368,6 +391,51 @@ fn back_closes_search_like_escape(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-[");
     settle(&view, &mut cx);
     assert_ne!(location(&cx), before);
+}
+
+/// Closing the first tab leaves a ghost with the sentinel index `usize::MAX`; drawing it
+/// added 1 to that index and panicked in debug builds (found by the layout shakeout).
+#[gpui::test]
+fn closing_the_first_tab_draws_its_ghost(cx: &mut TestAppContext) {
+    let root = fixture("first-tab-ghost");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = crow_core::motion::Effective::Full);
+    for _ in 0..2 {
+        cx.simulate_keystrokes("cmd-t");
+        finish_motion(&view, &mut cx);
+    }
+    for _ in 0..2 {
+        cx.simulate_keystrokes("ctrl-shift-tab");
+    }
+    finish_motion(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-w");
+    assert!(cx.debug_bounds("tab-ghost").is_some(), "the closing first tab is still drawn while it shrinks");
+    finish_motion(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |window, _| window.tab_count()), 2);
+}
+
+/// The layout oracle sees the chrome (so it isn't vacuous) and finds nothing wrong
+/// across a sweep of window widths, with and without the right sidebar.
+#[gpui::test]
+fn layout_oracle_holds_across_window_widths(cx: &mut TestAppContext) {
+    let root = fixture("layout-oracle");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    for name in ["toolbar", "sidebar", "path-bar", "back", "toolbar-search"] {
+        assert!(cx.debug_bounds(name).is_some(), "{name} is drawn, so the oracle has something to check");
+    }
+    for preview in [false, true] {
+        if preview {
+            cx.simulate_keystrokes("shift-cmd-p");
+        }
+        for width in [1600., 1280., 1000., 800., 640., 520.] {
+            cx.simulate_resize(size(px(width), px(600.)));
+            settle(&view, &mut cx);
+            cx.executor().advance_clock(Duration::from_secs(2));
+            cx.run_until_parked();
+            let found = cx.update(|window, _| crate::fuzz::layout_violations(window));
+            assert!(found.is_empty(), "preview={preview} width={width}: {found:?}");
+        }
+    }
 }
 
 #[gpui::test]
@@ -15159,9 +15227,10 @@ fn reset_tree(root: &Path, files: usize, edge: &EdgeTree, seed: u64) {
 
 fn fuzz_sidebar_toml(root: &Path) -> String {
     format!(
-        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
+        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n[projects]\nroot = \"{}\"\n",
         root.join("alpha").display(),
-        root.join("beta").display()
+        root.join("beta").display(),
+        root.display()
     )
 }
 
@@ -15398,8 +15467,11 @@ fn check_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) ->
     let mut out = Vec::new();
     for handle in handles {
         if let Some(view) = handle.downcast::<CrowWindow>()
-            && let Ok(found) =
-                view.update(&mut cx.cx, |window_view, window, cx| window_view.check_invariants(window, cx, deep, root))
+            && let Ok(found) = view.update(&mut cx.cx, |window_view, window, cx| {
+                // Only the window in front has a focus to check: another window (Settings,
+                // a second Crow window) being key leaves this one's handle stale by design.
+                window_view.check_invariants_with_focus(window, cx, deep, root, window.is_window_active())
+            })
         {
             out.extend(found);
         } else if let Some(view) = handle.downcast::<crate::settings_window::SettingsWindow>()
@@ -15466,6 +15538,14 @@ fn apply_and_check(
         }
         keep_in_tree(view, tree, cx);
         cx.run_until_parked();
+        if deep {
+            // Panels slide; the layout oracle judges the layout at rest.
+            for _ in 0..3 {
+                cx.executor().advance_clock(Duration::from_millis(400));
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+            }
+        }
         if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
             return Err(violation);
         }
@@ -15509,6 +15589,15 @@ fn fuzz_setup(
     close_all_windows(cx);
     reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
+    // The Projects section lists Git repositories directly inside the root: two real ones.
+    for repo in ["alpha", "beta"] {
+        let status = std::process::Command::new("git").arg("-C").arg(tree.join(repo)).args(["init", "-q"]).status();
+        assert!(status.is_ok_and(|status| status.success()), "git init {repo}");
+    }
+    cx.update(|_, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        cx.global_mut::<crate::operations::Operations>().disk_churn = options.churn;
+    });
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
     fuzz_seed_m9(&view, tree, &mut cx);
     fuzz_confine(tree, &mut cx);

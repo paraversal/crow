@@ -372,6 +372,10 @@ pub struct Operations {
     /// folder. Anything else is refused and recorded in `refused`.
     #[cfg(any(test, feature = "fuzz"))]
     pub jail: Option<PathBuf>,
+    /// Fuzz runs only: files come and go behind the app's back, so a search overlay (which
+    /// does not watch the disk) may legitimately show hits that have since changed.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub disk_churn: bool,
     #[cfg(any(test, feature = "fuzz"))]
     pub refused: Vec<PathBuf>,
     /// Tests hold planning so a queue can be inspected deterministically.
@@ -532,6 +536,8 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         progress_generation: 0,
         #[cfg(any(test, feature = "fuzz"))]
         jail: None,
+        #[cfg(any(test, feature = "fuzz"))]
+        disk_churn: false,
         #[cfg(any(test, feature = "fuzz"))]
         refused: Vec::new(),
         #[cfg(test)]

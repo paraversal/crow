@@ -514,6 +514,127 @@ pub fn a11y_violations(window: &gpui::Window, check: &'static str) -> Vec<Violat
     }
 }
 
+/// Fixed chrome bands, in the order they are checked: each must sit inside the
+/// window, and the toolbar's buttons must sit inside the toolbar.
+#[cfg(test)]
+const CHROME: [&str; 4] = ["toolbar", "sidebar", "preview", "path-bar"];
+/// Chrome pairs that never share pixels: the bands stack or sit side by side.
+#[cfg(test)]
+const CHROME_APART: [(&str, &str); 2] = [("toolbar", "path-bar"), ("sidebar", "preview")];
+/// The toolbar's own controls: inside the toolbar, never on top of each other.
+#[cfg(test)]
+const TOOLBAR_ITEMS: [&str; 5] = ["back", "forward", "toolbar-folder-menu", "toolbar-go-to", "toolbar-search"];
+
+/// Layout oracle: fixed chrome stays inside the window and does not overlap its
+/// neighbours, and the toolbar's controls stay inside the toolbar without
+/// overlapping each other. Empty in the live fuzzer, which builds without
+/// GPUI's `test-support` and records no bounds.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn layout_violations(window: &gpui::Window) -> Vec<Violation> {
+    #[cfg(test)]
+    {
+        use gpui::{Bounds, Pixels, px};
+        let slack = px(1.);
+        let view: Bounds<Pixels> = Bounds { origin: gpui::point(px(0.), px(0.)), size: window.viewport_size() };
+        let mut out = Vec::new();
+        for name in CHROME {
+            let Some(bounds) = window.debug_bounds(name) else { continue };
+            if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+                continue;
+            }
+            // A closed side panel stays laid out, parked wholly outside the window.
+            let parked = bounds.left() >= view.right() - slack
+                || bounds.right() <= view.left() + slack
+                || bounds.top() >= view.bottom() - slack
+                || bounds.bottom() <= view.top() + slack;
+            if parked {
+                continue;
+            }
+            if bounds.left() < view.left() - slack
+                || bounds.top() < view.top() - slack
+                || bounds.right() > view.right() + slack
+                || bounds.bottom() > view.bottom() + slack
+            {
+                let all: Vec<String> = CHROME
+                    .iter()
+                    .filter_map(|n| window.debug_bounds(n).map(|b| format!("{n} x {}..{}", b.left(), b.right())))
+                    .collect();
+                out.push(Violation::new(
+                    "layout",
+                    format!("{name} {bounds:?} leaves the window {:?} ({})", view.size, all.join(", ")),
+                ));
+            }
+        }
+        let overlap = |a: Bounds<Pixels>, b: Bounds<Pixels>| {
+            a.left() < b.right() - slack
+                && b.left() < a.right() - slack
+                && a.top() < b.bottom() - slack
+                && b.top() < a.bottom() - slack
+        };
+        for (a, b) in CHROME_APART {
+            if let (Some(x), Some(y)) = (window.debug_bounds(a), window.debug_bounds(b))
+                && overlap(x, y)
+            {
+                out.push(Violation::new("layout", format!("{a} {x:?} overlaps {b} {y:?}")));
+            }
+        }
+        let toolbar = window.debug_bounds("toolbar");
+        let items: Vec<(&str, Bounds<Pixels>)> =
+            TOOLBAR_ITEMS.iter().filter_map(|name| window.debug_bounds(name).map(|bounds| (*name, bounds))).collect();
+        for (name, bounds) in &items {
+            if let Some(toolbar) = toolbar
+                && (bounds.left() < toolbar.left() - slack
+                    || bounds.right() > toolbar.right() + slack
+                    || bounds.top() < toolbar.top() - slack
+                    || bounds.bottom() > toolbar.bottom() + slack)
+            {
+                out.push(Violation::new("layout", format!("{name} {bounds:?} leaves the toolbar {toolbar:?}")));
+            }
+        }
+        for (i, (a, x)) in items.iter().enumerate() {
+            for (b, y) in &items[i + 1..] {
+                if overlap(*x, *y) {
+                    out.push(Violation::new("layout", format!("{a} {x:?} overlaps {b} {y:?}")));
+                }
+            }
+        }
+        out
+    }
+    #[cfg(not(test))]
+    {
+        let _ = window;
+        Vec::new()
+    }
+}
+
+/// Sidebar-toggle oracle, at rest: a hidden sidebar is not on screen, and a shown
+/// one is. Test-only, like the layout oracle.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn sidebar_toggle_violations(window: &gpui::Window, hidden: bool) -> Vec<Violation> {
+    #[cfg(test)]
+    {
+        use gpui::px;
+        let bounds = window.debug_bounds("sidebar");
+        let on_screen = bounds.is_some_and(|bounds| {
+            bounds.size.width > px(1.)
+                && bounds.right() > px(1.)
+                && bounds.left() < window.viewport_size().width - px(1.)
+        });
+        match (hidden, on_screen) {
+            (true, true) => vec![Violation::new("sidebar", format!("the sidebar is hidden but drawn at {bounds:?}"))],
+            (false, false) => {
+                vec![Violation::new("sidebar", format!("the sidebar is shown but not on screen: {bounds:?}"))]
+            }
+            _ => Vec::new(),
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (window, hidden);
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 pub fn state(view: &gpui::Entity<crate::window::CrowWindow>, cx: &mut gpui::VisualTestContext) -> GenState {
     cx.update(|window, cx| state_for(view.read(cx), window, cx))
