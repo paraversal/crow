@@ -298,6 +298,41 @@ fn renames_check_names_and_handle_case_changes() {
     assert!(f.snapshot().contains_key("Notes.txt"));
 }
 
+/// Activity bug: New File, Rename, then Undo on the older New File entry left the
+/// file in place and still reported the undo as done.
+#[test]
+fn undoing_an_older_creation_follows_later_renames_and_never_succeeds_empty() {
+    let f = Fixture::new("forward");
+    let created = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&created);
+    let folder = f.run(Request::NewFolder { parent: f.root.clone() });
+    ok(&folder);
+    f.file("untitled folder/inner.txt", "i");
+    let renamed = f.run(Request::Rename { path: f.path("untitled"), new_name: "Notes".into() });
+    ok(&renamed);
+    let moved = f.run(Request::Move { paths: paths(vec![f.path("Notes")]), into: f.path("untitled folder") });
+    ok(&moved);
+    let folder_renamed = f.run(Request::Rename { path: f.path("untitled folder"), new_name: "Docs".into() });
+    ok(&folder_renamed);
+    assert!(f.path("Docs/Notes").is_file());
+
+    // Without forwarding the stale path is gone: that is an error, not an empty success.
+    assert!(matches!(undo(&created.record, &f.trash), Err(OpError::NotFound(_))));
+    assert!(f.path("Docs/Notes").is_file(), "the refused undo changed nothing");
+
+    let later = [&renamed.record, &moved.record, &folder_renamed.record];
+    let forwarded = created.record.forwarded(later);
+    assert_eq!(forwarded.steps, vec![Step::Created(f.path("Docs/Notes"))]);
+    let reversed = undo(&forwarded, &f.trash).expect("the forwarded undo trashes the file where it is now");
+    assert_eq!(reversed.steps.len(), 1);
+    assert!(!f.path("Docs/Notes").exists());
+    assert_eq!(f.snapshot()["Docs/inner.txt"], "i", "nothing else moved");
+
+    // An older rename follows the later parent rename too.
+    let older_move = moved.record.forwarded([&folder_renamed.record]);
+    assert!(matches!(&older_move.steps[..], [Step::Moved { to, .. }] if *to == f.path("Docs/Notes")));
+}
+
 #[test]
 fn new_folder_trash_and_permanent_delete() {
     let f = Fixture::new("misc");

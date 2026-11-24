@@ -11027,6 +11027,34 @@ fn undo_arrives_in_full_motion(cx: &mut TestAppContext) {
     );
 }
 
+/// Activity bug: New File, rename it, then Undo on the New File entry in Activity
+/// did nothing but still marked the entry undone.
+#[gpui::test]
+fn activity_undo_of_a_renamed_new_file_trashes_it(cx: &mut TestAppContext) {
+    let root = fixture("activity-undo-renamed");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-alt-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    cx.simulate_input("Notes");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("Notes").is_file());
+    let labels: Vec<String> =
+        cx.read(|cx| cx.global::<Operations>().log.iter().map(|e| e.record.label.clone()).collect());
+    assert_eq!(labels.len(), 2, "New File and Rename: {labels:?}");
+
+    cx.simulate_keystrokes("cmd-alt-l");
+    cx.run_until_parked();
+    let undo = cx.debug_bounds("activity-undo-0").expect("the New File entry offers Undo").center();
+    cx.simulate_click(undo, Default::default());
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!root.join("Notes").exists(), "the renamed file went to the Trash");
+    assert!(!root.join("untitled").exists());
+    assert!(cx.read(|cx| cx.global::<Operations>().log[0].undone), "the entry reads undone");
+}
+
 #[gpui::test]
 fn new_file_creates_and_renames(cx: &mut TestAppContext) {
     let root = fixture("newfile");

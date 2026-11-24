@@ -935,7 +935,9 @@ impl CrowWindow {
                 // Rename labels carry both names; errors carry the path at fault.
                 let label = crate::style::display_text(&e.record.label).into_owned();
                 let state = crate::style::display_text(&state).into_owned();
-                (i, label, format!("{} {state}", when.format("%H:%M")), e.record.is_undoable() && !e.undone)
+                let when = when.format("%H:%M").to_string();
+                let when = if state.is_empty() { when } else { format!("{when} {state}") };
+                (i, label, when, e.record.is_undoable() && !e.undone)
             })
             .collect();
         let mut previous = std::mem::take(&mut self.activity_controls);
@@ -1129,6 +1131,7 @@ impl CrowWindow {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .child(label)
