@@ -1697,8 +1697,9 @@ impl CrowWindow {
                     .role(Role::Tab)
                     .aria_label(label.clone())
                     .aria_selected(selected)
-                    .aria_position_in_set(i + 1)
-                    .aria_size_of_set(count)
+                    // A closing tab's ghost uses a sentinel index (`usize::MAX - n`) and is not a
+                    // member of the set; adding to it overflowed (debug panic, fuzz seed 1795532296032745000).
+                    .when(live, |tab| tab.aria_position_in_set(i + 1).aria_size_of_set(count))
                     .flex_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -1904,6 +1905,8 @@ impl CrowWindow {
                 .filter(|(_, is_error)| *is_error)
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
+        // A click on the pill hides that error until a different one shows.
+        let error = error.filter(|error| ops.dismissed_error.as_ref() != Some(&error.text));
         // A pane's load error names its folder; a newline there reaches GPUI's shaping.
         let error = error.map(|error| BarError {
             text: crate::style::display_text(&error.text).into_owned().into(),
@@ -4544,6 +4547,12 @@ impl CrowWindow {
                 }
             }
         }
+        if deep
+            && !busy
+            && let Some(search) = &self.search
+        {
+            out.extend(search.read(cx).disk_violations(cx, !cx.global::<crate::operations::Operations>().disk_churn));
+        }
 
         match window.focused(cx) {
             // Only the active window's focus is user-visible. GPUI keeps a
@@ -4599,6 +4608,14 @@ impl CrowWindow {
         }
 
         out.extend(crate::fuzz::a11y_violations(window, "a11y"));
+        // Panels slide in and out, so the layout is only judged at rest: after a settle.
+        if deep && !busy {
+            out.extend(crate::fuzz::layout_violations(window));
+            if self.left_look(cx).is_none() {
+                out.extend(crate::fuzz::sidebar_toggle_violations(window, cx.global::<Ui>().sidebar_hidden));
+            }
+            out.extend(self.sidebar.read(cx).project_violations(cx));
+        }
         out
     }
 }

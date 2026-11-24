@@ -360,6 +360,9 @@ pub struct Operations {
     /// Bumped by every message, so an old timer cannot clear a newer one and the
     /// bar can fade in a new one.
     pub message_generation: u64,
+    /// The error text a click on the bar's error pill dismissed. The same text stays
+    /// hidden until a new message arrives; a different error shows as usual.
+    pub dismissed_error: Option<SharedString>,
     /// The batch-rename cursor's final path, captured when the sheet submitted.
     pub batch_cursor: Option<PathBuf>,
     /// The fraction a finished operation's bar shows while it fades, and its id.
@@ -369,6 +372,10 @@ pub struct Operations {
     /// folder. Anything else is refused and recorded in `refused`.
     #[cfg(any(test, feature = "fuzz"))]
     pub jail: Option<PathBuf>,
+    /// Fuzz runs only: files come and go behind the app's back, so a search overlay (which
+    /// does not watch the disk) may legitimately show hits that have since changed.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub disk_churn: bool,
     #[cfg(any(test, feature = "fuzz"))]
     pub refused: Vec<PathBuf>,
     /// Tests hold planning so a queue can be inspected deterministically.
@@ -455,13 +462,16 @@ impl Operations {
     }
 }
 
-/// Info messages clear after this long; errors stay until something replaces them.
+/// Info messages clear after this long.
 const MESSAGE_LIFETIME: Duration = Duration::from_secs(5);
+/// Errors stay a little longer, so they can be read; a click dismisses one sooner.
+pub const ERROR_LIFETIME: Duration = Duration::from_secs(8);
 
 impl Global for Operations {}
 
-/// Show a message in the bar. Info messages retire after five seconds (Q2); errors
-/// stay until the next operation, navigation or a fixed config file.
+/// Show a message in the bar. Info messages retire after five seconds (Q2), errors
+/// after eight; a click on the error pill, the next operation or navigation clears
+/// one sooner.
 pub fn message(text: impl Into<SharedString>, is_error: bool, cx: &mut App) {
     // Errors name the file at fault; GPUI's text shaping rejects a newline in a name.
     let text: SharedString = text.into();
@@ -470,13 +480,12 @@ pub fn message(text: impl Into<SharedString>, is_error: bool, cx: &mut App) {
         let ops = cx.global_mut::<Operations>();
         ops.message_generation += 1;
         ops.message = Some((text, is_error));
+        ops.dismissed_error = None;
         ops.message_generation
     };
-    if is_error {
-        return;
-    }
+    let lifetime = if is_error { ERROR_LIFETIME } else { MESSAGE_LIFETIME };
     cx.spawn(async move |cx| {
-        cx.background_executor().timer(MESSAGE_LIFETIME).await;
+        cx.background_executor().timer(lifetime).await;
         cx.update(|cx| {
             let ops = cx.global_mut::<Operations>();
             if ops.message_generation == generation {
@@ -486,6 +495,17 @@ pub fn message(text: impl Into<SharedString>, is_error: bool, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// A click on the bar's error pill: hide this error until a different one shows.
+pub fn dismiss_error(text: SharedString, cx: &mut App) {
+    let ops = cx.global_mut::<Operations>();
+    if ops.message.as_ref().is_some_and(|(message, is_error)| *is_error && *message == text) {
+        ops.message_generation += 1;
+        ops.message = None;
+    }
+    ops.dismissed_error = Some(text);
+    cx.refresh_windows();
 }
 
 /// Drop the message now; a pending info timer becomes a no-op.
@@ -510,11 +530,14 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         clipboard: None,
         message: None,
         message_generation: 0,
+        dismissed_error: None,
         batch_cursor: None,
         progress_done: None,
         progress_generation: 0,
         #[cfg(any(test, feature = "fuzz"))]
         jail: None,
+        #[cfg(any(test, feature = "fuzz"))]
+        disk_churn: false,
         #[cfg(any(test, feature = "fuzz"))]
         refused: Vec::new(),
         #[cfg(test)]

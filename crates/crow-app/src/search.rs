@@ -1797,6 +1797,10 @@ impl SearchView {
     /// After that, keep the keyboard cursor on the same path when rows above it move.
     fn follow_selection(&mut self, cx: &mut Context<Self>) {
         if !self.user_moved {
+            // A saved query or tag opens like a folder: nothing selected until you move.
+            if self.is_destination() {
+                return;
+            }
             if let Some(first) = self.results.first() {
                 self.selection.select_only(first.path.clone());
                 self.bump_selection(cx);
@@ -2019,6 +2023,78 @@ impl SearchView {
         let summary = builder.finish(None, folders);
         *self.summary_cache.borrow_mut() = Some((self.selection_generation, summary.clone()));
         summary
+    }
+
+    /// The search oracle: a finished folder search agrees with the disk. Every hit lies
+    /// inside the folder and still exists, and a plain one-word name query finds every
+    /// visible, unskipped name that contains it (the engine's fuzzy hits are a superset
+    /// of the substring ones). `strict` is off while the disk changes under a run: the
+    /// overlay does not watch it, so only the folder check applies. Only for the Cmd-F overlay
+    /// over a folder; destinations read Spotlight's index and `This Mac` leaves the folder.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn disk_violations(&self, cx: &App, strict: bool) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let mut out = Vec::new();
+        if self.saved.is_some() || self.tag.is_some() || self.scope != Scope::Folder {
+            return out;
+        }
+        if self.searching || self.refreshing || self.stale || self.error.is_some() {
+            return out;
+        }
+        for row in &self.results {
+            if !row.path.starts_with(&self.folder) {
+                out.push(Violation::new(
+                    "search",
+                    format!("hit {} is outside the searched folder {}", row.path.display(), self.folder.display()),
+                ));
+            // io-ok: fuzz invariant, test/fuzz builds only
+            } else if strict && std::fs::symlink_metadata(&row.path).is_err() {
+                out.push(Violation::new("search", format!("hit {} is not on disk", row.path.display())));
+            }
+        }
+        let text = self.query(cx);
+        let text = text.trim();
+        let plain = !text.is_empty()
+            && text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && !text.starts_with('.');
+        if !strict
+            || !plain
+            || !self.predicates.is_empty()
+            || self.names_capped
+            || self.effective_match() == Match::Contents
+        {
+            return out;
+        }
+        let needle = text.to_lowercase();
+        let skipped: std::collections::HashSet<&Path> = self.skipped.iter().map(|skip| skip.path.as_path()).collect();
+        let found: std::collections::HashSet<&Path> = self.results.iter().map(|row| row.path.as_path()).collect();
+        let mut stack = vec![self.folder.clone()];
+        while let Some(dir) = stack.pop() {
+            // io-ok: fuzz invariant, test/fuzz builds only
+            let Ok(read) = std::fs::read_dir(&dir) else { continue };
+            for entry in read.filter_map(|entry| entry.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(kind) = entry.file_type() else { continue };
+                if name.to_lowercase().contains(&needle)
+                    && !found.contains(path.as_path())
+                    && !skipped.contains(path.as_path())
+                {
+                    out.push(Violation::new(
+                        "search",
+                        format!("`{text}` should find {} but the results omit it", path.display()),
+                    ));
+                }
+                // io-ok: fuzz invariant, test/fuzz builds only (file type from the directory entry)
+                if kind.is_dir() && !skipped.contains(path.as_path()) && !crow_fs::is_package_name(&name) {
+                    stack.push(path);
+                }
+            }
+        }
+        out
     }
 
     fn query(&self, cx: &App) -> String {

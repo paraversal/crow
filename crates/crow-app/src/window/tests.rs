@@ -340,6 +340,29 @@ fn search_count_is_announced(cx: &mut TestAppContext) {
     assert_eq!(search.read_with(&cx, |search, _| search.footer_summary_text()), "1 result");
 }
 
+/// The search oracle accepts a finished search, and names a ghost hit and a missed name.
+#[gpui::test]
+fn search_oracle_checks_hits_against_the_disk(cx: &mut TestAppContext) {
+    let root = fixture("search-oracle");
+    std::fs::write(root.join("alpha/notes-two.txt"), "x").expect("second hit");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    let check = |cx: &mut VisualTestContext| search.read_with(cx, |search, cx| search.disk_violations(cx, true));
+    assert!(search.read_with(&cx, |search, _| search.result_count()) >= 2);
+    assert!(check(&mut cx).is_empty(), "a finished search agrees with the disk: {:?}", check(&mut cx));
+    // A hit whose file is gone is a ghost.
+    std::fs::remove_file(root.join("notes.txt")).expect("remove a hit");
+    let found = check(&mut cx);
+    assert!(found.iter().any(|v| v.check == "search" && v.detail.contains("not on disk")), "{found:?}");
+    // A name the results omit is reported.
+    std::fs::write(root.join("beta/notes-three.txt"), "x").expect("new match");
+    let found = check(&mut cx);
+    assert!(found.iter().any(|v| v.detail.contains("notes-three.txt") && v.detail.contains("omit")), "{found:?}");
+}
+
 #[gpui::test]
 fn back_closes_search_like_escape(cx: &mut TestAppContext) {
     let root = fixture("search-back");
@@ -368,6 +391,105 @@ fn back_closes_search_like_escape(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-[");
     settle(&view, &mut cx);
     assert_ne!(location(&cx), before);
+}
+
+/// Closing the first tab leaves a ghost with the sentinel index `usize::MAX`; drawing it
+/// added 1 to that index and panicked in debug builds (found by the layout shakeout).
+#[gpui::test]
+fn closing_the_first_tab_draws_its_ghost(cx: &mut TestAppContext) {
+    let root = fixture("first-tab-ghost");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = crow_core::motion::Effective::Full);
+    for _ in 0..2 {
+        cx.simulate_keystrokes("cmd-t");
+        finish_motion(&view, &mut cx);
+    }
+    for _ in 0..2 {
+        cx.simulate_keystrokes("ctrl-shift-tab");
+    }
+    finish_motion(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-w");
+    assert!(cx.debug_bounds("tab-ghost").is_some(), "the closing first tab is still drawn while it shrinks");
+    finish_motion(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |window, _| window.tab_count()), 2);
+}
+
+/// The layout oracle sees the chrome (so it isn't vacuous) and finds nothing wrong
+/// across a sweep of window widths, with and without the right sidebar.
+#[gpui::test]
+fn layout_oracle_holds_across_window_widths(cx: &mut TestAppContext) {
+    let root = fixture("layout-oracle");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    for name in ["toolbar", "sidebar", "path-bar", "back", "toolbar-search"] {
+        assert!(cx.debug_bounds(name).is_some(), "{name} is drawn, so the oracle has something to check");
+    }
+    for preview in [false, true] {
+        if preview {
+            cx.simulate_keystrokes("shift-cmd-p");
+        }
+        for width in [1600., 1280., 1000., 800., 640., 520.] {
+            cx.simulate_resize(size(px(width), px(600.)));
+            settle(&view, &mut cx);
+            cx.executor().advance_clock(Duration::from_secs(2));
+            cx.run_until_parked();
+            let found = cx.update(|window, _| crate::fuzz::layout_violations(window));
+            assert!(found.is_empty(), "preview={preview} width={width}: {found:?}");
+        }
+    }
+}
+
+/// The layout oracle is not vacuous: bands that overlap, or leave the window, are named.
+#[gpui::test]
+fn layout_oracle_catches_overlapping_and_escaping_chrome(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, ParentElement, Render, Styled, div};
+    struct Bad;
+    impl Render for Bad {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().debug_selector(|| "toolbar".into()).w(px(300.)).h(px(50.)))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(20.))
+                        .left(px(0.))
+                        .w(px(300.))
+                        .h(px(50.))
+                        .debug_selector(|| "path-bar".into()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(200.))
+                        .left(px(-120.))
+                        .w(px(300.))
+                        .h(px(50.))
+                        .debug_selector(|| "preview".into()),
+                )
+        }
+    }
+    let (_view, cx) = cx.add_window_view(|_, _| Bad);
+    cx.simulate_resize(size(px(800.), px(600.)));
+    let found = cx.update(|window, _| crate::fuzz::layout_violations(window));
+    assert!(found.iter().any(|v| v.detail.contains("toolbar") && v.detail.contains("overlaps path-bar")), "{found:?}");
+    assert!(found.iter().any(|v| v.detail.contains("preview") && v.detail.contains("leaves the window")), "{found:?}");
+}
+
+/// The sidebar-toggle and Projects oracles name a mismatch.
+#[gpui::test]
+fn sidebar_oracles_name_a_mismatch(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-oracles");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, false)).is_empty());
+    let found = cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, true));
+    assert!(found.iter().any(|v| v.detail.contains("hidden but drawn")), "{found:?}");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    finish_motion(&view, &mut cx);
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, true)).is_empty());
+    let found = cx.update(|window, _| crate::fuzz::sidebar_toggle_violations(window, false));
+    assert!(found.iter().any(|v| v.detail.contains("not on screen")), "{found:?}");
 }
 
 #[gpui::test]
@@ -760,6 +882,21 @@ fn open_with(cx: &mut TestAppContext, dir: &Path, options: WindowOptions) -> (En
 /// `open_with`, with `before` run after the test globals exist and before the
 /// window is created (a test that needs a different first-launch state).
 fn open_with_before(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    options: WindowOptions,
+    before: impl FnOnce(&mut App),
+) -> (Entity<CrowWindow>, VisualTestContext) {
+    let (view, mut cx) = open_untouched(cx, dir, options, before);
+    // A folder opens with nothing selected. Most tests start from the first row,
+    // so they get it here; `open_untouched` is the real opening.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.select_first_for_test(cx));
+    settle(&view, &mut cx);
+    (view, cx)
+}
+
+/// The window as a user finds it: the folder listed, nothing selected.
+fn open_untouched(
     cx: &mut TestAppContext,
     dir: &Path,
     options: WindowOptions,
@@ -1777,7 +1914,7 @@ fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) 
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
     assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Down in the sidebar moves its cursor");
     assert_eq!(dir(&view, &cx), root.join("beta"), "…and shows beta in the center");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("b.txt"), "the list follows the sidebar cursor");
+    assert_eq!(selected(&view, &cx), None, "a folder shown from the sidebar has nothing selected");
 
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
@@ -1785,7 +1922,7 @@ fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) 
     let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
     assert!(cx.update(|window, _| list_focus.is_focused(window)), "…and moves focus to the list");
 
-    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("down enter");
     assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
 }
 
@@ -4035,6 +4172,47 @@ fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn bar_error_expires_and_a_click_dismisses_it(cx: &mut TestAppContext) {
+    let root = fixture("bar-error-dismiss");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::operations::message("Couldn't copy “a”: disk full", true, cx));
+    assert!(bar_state(&view, &mut cx).error.is_some(), "an error shows at once");
+
+    // Left alone, it goes after ERROR_LIFETIME; the bar gets its hints back.
+    cx.executor().advance_clock(crate::operations::ERROR_LIFETIME - std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_some(), "still readable before the lifetime is up");
+    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_none(), "the error expired");
+
+    // A click dismisses sooner, and a newer error shows again.
+    cx.update(|window, cx| {
+        crate::operations::message("Couldn't move “b”: read-only", true, cx);
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let pill = cx.debug_bounds("bar-error").expect("the pill is laid out");
+    cx.simulate_click(pill.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_none(), "a click dismissed it");
+    assert!(cx.debug_bounds("bar-error").is_none());
+    cx.update(|_, cx| crate::operations::message("Couldn't move “c”: read-only", true, cx));
+    assert!(bar_state(&view, &mut cx).error.is_some(), "the next error is not swallowed");
+}
+
+#[gpui::test]
+fn open_button_does_not_dismiss_the_config_error(cx: &mut TestAppContext) {
+    let root = fixture("bar-error-open-keeps");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+    let bounds = cx.debug_bounds("bar-error-open").expect("Open");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_some(), "Open leaves the error in place");
+}
+
+#[gpui::test]
 fn file_effects_are_recorded_not_run(cx: &mut TestAppContext) {
     use crate::effects::Call;
     let root = fixture("effects-file");
@@ -4529,7 +4707,8 @@ fn path_segments_open_the_menu_of_their_folder(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "Open in New Tab");
     assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), parent);
     script(&mut cx, Some(0));
-    let shown = bar_state(&view, &mut cx).path.parts.len() - 2;
+    // The new tab shows its folder with nothing selected: the last segment is the folder.
+    let shown = bar_state(&view, &mut cx).path.parts.len() - 1;
     let at = segment(&mut cx, shown - 1);
     right_click(&mut cx, at);
     settle(&view, &mut cx);
@@ -10286,7 +10465,7 @@ fn path_bar_clicks_edit_the_path_and_segments_navigate(cx: &mut TestAppContext) 
     settle(&view, &mut cx);
     assert_eq!(
         path_edit_text(&view, &cx),
-        Some(root.join("alpha").display().to_string()),
+        Some(root.display().to_string()),
         "a double-click still edits the shown path"
     );
 }
@@ -11570,7 +11749,7 @@ fn info_tab_survives_a_folder_change(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root.join("alpha"));
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info, "the tab choice survives");
     let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
-    assert!(label.contains("inner"), "the pane follows the new cursor: {label}");
+    assert!(label.contains("alpha"), "nothing is selected in the new folder, so Info names it: {label}");
 
     cx.simulate_keystrokes("cmd-[");
     settle(&view, &mut cx);
@@ -15102,9 +15281,10 @@ fn reset_tree(root: &Path, files: usize, edge: &EdgeTree, seed: u64) {
 
 fn fuzz_sidebar_toml(root: &Path) -> String {
     format!(
-        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
+        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n[projects]\nroot = \"{}\"\n",
         root.join("alpha").display(),
-        root.join("beta").display()
+        root.join("beta").display(),
+        root.display()
     )
 }
 
@@ -15341,8 +15521,11 @@ fn check_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) ->
     let mut out = Vec::new();
     for handle in handles {
         if let Some(view) = handle.downcast::<CrowWindow>()
-            && let Ok(found) =
-                view.update(&mut cx.cx, |window_view, window, cx| window_view.check_invariants(window, cx, deep, root))
+            && let Ok(found) = view.update(&mut cx.cx, |window_view, window, cx| {
+                // Only the window in front has a focus to check: another window (Settings,
+                // a second Crow window) being key leaves this one's handle stale by design.
+                window_view.check_invariants_with_focus(window, cx, deep, root, window.is_window_active())
+            })
         {
             out.extend(found);
         } else if let Some(view) = handle.downcast::<crate::settings_window::SettingsWindow>()
@@ -15409,6 +15592,14 @@ fn apply_and_check(
         }
         keep_in_tree(view, tree, cx);
         cx.run_until_parked();
+        if deep {
+            // Panels slide; the layout oracle judges the layout at rest.
+            for _ in 0..3 {
+                cx.executor().advance_clock(Duration::from_millis(400));
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+            }
+        }
         if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
             return Err(violation);
         }
@@ -15452,6 +15643,15 @@ fn fuzz_setup(
     close_all_windows(cx);
     reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
+    // The Projects section lists Git repositories directly inside the root: two real ones.
+    for repo in ["alpha", "beta"] {
+        let status = std::process::Command::new("git").arg("-C").arg(tree.join(repo)).args(["init", "-q"]).status();
+        assert!(status.is_ok_and(|status| status.success()), "git init {repo}");
+    }
+    cx.update(|_, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        cx.global_mut::<crate::operations::Operations>().disk_churn = options.churn;
+    });
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
     fuzz_seed_m9(&view, tree, &mut cx);
     fuzz_confine(tree, &mut cx);
@@ -20686,4 +20886,18 @@ fn vim_yy_dd_p_u_and_ctrl_r_copy_cut_paste_undo_and_redo(cx: &mut TestAppContext
     assert!(cut, "dd cuts");
     assert_eq!(&*paths, [root.join("alpha")]);
     assert!(root.join("alpha").exists(), "dd deletes nothing");
+}
+
+#[gpui::test]
+fn a_folder_opens_with_nothing_selected_and_views_keep_it_so(cx: &mut TestAppContext) {
+    let root = fixture("view-switch-empty");
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1100.), px(700.)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    let (view, mut cx) = open_untouched(cx, &root, options, |_| {});
+    assert_eq!(selected(&view, &cx), None, "cleared");
+    for keys in ["cmd-1", "cmd-3", "cmd-4", "cmd-2", "cmd-4", "cmd-1", "cmd-3", "cmd-2"] {
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx), None, "after {keys}");
+    }
 }

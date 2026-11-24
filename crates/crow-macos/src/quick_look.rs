@@ -156,6 +156,7 @@ pub fn toggle_quick_look(path: &Path) {
             let Some(panel) = QLPreviewPanel::sharedPreviewPanel(mtm) else { return };
             if panel.isVisible() {
                 panel.orderOut(None);
+                log_panel("closed");
                 return;
             }
             set_item(&panel, &path);
@@ -164,8 +165,16 @@ pub fn toggle_quick_look(path: &Path) {
             });
             panel.reloadData();
             panel.makeKeyAndOrderFront(None);
+            log_panel("opened");
         }
     });
+}
+
+/// The panel takes the key window while it is open, so a shortcut pressed then goes to it
+/// rather than to Crow. A trace of when that starts and ends helps with "shortcuts stopped".
+fn log_panel(what: &str) {
+    let snapshot = crate::input_snapshot().map_or_else(|| "unavailable".into(), |snapshot| snapshot.to_string());
+    tracing::info!(target: "input", "quick look {what}: macos: {snapshot}");
 }
 
 /// Point an open Quick Look panel at a new selection; does nothing when it is closed.

@@ -613,8 +613,13 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
     let mut pill = div()
         .id("bar-error")
         .debug_selector(|| "bar-error".into())
-        .role(Role::Group)
-        .aria_label(format!("Error: {text}"))
+        .role(Role::Button)
+        .aria_label(format!("Error: {text}. Click to dismiss"))
+        .cursor_pointer()
+        .on_click({
+            let text = text.clone();
+            move |_, _, cx| operations::dismiss_error(text.clone(), cx)
+        })
         .h(px(20.))
         // The message gives way; the icon and Open never do.
         .min_w_0()
@@ -649,7 +654,11 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
                 .text_color(color(theme.role("bg")))
                 .text_size(px(11.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .on_click(move |_, _, cx| open_config(path.clone(), cx))
+                .on_click(move |_, _, cx| {
+                    // Open is its own button: it must not also dismiss the pill.
+                    cx.stop_propagation();
+                    open_config(path.clone(), cx)
+                })
                 .child("Open"),
         );
     }

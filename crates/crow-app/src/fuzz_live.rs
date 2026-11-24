@@ -261,6 +261,7 @@ pub fn run(args: &[String]) -> ExitCode {
         crate::plugins::init(cx);
         crate::icon_packs::reload(cx);
         cx.global_mut::<Operations>().jail = Some(app_setup.root.clone());
+        cx.global_mut::<Operations>().disk_churn = app_options.churn;
         crate::keymap::install(cx);
         menus::init(cx);
         cx.set_global(window::LaunchFolder(app_setup.root.clone()));
