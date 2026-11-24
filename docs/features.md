@@ -4,7 +4,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 
 ## Browsing
 - Four views: icons (Compact, Standard, Large, optional caption), list (resizable, hideable columns, nested folders), columns, and gallery (a filename rail beside a large preview; two selected files compare side by side).
-- Per-folder view, sort and columns, saved when you change them. Rules by path pattern in `views.toml`; View ▸ Why This View? (⌘J) names the layer that decided each setting.
+- Per-folder view, sort and columns, saved when you change them. Folders open inside a list follow the sort, and a size sort re-orders as folder sizes arrive (the selection stays on its item and the view does not scroll). Rules by path pattern in `views.toml`; View ▸ Why This View? (⌘J) names the layer that decided each setting.
 - Tabs, Back and Forward history, Enclosing Folder, Go to Folder, and several windows.
 - A sidebar of favorites in groups, Recent, Projects, Tags, saved searches and Locations (free space, eject). Five looks: ledger lines, cards, accordion, floating panel, pills. Groups take an icon; favorites take a name, icon, colour and Vim mark. The default Outline icons draw sidebar folders and special folders (Home, Desktop, Documents, Downloads, Applications…) as SF Symbol line glyphs, like Finder's sidebar, and the path bar and the title's folder icon follow; Finder keeps Finder's colored icons. An icon pack still wins.
 - An opt-in Shelf at the bottom of the sidebar: carry files between folders, then Move or Copy Shelf Here.

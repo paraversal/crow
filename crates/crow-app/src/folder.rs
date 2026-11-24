@@ -358,6 +358,10 @@ pub struct Folder {
     pending: Vec<PathBuf>,
     /// A rescan arrived while `applying`.
     pending_rescan: bool,
+    /// An open child folder finished listing (see `take_child_loaded`).
+    child_loaded: bool,
+    /// The next apply keeps the scroll position (see `resort_with_sizes`).
+    keep_view: bool,
     /// Tests hold a re-sort in flight to reproduce a stale result landing late.
     #[cfg(test)]
     sort_delay: Duration,
@@ -459,6 +463,8 @@ impl Folder {
             applying: false,
             pending: Vec::new(),
             pending_rescan: false,
+            child_loaded: false,
+            keep_view: false,
             #[cfg(test)]
             sort_delay: Duration::ZERO,
             _watcher: None,
@@ -1597,7 +1603,7 @@ impl Folder {
             // list again so its result arrives in this order.
             self.load(cx);
         } else {
-            self.resort_with_sizes(sizes, 0, cx);
+            self.resort_with_sizes(sizes, 0, false, cx);
         }
     }
 
@@ -1608,7 +1614,30 @@ impl Folder {
         }
     }
 
-    /// Re-sort off the main thread; `sizes` patches folder rows first. The sort
+    /// The sizes `lookup` knows for this folder's sub-folders and those of every
+    /// folder open inside it: what a size sort patches into the rows.
+    pub fn dir_sizes(&self, lookup: &dyn Fn(&Path) -> Option<u64>, cx: &gpui::App) -> HashMap<PathBuf, u64> {
+        let mut sizes: HashMap<PathBuf, u64> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_symlink)
+            .filter_map(|entry| lookup(&entry.path).map(|size| (entry.path.clone(), size)))
+            .collect();
+        for child in self.children.values() {
+            sizes.extend(child.folder.read(cx).dir_sizes(lookup, cx));
+        }
+        sizes
+    }
+
+    /// Whether an open child folder finished listing since the last call: the
+    /// pane then sorts its rows with the sizes it already knows.
+    pub fn take_child_loaded(&mut self) -> bool {
+        std::mem::take(&mut self.child_loaded)
+    }
+
+    /// Re-sort off the main thread; `sizes` patches folder rows first. `quiet` is a
+    /// re-sort nobody asked for (sizes arrived): the cursor item stays selected and
+    /// the cursor follows it, but the view does not scroll to it. The sort
     /// runs on the entries captured here; if the listing is replaced while it
     /// runs, its result is stale — sort the newer listing instead (or list again
     /// after two conflicts).
@@ -1616,9 +1645,16 @@ impl Folder {
         &mut self,
         sizes: Option<Arc<HashMap<PathBuf, u64>>>,
         attempt: u8,
+        quiet: bool,
         cx: &mut Context<Self>,
     ) {
         let sort = self.sort;
+        if let Some(patch) = &sizes {
+            let children: Vec<Entity<Folder>> = self.children.values().map(|c| c.folder.clone()).collect();
+            for child in children {
+                child.update(cx, |child, cx| child.resort_with_sizes(Some(patch.clone()), 0, quiet, cx));
+            }
+        }
         let entries = self.entries.clone();
         let to_sort = entries.clone();
         let sizes_for_task = sizes.clone();
@@ -1644,9 +1680,10 @@ impl Folder {
                     return;
                 }
                 if Arc::ptr_eq(&this.entries, &entries) {
+                    this.keep_view = quiet;
                     this.replace_entries_after(sorted, Some(&[]), cx);
                 } else if attempt < 2 {
-                    this.resort_with_sizes(sizes, attempt + 1, cx);
+                    this.resort_with_sizes(sizes, attempt + 1, quiet, cx);
                 } else {
                     this.load(cx);
                 }
@@ -1660,6 +1697,7 @@ impl Folder {
     /// been read so far is shown (sorted) every 50 ms until done.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.keep_view = false;
         // A fresh listing supersedes any pending reconcile of watcher additions.
         self.reconcile_gen += 1;
         self.reconcile.clear();
@@ -2066,7 +2104,10 @@ impl Folder {
             let (hidden, sort) = (self.show_hidden, self.sort);
             let child = cx.new(|cx| Folder::new(path.clone(), hidden, sort, false, cx));
             let subscription = cx.subscribe(&child, |this, _, event, cx| match event {
-                FolderEvent::Loaded | FolderEvent::Changed => this.child_changed(cx),
+                FolderEvent::Loaded | FolderEvent::Changed => {
+                    this.child_loaded |= matches!(event, FolderEvent::Loaded);
+                    this.child_changed(cx)
+                }
                 FolderEvent::WatcherApplied { paths } => cx.emit(FolderEvent::WatcherApplied { paths: paths.clone() }),
                 _ => {}
             });
@@ -2157,6 +2198,7 @@ impl Folder {
             ApplyKind::Full { .. } => self.cursor_before_apply.take(),
             ApplyKind::Partial => None,
         };
+        let keep_view = std::mem::take(&mut self.keep_view);
         if let ApplyKind::Full { .. } = kind
             && self.load_done
         {
@@ -2192,7 +2234,7 @@ impl Folder {
         if !pending_selected && let Some((old_ix, old_path)) = cursor_before {
             self.select_next_after_removal(old_ix, old_path, cx);
         }
-        self.settle_cursor(cx);
+        self.settle_cursor_scrolling(!keep_view, cx);
         // The drag snapshot is keyed by the selection, not by the rows: a reorder
         // does not invalidate it, and a 100k select-all no longer rescans per apply.
         cx.emit(FolderEvent::Changed);
@@ -2283,11 +2325,15 @@ impl Folder {
 
     /// Point the cursor row at the selection's cursor; scroll if it moved.
     fn settle_cursor(&mut self, cx: &mut Context<Self>) {
+        self.settle_cursor_scrolling(true, cx);
+    }
+
+    fn settle_cursor_scrolling(&mut self, scroll: bool, cx: &mut Context<Self>) {
         let previous = self.cursor_entry().map(|entry| entry.path.clone());
         self.cursor_ix = self.selection.cursor().and_then(|cursor| self.index_of_path(cursor));
         let now = self.cursor_entry().map(|entry| entry.path.clone());
         if now != previous {
-            if let Some(ix) = self.cursor_ix {
+            if scroll && let Some(ix) = self.cursor_ix {
                 self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
             }
             cx.emit(FolderEvent::CursorMoved);

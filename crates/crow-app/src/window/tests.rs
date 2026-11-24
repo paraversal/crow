@@ -2529,11 +2529,9 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
 /// List, Columns and Gallery select by dragging over empty space, like Icons.
 #[gpui::test]
 fn dragging_over_empty_space_selects_rows_in_every_row_view(cx: &mut TestAppContext) {
-    for (mode, prefix) in [
-        (ViewMode::List, "row-"),
-        (ViewMode::Columns, "column-0-row-"),
-        (ViewMode::Gallery, "gallery-row-"),
-    ] {
+    for (mode, prefix) in
+        [(ViewMode::List, "row-"), (ViewMode::Columns, "column-0-row-"), (ViewMode::Gallery, "gallery-row-")]
+    {
         let root = TestRoot::new("row-marquee");
         for i in 0..8 {
             std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
@@ -9490,6 +9488,129 @@ fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "largest file first, folders on top");
     assert_eq!(selected(&view, &cx), picked, "the selection follows the item, not the row");
+}
+
+/// Folder sizes by name: `zz` is the biggest, `aa` the smallest, the rest in between.
+struct NamedSizer;
+
+impl crate::folder_sizes::Sizer for NamedSizer {
+    fn measure(&self, path: &Path, _: &crow_fs::sizes::Cancel) -> Option<crow_fs::sizes::Measured> {
+        let bytes = match path.file_name().and_then(|name| name.to_str()) {
+            Some("zz" | "f03") => 9_000_000,
+            Some("aa" | "f00") => 20,
+            _ => 5_000,
+        };
+        Some(crow_fs::sizes::Measured { bytes, ..Default::default() })
+    }
+}
+
+fn measure_visible_folders(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    // One draw reports the visible rows, the queued measure runs, the next draw sees it.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| service.measure_now(cx));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    settle(view, cx);
+}
+
+fn size_sorted_fixture(name: &str) -> TestRoot {
+    let root = TestRoot::new(name);
+    let d = root.join("d");
+    for dir in ["aa", "zz", "mm"] {
+        std::fs::create_dir_all(d.join(dir)).expect("create fixture");
+        std::fs::write(d.join(dir).join("x"), "x").expect("create fixture");
+    }
+    std::fs::write(d.join("file.txt"), "x").expect("create fixture");
+    for dir in ["aa", "zz"] {
+        std::fs::create_dir_all(root.join(dir)).expect("create fixture");
+    }
+    root
+}
+
+/// A window whose size service runs `NamedSizer` and measures on demand.
+fn open_with_sizes(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    width: f32,
+    height: f32,
+) -> (Entity<CrowWindow>, VisualTestContext) {
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(width), px(height)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    open_with_before(cx, dir, options, |cx| {
+        crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(NamedSizer));
+        cx.global_mut::<Ui>().settings.folder_sizes = crow_core::FolderSizesMode::Visible;
+    })
+}
+
+/// Rows inside an expanded folder sort like the rows above them, by size too.
+#[gpui::test]
+fn expanded_subfolders_follow_the_size_sort(cx: &mut TestAppContext) {
+    let root = size_sorted_fixture("sort-subfolders");
+    let d = root.join("d");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 700.);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    measure_visible_folders(&view, &mut cx);
+    let all = names(&view, &cx);
+    let inside: Vec<&str> =
+        all.iter().skip_while(|n| *n != "d").skip(1).take_while(|n| *n != "file.txt").map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "{all:?}");
+    // A folder opened after the sizes are known is sorted by them as soon as it lists.
+    folder.update(&mut cx, |folder, cx| folder.collapse(&d, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, cx| folder.expand(d.clone(), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    let again = names(&view, &cx);
+    let inside: Vec<&str> =
+        again.iter().skip_while(|n| *n != "d").skip(1).take_while(|n| *n != "file.txt").map(String::as_str).collect();
+    assert_eq!(inside, ["zz", "mm", "aa"], "{again:?}");
+}
+
+/// Sizes arriving re-sort the list without moving the selection or the view.
+#[gpui::test]
+fn sizes_arriving_resort_and_keep_selection_and_view(cx: &mut TestAppContext) {
+    let root = TestRoot::new("sort-sizes-arrive");
+    for i in 0..40 {
+        std::fs::create_dir_all(root.join(format!("f{i:02}"))).expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("zz")).expect("create fixture");
+    let (view, mut cx) = open_with_sizes(cx, &root, 900., 400.);
+    let size = crow_fs::Sort::default().toggled(crow_fs::SortKey::Size);
+    pane(&view, &cx).update(&mut cx, |p, cx| p.set_sort(size, cx));
+    settle(&view, &mut cx);
+    let before = names(&view, &cx);
+    assert_eq!(before.first().map(String::as_str), Some("f00"), "unmeasured folders stay in name order: {before:?}");
+    // Select a row, scroll past it.
+    cx.simulate_keystrokes("down down down");
+    let picked = selected(&view, &cx);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let offset = |cx: &VisualTestContext| {
+        folder.read_with(cx, |folder, _| f32::from(folder.scroll().0.borrow().base_handle.offset().y))
+    };
+    folder.update(&mut cx, |folder, _| {
+        folder.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(-48.)));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let scrolled = offset(&cx);
+    assert_eq!(scrolled, -48., "the list is scrolled two rows");
+    measure_visible_folders(&view, &mut cx);
+    let after = names(&view, &cx);
+    assert_ne!(before, after, "the rows re-sorted");
+    assert_eq!(selected(&view, &cx), picked, "the selected item stays selected and is the cursor");
+    assert_eq!(offset(&cx), scrolled, "the view does not scroll");
 }
 
 #[gpui::test]

@@ -101,6 +101,8 @@ fn first_visible_row(handle: &UniformListScrollHandle) -> usize {
 /// rounded corners don't meet the straight line and leave dark wedges at its ends.
 pub(crate) const LIST_TOP_INSET: f32 = 4.0;
 const LIST_SIDE_INSET: f32 = 8.0;
+/// How long arriving folder sizes are gathered before the rows re-sort.
+const SIZE_RESORT_DELAY: Duration = Duration::from_millis(250);
 /// Left padding before a row's disclosure chevron, and the indent per tree level.
 const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
@@ -454,6 +456,8 @@ pub struct Pane {
     cloud_source: u64,
     /// The service generation whose visible sizes were already sorted (Q3).
     size_sort_generation: u64,
+    /// A batched size re-sort is waiting on its timer.
+    size_resort_pending: bool,
     /// `folder_sizes = "visible"` at the last render; turning it off pauses the service.
     size_enabled: bool,
     strip_scroll: ScrollHandle,
@@ -626,6 +630,7 @@ impl Pane {
             size_source,
             cloud_source,
             size_sort_generation: 0,
+            size_resort_pending: false,
             size_enabled: cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible,
             strip_scroll: ScrollHandle::new(),
             status: None,
@@ -1873,14 +1878,7 @@ impl Pane {
                 service.as_ref().map(|service| {
                     let service = service.read(cx);
                     let folder = folder.read(cx);
-                    Arc::new(
-                        folder
-                            .entries()
-                            .iter()
-                            .filter(|entry| entry.is_dir && !entry.is_symlink)
-                            .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
-                            .collect::<HashMap<_, _>>(),
-                    )
+                    Arc::new(folder.dir_sizes(&|path| service.size(path).map(|size| size.bytes), cx))
                 })
             } else {
                 None
@@ -1914,35 +1912,54 @@ impl Pane {
         cx.notify();
     }
 
-    /// The size service changed: once every visible size is in, re-sort by size
-    /// once (Q3). Scrolling in more rows repeats this when their sizes arrive.
+    /// The size service changed. Rows re-sort as measurements arrive, in
+    /// batches: while sizes are still coming in, one re-sort covers what arrived
+    /// in the last `SIZE_RESORT_DELAY`; the last arrival re-sorts at once.
     fn sizes_changed(&mut self, cx: &mut Context<Self>) {
         if cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
             return;
         }
-        let service = cx.global::<SizeService>().0.clone();
-        let generation = service.read(cx).generation();
-        if generation == self.size_sort_generation || self.sort.key != SortKey::Size {
+        self.request_size_resort(cx);
+    }
+
+    fn request_size_resort(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = cx.try_global::<SizeService>().map(|service| service.0.clone()) else { return };
+        if self.sort.key != SortKey::Size || service.read(cx).generation() == self.size_sort_generation {
             return;
         }
-        if !service.read(cx).visible_complete() {
+        if service.read(cx).visible_complete() {
+            self.resort_for_sizes(false, cx);
+            return;
+        }
+        if self.size_resort_pending {
+            return;
+        }
+        self.size_resort_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SIZE_RESORT_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.size_resort_pending = false;
+                this.resort_for_sizes(false, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sort every shown listing, and the folders open in it, with the sizes known now.
+    fn resort_for_sizes(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(service) = cx.try_global::<SizeService>().map(|service| service.0.clone()) else { return };
+        let generation = service.read(cx).generation();
+        if self.sort.key != SortKey::Size || (!force && generation == self.size_sort_generation) {
             return;
         }
         self.size_sort_generation = generation;
         for folder in &self.folders {
             let sizes = {
                 let service = service.read(cx);
-                let folder = folder.read(cx);
-                Arc::new(
-                    folder
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.is_dir && !entry.is_symlink)
-                        .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
-                        .collect::<HashMap<_, _>>(),
-                )
+                Arc::new(folder.read(cx).dir_sizes(&|path| service.size(path).map(|size| size.bytes), cx))
             };
-            folder.update(cx, |f, cx| f.resort_with_sizes(Some(sizes), 0, cx));
+            folder.update(cx, |f, cx| f.resort_with_sizes(Some(sizes), 0, true, cx));
         }
         cx.notify();
     }
@@ -2257,6 +2274,13 @@ impl Pane {
 
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
+        if matches!(event, FolderEvent::Changed)
+            && self.sort.key == SortKey::Size
+            && folder.update(cx, |folder, _| folder.take_child_loaded())
+        {
+            // A folder opened inside this one: sort it with the sizes already known.
+            self.resort_for_sizes(true, cx);
+        }
         if self.marquee.as_ref().is_some_and(|marquee| marquee.folder == k)
             && matches!(event, FolderEvent::Loaded | FolderEvent::Changed | FolderEvent::WatcherApplied { .. })
         {
@@ -3470,7 +3494,8 @@ impl Pane {
                 }
                 let (rows_view, folder_ix) = (marquee.rows, marquee.folder);
                 let strip = if rows_view { this.row_strip(folder_ix, cx) } else { None };
-                let Some(bounds) = (if rows_view { strip.as_ref().map(|strip| strip.bounds) } else { this.icon_bounds.get() })
+                let Some(bounds) =
+                    (if rows_view { strip.as_ref().map(|strip| strip.bounds) } else { this.icon_bounds.get() })
                 else {
                     return;
                 };
@@ -6633,7 +6658,10 @@ impl Pane {
             _ => selector.strip_prefix("column-").and_then(|rest| rest.strip_suffix("-margin")?.parse().ok()),
         } {
             let strip = self.row_strip(k, cx)?;
-            return Some(gpui::Bounds::new(strip.bounds.origin, size(px(strip.space.side_inset), strip.bounds.size.height)));
+            return Some(gpui::Bounds::new(
+                strip.bounds.origin,
+                size(px(strip.space.side_inset), strip.bounds.size.height),
+            ));
         }
         if let Some(name) = selector.strip_prefix("gallery-row-") {
             let bounds = self.gallery.bounds.get()?;

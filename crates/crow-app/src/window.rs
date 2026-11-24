@@ -1185,9 +1185,10 @@ impl CrowWindow {
                 div()
                     .relative()
                     .on_children_prepainted(move |children, _, _| back_bounds.set(children.first().copied()))
-                    .child(nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx).on_click(
-                        cx.listener(|this, _, window, cx| this.go_back(&GoBack, window, cx)),
-                    ))
+                    .child(
+                        nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
+                            .on_click(cx.listener(|this, _, window, cx| this.go_back(&GoBack, window, cx))),
+                    )
                     .when(back_drop, |wrap| {
                         wrap.child(
                             crate::style::drop_outline(&theme)
