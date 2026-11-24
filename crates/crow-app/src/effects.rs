@@ -210,7 +210,12 @@ impl Effects for SystemEffects {
     }
 
     fn start_window_move(&self, window: &mut Window) {
+        // AppKit's drag first; if the window stays put, move it from the mouse events.
+        let drag = crow_macos::TitlebarDrag::begin(window);
         window.start_window_move();
+        if let Some(drag) = drag {
+            drag.started();
+        }
     }
 
     fn titlebar_double_click(&self, window: &mut Window) {

@@ -11,12 +11,14 @@ mod files;
 mod fonts;
 mod fsevents;
 mod icons;
+mod input_diag;
 mod metadata;
 mod names;
 mod quick_look;
 mod sound;
 mod spotlight;
 mod system_colors;
+mod titlebar_drag;
 mod volumes;
 
 pub use cloud::{SystemReadGate, status as cloud_status, status_batch as cloud_status_batch};
@@ -28,12 +30,14 @@ pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls,
 pub use fonts::available_font_families;
 pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch, watch_under};
 pub use icons::{icon_png, symbol_png, type_icon_png};
+pub use input_diag::{InputSnapshot, input_snapshot};
 pub use metadata::{Permissions, kind_name, permissions, tags, tags_checked, thumbnail_png, type_identifiers};
 pub use names::{display_component_paths, display_components, display_name_at, localized_display_name_at};
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
 pub use spotlight::{SpotlightHit, SpotlightPredicate, spotlight_expression, spotlight_names};
 pub use system_colors::{SystemColorWatcher, accent_color, unfocused_selection_color, watch_system_colors};
+pub use titlebar_drag::TitlebarDrag;
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, reduce_transparency, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;

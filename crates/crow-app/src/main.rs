@@ -48,6 +48,7 @@ mod git;
 mod icon_packs;
 mod icons;
 mod info_pane;
+mod input_diag;
 #[cfg(test)]
 mod io_guard;
 mod keymap;
@@ -620,6 +621,7 @@ fn main() -> ExitCode {
     });
     app.run(move |cx: &mut App| {
         effects::install(cx, Arc::new(effects::SystemEffects));
+        input_diag::init(cx);
         ui::init(cx);
         cx.set_global(window::LaunchFolder(start.clone()));
         extensions::init(cx);
