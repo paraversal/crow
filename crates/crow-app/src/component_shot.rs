@@ -37,7 +37,8 @@ static RENDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Padding around a crop, in points.
 const PAD: f32 = 20.0;
 /// The component names, in the order the script renders them.
-pub const COMPONENTS: [&str; 5] = ["git-rows", "git-sidebar", "git-diff", "compare-gallery", "plugin-surfaces"];
+pub const COMPONENTS: [&str; 6] =
+    ["git-rows", "git-sidebar", "git-diff", "compare-gallery", "plugin-surfaces", "activity"];
 
 const ICON_PACK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/examples/icon-pack");
 
@@ -97,6 +98,8 @@ struct Plan {
     /// Space-separated keystrokes sent once the folder has loaded.
     keys: &'static str,
     git_diff: bool,
+    /// Open the right sidebar on its Activity tab once the keystrokes have run.
+    activity: bool,
     crop: Crop,
     /// Points added to the crop's top, right, bottom and left before padding.
     grow: [f32; 4],
@@ -324,6 +327,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 },
                 keys: "",
                 git_diff: false,
+                activity: false,
                 crop: Crop::of(&["table-header", "row-harbor.toml", "row-scratch.log", "row-tides.rs"]),
                 grow: [0.0; 4],
             })
@@ -345,6 +349,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 },
                 keys: "",
                 git_diff: false,
+                activity: false,
                 crop: Crop { selectors: Vec::new(), numbered: Some("sidebar-") },
                 grow: [34.0, 0.0, 6.0, 0.0],
             })
@@ -363,6 +368,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 },
                 keys: "down down",
                 git_diff: true,
+                activity: false,
                 crop: Crop::of(&["info-tabs", "info-body"]),
                 grow: [0.0; 4],
             })
@@ -390,6 +396,7 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 },
                 keys: "shift-down",
                 git_diff: false,
+                activity: false,
                 crop: Crop::of(&["gallery-preview"]),
                 grow: [0.0; 4],
             })
@@ -426,7 +433,33 @@ fn plan(name: &str, scratch: &Scratch) -> Result<Plan, String> {
                 },
                 keys: "",
                 git_diff: false,
+                activity: false,
                 crop: Crop { numbered: Some("sidebar-"), ..Crop::of(&["table-header", "row-Sakrisoy reject.jpg"]) },
+                grow: [0.0; 4],
+            })
+        }
+        "activity" => {
+            let folder = scratch.0.join("Documents").join("Manuscript");
+            // io-ok: developer tool
+            io(std::fs::create_dir_all(&folder))?;
+            for file in ["Chapter 1.md", "Chapter 2.md", "Outline.md", "Notes.txt"] {
+                write(&folder.join(file), "x")?;
+                touch(&folder.join(file), "202603081030")?;
+            }
+            Ok(Plan {
+                window: (1000.0, 330.0),
+                folder,
+                extra: Extra {
+                    settings: "show_preview = true\n".into(),
+                    views: list.replace(", \"git.lines-changed\"", ""),
+                    sidebar: no_sections(""),
+                    ..Default::default()
+                },
+                // Duplicate the first file, make a folder (Return keeps its name), trash the second file.
+                keys: "down cmd-d cmd-shift-n enter down cmd-backspace",
+                git_diff: false,
+                activity: true,
+                crop: Crop::of(&["info-tabs", "info-body"]),
                 grow: [0.0; 4],
             })
         }
@@ -527,6 +560,16 @@ impl Session {
         Ok(())
     }
 
+    fn show_activity(&mut self) -> Result<(), String> {
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| {
+                window.dispatch_action(Box::new(crate::actions::ToggleActivity), cx)
+            })
+            .map_err(|e| e.to_string())?;
+        self.pump(300);
+        Ok(())
+    }
+
     fn bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
         self.cx.update_window(self.window.into(), |_, window, _| window.debug_bounds(selector)).ok().flatten()
     }
@@ -593,6 +636,9 @@ pub fn render_with(name: &str, theme: &str, whole_window: bool, scale: u32) -> R
     session.keys(plan.keys)?;
     if plan.git_diff {
         session.show_git_diff()?;
+    }
+    if plan.activity {
+        session.show_activity()?;
     }
     let window_image = session.settled_image()?;
     if whole_window {
@@ -680,12 +726,13 @@ mod tests {
     use super::*;
 
     /// (component, minimum width, minimum height) of its 2x image, padding included.
-    const SIZES: [(&str, u32, u32); 5] = [
+    const SIZES: [(&str, u32, u32); 6] = [
         ("git-rows", 600, 200),
         ("git-sidebar", 400, 250),
         ("git-diff", 400, 500),
         ("compare-gallery", 900, 400),
         ("plugin-surfaces", 900, 350),
+        ("activity", 400, 300),
     ];
 
     fn distinct_colours(image: &RgbaImage) -> usize {

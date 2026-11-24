@@ -7,7 +7,7 @@
 #   scripts/component-shots.sh                  every component, light and dark
 #   scripts/component-shots.sh git-rows         only those
 #
-# Website components: git-rows git-sidebar git-diff (compare-gallery and plugin-surfaces
+# Website components: git-rows git-sidebar git-diff activity (compare-gallery and plugin-surfaces
 # render with `--component-shot` but are not on the page)
 # Scale: 3x by default (CROW_SHOT_SCALE=1, 2 or 3); the page shows each image at a third of its pixels.
 # Themes: finder-light and finder-dark (built in), like scripts/shots/site.sh.
@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 command -v cwebp >/dev/null || { echo "cwebp missing: brew install webp" >&2; exit 1; }
-all=(git-rows git-sidebar git-diff)
+all=(git-rows git-sidebar git-diff activity)
 names=("$@")
 [ ${#names[@]} -gt 0 ] || names=("${all[@]}")
 

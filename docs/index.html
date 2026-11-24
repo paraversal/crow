@@ -303,7 +303,8 @@ footer nav { gap: 22px; }
       <ul class="rows">
         <li><span class="k"><kbd>/</kbd></span><span>Filter this folder</span></li>
         <li><span class="k"><kbd>⌘L</kbd></span><span>Type a path; Tab completes it</span></li>
-        <li><span class="k stack"><code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> node_modules</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> target</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> .git</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> …</code></span><span>Dev folders like these are skipped in search by default</span></li>
+        <li><span class="k stack"><code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> node_modules</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> target</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> .git</code> <code><svg class="fold" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> …</code></span><span>Choose which folders search skips by default</span></li>
+        <li><span class="k">Time Machine</span><span>Skip folders you excluded from backups, such as the ones <a href="https://github.com/paraversal/asimeow">asimeow</a> marks</span></li>
         <li><span class="k"><kbd>⇧⌘A</kbd></span><span>Search everything, skip nothing</span></li>
         <li><span class="k"><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span>Vim motions and marks, if you want them</span></li>
       </ul>
@@ -379,10 +380,25 @@ footer nav { gap: 22px; }
         <h2 id="sidebars-h">Two sidebars. Close either, or both.</h2>
         <ul class="rows">
           <li><span class="k">Left</span><span>Favorites, Recent, Projects, tags and drives</span></li>
-          <li><span class="k">Right</span><span>Preview, Info and Git Diff</span></li>
+          <li><span class="k">Right</span><span>Preview, Info, Activity and Git Diff</span></li>
           <li><span class="k">Keys</span><span><kbd>⌃⌘S</kbd> and <kbd>⇧⌘P</kbd>, or the View menu</span></li>
         </ul>
       </div>
+    </div>
+  </section>
+
+  <section class="block" id="activity" aria-labelledby="activity-h">
+    <div class="wrap split">
+      <div>
+        <h2 id="activity-h">Every step, one tab away.</h2>
+        <ul class="rows">
+          <li><span class="k">Running</span><span>Pause or cancel a copy, move or trash</span></li>
+          <li><span class="k">Conflicts</span><span>Wait for your choice while the rest keeps going</span></li>
+          <li><span class="k">History</span><span>Undo any step, not just the last</span></li>
+          <li><span class="k">Keys</span><span><kbd>⌥⌘L</kbd>, or the bottom bar</span></li>
+        </ul>
+      </div>
+      <button class="zoom" type="button" aria-label="Enlarge the Activity tab"><picture><source srcset="media/activity-dark.webp" media="(prefers-color-scheme: dark)"><img class="comp" loading="lazy" src="media/activity-light.webp" width="339" height="280" alt="The Activity tab in the right sidebar: Move 1 item to Trash, New Folder and Duplicate 1 item, each with an Undo button."></picture></button>
     </div>
   </section>
 
