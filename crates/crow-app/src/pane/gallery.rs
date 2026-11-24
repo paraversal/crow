@@ -1260,3 +1260,18 @@ fn folder_heading(
                 .child(div().text_size(px(11.)).text_color(muted).child(detail)),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dragged_rail_leaves_the_preview_its_room_even_in_a_narrow_window() {
+        let narrow = px(640.);
+        assert_eq!(rail_width(narrow, Some(10_000.0)), 640.0 - PREVIEW_MIN, "never past the preview's room");
+        assert_eq!(rail_width(narrow, Some(-50.0)), RAIL_DRAG_MIN, "never narrower than the floor");
+        assert_eq!(rail_width(narrow, Some(260.0)), 260.0);
+        assert_eq!(rail_width(px(300.), Some(10_000.0)), RAIL_DRAG_MIN, "a tiny pane keeps the rail's floor");
+        assert!((RAIL_MIN..=RAIL_MAX).contains(&rail_width(narrow, None)), "no drag follows the window");
+    }
+}
