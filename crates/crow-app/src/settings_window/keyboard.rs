@@ -725,14 +725,8 @@ impl SettingsWindow {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(
-                        div()
-                            .id("settings-keyboard-heading")
-                            .role(Role::Heading)
-                            .aria_level(3)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Keyboard shortcuts"),
-                    )
+                    // The card's group heading names the list; the action keeps the right edge.
+                    .child(div())
                     .child(reset_all),
             )
             .child(div().flex().items_center().gap_2().child(search).child(switch))

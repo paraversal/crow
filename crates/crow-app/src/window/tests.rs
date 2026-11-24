@@ -15737,7 +15737,8 @@ fn settings_keyboard_search_categories_and_edits(cx: &mut TestAppContext) {
     );
 
     scx.simulate_keystrokes("tab");
-    scx.simulate_keystrokes("right");
+    // Vim motions is a switch: Space flips it.
+    scx.simulate_keystrokes("space");
     let config = scx.read_global::<crate::ui::Ui, _>(|ui, _| ui.config_dir.clone());
     for _ in 0..100 {
         scx.run_until_parked();
@@ -15762,7 +15763,11 @@ fn settings_keyboard_search_categories_and_edits(cx: &mut TestAppContext) {
     scx.simulate_keystrokes("tab");
     scx.simulate_keystrokes("down");
     scx.simulate_keystrokes("enter");
-    assert_eq!(view.read_with(&scx, |view, _| view.category_id_for_tests()), "behaviour", "arrows choose sidebar rows");
+    assert_eq!(
+        view.read_with(&scx, |view, _| view.category_id_for_tests()),
+        "appearance",
+        "arrows choose sidebar rows"
+    );
 
     scx.simulate_keystrokes("tab");
     scx.simulate_keystrokes("cmd-f");

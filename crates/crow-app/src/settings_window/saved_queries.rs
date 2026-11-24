@@ -178,14 +178,8 @@ impl SettingsWindow {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(
-                        div()
-                            .id("settings-saved-query-heading")
-                            .role(Role::Heading)
-                            .aria_level(3)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(list.label()),
-                    )
+                    // The card's group heading names the list; the action keeps the right edge.
+                    .child(div())
                     .child(controls::link_button(
                         add.key(),
                         add.label(),

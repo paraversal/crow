@@ -59,6 +59,12 @@ pub enum Glyph {
     CopyPath,
     Reveal,
     Terminal,
+    Settings,
+    Palette,
+    Eye,
+    Keyboard,
+    Puzzle,
+    FileCode,
 }
 
 impl Glyph {
@@ -105,6 +111,12 @@ impl Glyph {
         Glyph::CopyPath,
         Glyph::Reveal,
         Glyph::Terminal,
+        Glyph::Settings,
+        Glyph::Palette,
+        Glyph::Eye,
+        Glyph::Keyboard,
+        Glyph::Puzzle,
+        Glyph::FileCode,
     ];
 
     pub fn path(self) -> &'static str {
@@ -149,6 +161,12 @@ impl Glyph {
             Glyph::CopyPath => "icons/link.svg",
             Glyph::Reveal => "icons/external-link.svg",
             Glyph::Terminal => "icons/terminal.svg",
+            Glyph::Settings => "icons/settings.svg",
+            Glyph::Palette => "icons/palette.svg",
+            Glyph::Eye => "icons/eye.svg",
+            Glyph::Keyboard => "icons/keyboard.svg",
+            Glyph::Puzzle => "icons/puzzle.svg",
+            Glyph::FileCode => "icons/file-code.svg",
         }
     }
 }
@@ -275,6 +293,12 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/link.svg", include_bytes!("../assets/icons/link.svg")),
     ("icons/external-link.svg", include_bytes!("../assets/icons/external-link.svg")),
     ("icons/terminal.svg", include_bytes!("../assets/icons/terminal.svg")),
+    ("icons/settings.svg", include_bytes!("../assets/icons/settings.svg")),
+    ("icons/palette.svg", include_bytes!("../assets/icons/palette.svg")),
+    ("icons/eye.svg", include_bytes!("../assets/icons/eye.svg")),
+    ("icons/keyboard.svg", include_bytes!("../assets/icons/keyboard.svg")),
+    ("icons/puzzle.svg", include_bytes!("../assets/icons/puzzle.svg")),
+    ("icons/file-code.svg", include_bytes!("../assets/icons/file-code.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 
