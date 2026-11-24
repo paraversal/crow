@@ -43,7 +43,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 
 ## Make it yours
 - Ten built-in themes: Finder Light and Dark, Catppuccin Latte and Mocha, Gruvbox Light and Dark, Solarized Light and Dark, Rosé Pine and Rosé Pine Dawn; "System" follows macOS. Any Base24 theme in `~/.config/themes` is listed too, and Apply to All Apps sets it for every program reading that index.
-- Default icons (Outline or Finder) with icon packs (SVG and PNG) layered over them in order; a font and size; a translucent sidebar.
+- Icon style (Outline or Colored) with icon packs (SVG and PNG) layered over them in order; a font and size; a translucent sidebar.
 - Motion (off, low, full), Finder-style or Crow sounds, respecting Reduce Motion.
 - Plain TOML config with live reload and comments kept; a Settings window over the same files with search, its sections (General, Appearance, Browsing, Previews, Keyboard, Search, Plugins, Advanced) laid out as grouped cards.
 - Plugins (Rhai packages with grants): commands, sidebar sections, preview providers, columns. See [plugins.md](plugins.md).

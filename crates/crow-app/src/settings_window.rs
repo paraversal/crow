@@ -446,8 +446,8 @@ impl ControlId {
             ControlId::Motion => "Motion",
             ControlId::Sound => "Sounds",
             ControlId::PlaySound => "Play",
-            ControlId::WindowWidth => "Width",
-            ControlId::WindowHeight => "Height",
+            ControlId::WindowWidth => "New window width",
+            ControlId::WindowHeight => "New window height",
             ControlId::DefaultView => "View",
             ControlId::DefaultSort => "Sort by",
             ControlId::DefaultDirection => "Sort direction",
@@ -869,9 +869,7 @@ impl SettingsWindow {
                 .with_numeric_range(f64::from(settings.font_size), 10.0, 24.0, 1.0)
         });
         let terminal = cx.new(|cx| {
-            TextInput::new(settings.terminal.clone(), "", cx)
-                .with_id("settings-terminal")
-                .with_aria_label("Terminal app")
+            TextInput::new(settings.terminal.clone(), "", cx).with_id("settings-terminal").with_aria_label("Terminal")
         });
         let exclude_names = cx.new(|cx| {
             TextInput::new(names_text(&cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names), "", cx)
@@ -882,14 +880,14 @@ impl SettingsWindow {
             TextInput::new(settings.window.width.to_string(), "", cx)
                 .with_id("settings-window-width")
                 .with_role(Role::SpinButton)
-                .with_aria_label("Width")
+                .with_aria_label("New window width")
                 .with_numeric_range(f64::from(settings.window.width), 600.0, 4000.0, 1.0)
         });
         let window_height = cx.new(|cx| {
             TextInput::new(settings.window.height.to_string(), "", cx)
                 .with_id("settings-window-height")
                 .with_role(Role::SpinButton)
-                .with_aria_label("Height")
+                .with_aria_label("New window height")
                 .with_numeric_range(f64::from(settings.window.height), 600.0, 4000.0, 1.0)
         });
         let search = cx.new(|cx| {
@@ -964,6 +962,7 @@ impl SettingsWindow {
             ControlId::FontFamily,
             ControlId::IconPack,
             ControlId::DefaultSort,
+            ControlId::DefaultDirection,
             ControlId::FontSize,
             ControlId::Terminal,
             ControlId::ExcludeNames,
@@ -1131,18 +1130,36 @@ impl SettingsWindow {
 
     /// The enabled controls of the page that is on screen, in reading order:
     /// the category's units, or the units matching the active query.
+    /// Whether control `id` is on the page now. The names field shows only while
+    /// its set is on.
+    fn control_shown(&self, id: ControlId, cx: &App) -> bool {
+        self.preview_control_enabled(id, cx)
+            && (id != ControlId::ExcludeNames || cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled)
+    }
+
     fn visible_controls(&self, cx: &App) -> Vec<ControlId> {
-        // The names field shows only while its set is on.
-        let names = cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled;
-        let visible =
-            |id: &ControlId| self.preview_control_enabled(*id, cx) && (*id != ControlId::ExcludeNames || names);
         if self.query.is_empty() {
-            return catalog::controls_in(self.category).into_iter().filter(|id| visible(id)).collect();
+            return catalog::controls_in(self.category).into_iter().filter(|id| self.control_shown(*id, cx)).collect();
+        }
+        self.search_hits(cx)
+            .into_iter()
+            .flat_map(|hit| catalog::unit_for(hit.unit).into_iter().flat_map(|unit| unit.controls.iter().copied()))
+            .filter(|id| self.control_shown(*id, cx))
+            .collect()
+    }
+
+    /// The search's matches that have a row on the page: a hit on a hidden row
+    /// alone (the names field while its set is off) must not leave a blank page.
+    fn search_hits(&self, cx: &App) -> Vec<search::Hit> {
+        if self.query.is_empty() {
+            return Vec::new();
         }
         search::matches(&self.query)
             .into_iter()
-            .flat_map(|hit| catalog::unit_for(hit.unit).into_iter().flat_map(|unit| unit.controls.iter().copied()))
-            .filter(|id| visible(id))
+            .filter(|hit| {
+                catalog::unit_for(hit.unit)
+                    .is_some_and(|unit| unit.controls.iter().any(|id| self.control_shown(*id, cx)))
+            })
             .collect()
     }
 
@@ -1444,7 +1461,11 @@ impl SettingsWindow {
 
     fn on_focus_lost(&mut self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
         match id {
-            ControlId::Theme | ControlId::FontFamily | ControlId::IconPack | ControlId::DefaultSort => {
+            ControlId::Theme
+            | ControlId::FontFamily
+            | ControlId::IconPack
+            | ControlId::DefaultSort
+            | ControlId::DefaultDirection => {
                 if self.menu == Some(id) {
                     self.close_menu(window, cx);
                 }
@@ -2701,6 +2722,9 @@ impl Render for SettingsWindow {
         if self.menu != Some(ControlId::DefaultSort) {
             self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
         }
+        if self.menu != Some(ControlId::DefaultDirection) {
+            self.direction_cursor = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
+        }
         for id in [ControlId::FontSize, ControlId::WindowWidth, ControlId::WindowHeight] {
             self.sync_stepper(id, window, cx);
         }
@@ -2715,7 +2739,7 @@ impl Render for SettingsWindow {
         for file in ERROR_FILES {
             self.error_handles[file].clone().tab_stop(issues.iter().any(|issue| issue.file == file));
         }
-        let search_hits = if self.query.is_empty() { Vec::new() } else { search::matches(&self.query) };
+        let search_hits = self.search_hits(cx);
         self.clear_search.clone().tab_stop(!self.query.is_empty() && search_hits.is_empty());
         if let Some(id) = self.focused_control(window)
             && !visible.contains(&id)
@@ -3511,6 +3535,8 @@ fn group_heading(title: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div
         .child(title)
 }
 
+/// The least height of a card that fills the page (the shortcuts list).
+const FILL_MIN_HEIGHT: f32 = 240.;
 const CARD_WIDTH: f32 = 680.;
 const CARD_RADIUS: f32 = 9.;
 
@@ -3530,7 +3556,9 @@ fn card_row(row: gpui::AnyElement, first: bool, last: bool, fill: bool, theme: &
         .border_t_1()
         .when(first, |card| card.rounded_t(px(CARD_RADIUS)))
         .when(last, |card| card.border_b_1().rounded_b(px(CARD_RADIUS)))
-        .when(fill, |card| card.flex_1().min_h_0())
+        // The shortcuts list takes the rest of the page but never less than about
+        // eight rows: a short window scrolls the page instead of squashing it.
+        .when(fill, |card| card.flex_1().min_h(px(FILL_MIN_HEIGHT)))
         .child(row)
 }
 
@@ -5327,6 +5355,54 @@ preview_providers = ["example.one.preview"]
         vcx.simulate_keystrokes("space");
         wait_for_preview(&vcx, |ui| !ui.exclude.set(crow_core::SetName::Dev).enabled);
         assert_eq!(state(&view, &vcx, ControlId::ExcludeDev).toggled, Some(false));
+
+        // With the set off its names field is gone: not in the walk, and a search that
+        // only it would match shows the no-match state instead of a blank page.
+        draw(&mut vcx);
+        let targets = view.read_with(&vcx, |view, cx| view.focus_targets(cx));
+        assert!(!targets.contains(&FocusTarget::Control(ControlId::ExcludeNames)), "{targets:?}");
+        assert!(targets.contains(&FocusTarget::Control(ControlId::ExcludeDependencies)));
+        focus_control(&view, &mut vcx, ControlId::ExcludeDev);
+        vcx.simulate_keystrokes("cmd-f");
+        vcx.simulate_input("glob");
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("settings-no-match").is_some(), "a hit on a hidden row alone is no match");
+    }
+
+    #[gpui::test]
+    fn an_untouched_names_field_keeps_names_with_commas(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::write(dir.join("exclude.toml"), "[dev]\nenabled = true\nnames = [\"*.{a,b}\", \"out\"]\n")
+            .expect("external edit");
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        focus_control(&view, &mut vcx, ControlId::ExcludeNames);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let names = vcx.read_global::<Ui, _>(|ui, _| ui.exclude.set(crow_core::SetName::Dev).names);
+        assert_eq!(names, ["*.{a,b}", "out"], "nothing was rewritten");
+        let text = std::fs::read_to_string(dir.join("exclude.toml")).unwrap();
+        assert!(text.contains("\"*.{a,b}\""), "{text}");
+    }
+
+    #[gpui::test]
+    fn search_finds_rows_by_their_old_labels(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        for (query, id) in [
+            ("folders first", ControlId::DefaultFoldersFirst),
+            ("what return does", ControlId::Enter),
+            ("default icons", ControlId::IconStyle),
+            ("skip folders excluded from time machine", ControlId::ExcludeBackup),
+        ] {
+            vcx.simulate_keystrokes("cmd-a");
+            vcx.simulate_input(query);
+            draw(&mut vcx);
+            let shown = view.read_with(&vcx, |view, cx| view.visible_controls(cx));
+            assert!(shown.contains(&id), "{query:?} finds {id:?}: {shown:?}");
+        }
     }
 
     #[gpui::test]
