@@ -24,6 +24,18 @@ keymap = "finder"
 # name in place; "open" opens the item. F2 renames in either mode.
 enter = "rename"
 
+# Which folder New Folder, New File and Paste work in when a folder is selected:
+# "shown" (default, like Finder) is always the folder you are looking at;
+# "selected" is the selected folder, so a new folder lands inside it. It applies to
+# the keys, the right-click menu and the toolbar's folder menu.
+folder_target = "shown"
+
+# Buttons pinned to the toolbar beside the folder menu button, by command id:
+# "new-folder", "new-file", "paste", "copy-path", "show-in-finder", "open-terminal".
+# The folder menu's Pin to Toolbar submenu edits this list; narrow windows fold
+# the buttons into the menu.
+toolbar_pins = []
+
 # Key hints in the bottom bar: "auto" (default), "always" or "off".
 # "auto" retires each idle hint (/ filter, Cmd-F search, Cmd-K go to) after you
 # have used its key 3 times; hints for the focused filter, sidebar or search stay.
@@ -138,6 +150,27 @@ impl KeymapLayer {
         match self {
             KeymapLayer::Finder => "finder",
             KeymapLayer::Vim => "vim",
+        }
+    }
+}
+
+/// Which folder New Folder, New File and Paste act in when a folder is selected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FolderTarget {
+    /// The folder being looked at, as in Finder.
+    #[default]
+    Shown,
+    /// The selected folder, when exactly one folder is selected.
+    Selected,
+}
+
+impl FolderTarget {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            FolderTarget::Shown => "shown",
+            FolderTarget::Selected => "selected",
         }
     }
 }
@@ -386,6 +419,8 @@ pub struct Settings {
     pub theme: String,
     pub keymap: KeymapLayer,
     pub enter: EnterAction,
+    pub folder_target: FolderTarget,
+    pub toolbar_pins: Vec<String>,
     pub hints: HintsMode,
     pub tips: TipsMode,
     pub folder_sizes: FolderSizesMode,
@@ -415,6 +450,8 @@ impl Default for Settings {
             theme: "system".into(),
             keymap: KeymapLayer::Finder,
             enter: EnterAction::Rename,
+            folder_target: FolderTarget::Shown,
+            toolbar_pins: Vec::new(),
             hints: HintsMode::Auto,
             tips: TipsMode::Auto,
             folder_sizes: FolderSizesMode::Off,
@@ -490,6 +527,12 @@ pub fn save_setting(dir: &Path, key: &str, value: &str) -> Result<(), String> {
 /// Set a boolean top-level key, keeping the rest of the file and its comments.
 pub fn save_bool_setting(dir: &Path, key: &str, value: bool) -> Result<(), String> {
     save_value(dir, key, toml_edit::Value::from(value))
+}
+
+/// Set a top-level list of strings, keeping the rest of the file and its comments.
+pub fn save_string_list_setting(dir: &Path, key: &str, values: &[String]) -> Result<(), String> {
+    let array: toml_edit::Array = values.iter().map(String::as_str).collect();
+    save_value(dir, key, toml_edit::Value::Array(array))
 }
 
 /// Set a numeric top-level key, keeping the rest of the file and its comments.

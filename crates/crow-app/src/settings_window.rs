@@ -171,6 +171,7 @@ enum ControlId {
     Terminal,
     Keymap,
     Enter,
+    FolderTarget,
     Hints,
     Tips,
     FolderSizes,
@@ -220,7 +221,7 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 55] = [
+    const ALL: [ControlId; 56] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
         ControlId::IconStyle,
@@ -231,6 +232,7 @@ impl ControlId {
         ControlId::FontSize,
         ControlId::Keymap,
         ControlId::Enter,
+        ControlId::FolderTarget,
         ControlId::Hints,
         ControlId::Tips,
         ControlId::Terminal,
@@ -290,6 +292,7 @@ impl ControlId {
             ControlId::Terminal => "settings-terminal",
             ControlId::Keymap => "settings-keymap",
             ControlId::Enter => "settings-enter",
+            ControlId::FolderTarget => "settings-folder-target",
             ControlId::Hints => "settings-hints",
             ControlId::Tips => "settings-tips",
             ControlId::FolderSizes => "settings-folder-sizes",
@@ -350,6 +353,7 @@ impl ControlId {
             | ControlId::Terminal
             | ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -391,6 +395,7 @@ impl ControlId {
             ControlId::Terminal => "Terminal app",
             ControlId::Keymap => "Keymap",
             ControlId::Enter => "What Return does",
+            ControlId::FolderTarget => "New items go in",
             ControlId::Hints => "Key hints",
             ControlId::Tips => "Tips",
             ControlId::FolderSizes => "Folder sizes",
@@ -450,6 +455,7 @@ impl ControlId {
             | ControlId::PreviewAdd => Role::ComboBox,
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -514,6 +520,9 @@ impl ControlId {
             }
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
             ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
+            ControlId::FolderTarget => {
+                "Shown is the folder you are looking at, like Finder. Selected is the selected folder, for New Folder, New File and Paste."
+            }
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
             ControlId::FolderSizes => "Measure the folders on screen in the background; off leaves them as --.",
@@ -1648,6 +1657,7 @@ impl SettingsWindow {
             }
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -1667,6 +1677,7 @@ impl SettingsWindow {
             ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
             ControlId::Keymap
             | ControlId::Enter
+            | ControlId::FolderTarget
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
@@ -1966,6 +1977,7 @@ impl SettingsWindow {
         let (current, count) = match id {
             ControlId::Keymap => (keymap_index(cx.global::<Ui>().settings.keymap), 2),
             ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
+            ControlId::FolderTarget => (folder_target_index(cx.global::<Ui>().settings.folder_target), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
@@ -1987,6 +1999,11 @@ impl SettingsWindow {
         let change = match id {
             ControlId::Keymap => SettingChange::Keymap(if index == 0 { KeymapLayer::Finder } else { KeymapLayer::Vim }),
             ControlId::Enter => SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open }),
+            ControlId::FolderTarget => SettingChange::FolderTarget(if index == 0 {
+                crow_core::FolderTarget::Shown
+            } else {
+                crow_core::FolderTarget::Selected
+            }),
             ControlId::Hints => SettingChange::Hints(match index {
                 0 => HintsMode::Auto,
                 1 => HintsMode::Always,
@@ -2495,6 +2512,7 @@ impl SettingsWindow {
                 ControlId::FontFamily => Some(self.font_cursor),
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
+                ControlId::FolderTarget => Some(folder_target_index(settings.folder_target)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
@@ -2706,6 +2724,18 @@ impl Render for SettingsWindow {
             enter_index(settings.enter),
             self.style(ControlId::Enter, window, &theme),
             enter_select,
+            None,
+        );
+
+        let folder_target_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::FolderTarget, index, window, cx)
+        });
+        let folder_target_row = controls::segmented(
+            self.meta(ControlId::FolderTarget, cx),
+            &["Shown folder", "Selected folder"],
+            folder_target_index(settings.folder_target),
+            self.style(ControlId::FolderTarget, window, &theme),
+            folder_target_select,
             None,
         );
 
@@ -2957,6 +2987,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::FontSize, font_size_row.into_any_element());
         rows.insert(ControlId::Keymap, keymap_row.into_any_element());
         rows.insert(ControlId::Enter, enter_row.into_any_element());
+        rows.insert(ControlId::FolderTarget, folder_target_row.into_any_element());
         rows.insert(ControlId::Hints, hints_row.into_any_element());
         rows.insert(ControlId::Tips, tips_row.into_any_element());
         rows.insert(ControlId::Terminal, terminal_row.into_any_element());
@@ -3430,6 +3461,13 @@ fn keymap_index(value: KeymapLayer) -> usize {
     match value {
         KeymapLayer::Finder => 0,
         KeymapLayer::Vim => 1,
+    }
+}
+
+fn folder_target_index(value: crow_core::FolderTarget) -> usize {
+    match value {
+        crow_core::FolderTarget::Shown => 0,
+        crow_core::FolderTarget::Selected => 1,
     }
 }
 
@@ -4951,6 +4989,17 @@ preview_providers = ["example.one.preview"]
         vcx.simulate_keystrokes("left");
         assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(0));
         wait_for(&vcx, "keymap = \"finder\"");
+    }
+
+    #[gpui::test]
+    fn folder_target_control_writes_its_line(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::FolderTarget);
+        assert_eq!(state(&view, &vcx, ControlId::FolderTarget).selected, Some(0), "the shown folder is the default");
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::FolderTarget).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.folder_target), crow_core::FolderTarget::Selected);
+        wait_for(&vcx, "folder_target = \"selected\"");
     }
 
     #[gpui::test]

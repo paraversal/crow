@@ -27,6 +27,18 @@ keymap = "finder"
 # name in place; "open" opens the item. F2 renames in either mode.
 enter = "rename"
 
+# Which folder New Folder, New File and Paste work in when a folder is selected:
+# "shown" (default, like Finder) is always the folder you are looking at;
+# "selected" is the selected folder, so a new folder lands inside it. It applies to
+# the keys, the right-click menu and the toolbar's folder menu.
+folder_target = "shown"
+
+# Buttons pinned to the toolbar beside the folder menu button, by command id:
+# "new-folder", "new-file", "paste", "copy-path", "show-in-finder", "open-terminal".
+# The folder menu's Pin to Toolbar submenu edits this list; narrow windows fold
+# the buttons into the menu.
+toolbar_pins = []
+
 # Key hints in the bottom bar: "auto" (default), "always" or "off".
 # "auto" retires each idle hint (/ filter, Cmd-F search, Cmd-K go to) after you
 # have used its key 3 times; hints for the focused filter, sidebar or search stay.

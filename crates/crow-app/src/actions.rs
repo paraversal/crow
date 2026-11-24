@@ -117,6 +117,8 @@ actions!(
         Redo,
         CancelOperation,
         ToggleActivity,
+        /// The toolbar's folder menu: the folder's whole context menu, and its toolbar pins.
+        ShowFolderMenu,
         // Sheets (conflicts, confirmations)
         SheetConfirm,
         SheetCancel,
@@ -284,6 +286,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-z", Redo, Some("Crow")),
         KeyBinding::new("escape", CancelOperation, Some("Crow")),
         KeyBinding::new("cmd-alt-l", ToggleActivity, Some("Crow")),
+        KeyBinding::new("ctrl-cmd-m", ShowFolderMenu, Some("Crow")),
         KeyBinding::new("enter", SheetConfirm, Some("Sheet")),
         KeyBinding::new("escape", SheetCancel, Some("Sheet")),
         // A sheet owns focus; arrows and Tab must not move it behind the scrim.
@@ -386,6 +389,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         // A sheet owns the keyboard: window-level keys must not act behind it.
         // Enter/Escape are the sheet's own; the picker's up/down and cmd-enter
         // are bound later and still win there.
+        KeyBinding::new("ctrl-cmd-m", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-z", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-z", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-alt-l", NoAction {}, Some("Sheet")),

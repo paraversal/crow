@@ -17,9 +17,9 @@ use crate::actions::{
     IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveShelfHere,
     MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal,
     PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView,
-    SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo,
-    ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview,
-    ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
+    SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowFolderMenu,
+    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
+    TogglePreview, ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
 };
 use crate::keys::KeyScope;
 
@@ -141,6 +141,7 @@ pub enum CommandId {
     EditSettings,
     Acknowledgements,
     ToggleActivity,
+    ShowFolderMenu,
     RemoveFromSidebar,
     MoveFavoriteUp,
     MoveFavoriteDown,
@@ -257,6 +258,7 @@ impl CommandId {
             CommandId::EditSettings => "edit-settings",
             CommandId::Acknowledgements => "acknowledgements",
             CommandId::ToggleActivity => "toggle-activity",
+            CommandId::ShowFolderMenu => "show-folder-menu",
             CommandId::RemoveFromSidebar => "remove-from-sidebar",
             CommandId::MoveFavoriteUp => "move-favorite-up",
             CommandId::MoveFavoriteDown => "move-favorite-down",
@@ -722,6 +724,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ToggleActivity,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Activity" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ShowFolderMenu,
+        label: "Show Folder Menu",
+        action: &ShowFolderMenu,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Folder Menu" }),
         palette: true,
     },
     Command {

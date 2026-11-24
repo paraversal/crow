@@ -63,6 +63,7 @@ Movement keys (arrows, Return, Space and Esc in lists, the sidebar, search resul
 | Show Info | `⌘I` |  | `show-info` |
 | Cycle Right Sidebar | `⌥⌘P` |  | `cycle-right-sidebar` |
 | Show Activity | `⌥⌘L` |  | `toggle-activity` |
+| Show Folder Menu | `⌃⌘M` |  | `show-folder-menu` |
 | Theme… | `⌥⌘T` |  | `show-theme-picker` |
 
 ## Go

@@ -12,6 +12,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Its Info tab shows kind, size, dates, tags, permissions and owner; a multi-selection shows totals and shared tags.
 - Quick Look thumbnails and previews, syntax-highlighted text, hidden-file toggle, folder sizes, and cloud placeholders with their download badge.
 - A path bar you can type into (⌘L) with Tab completion and a pasted path in any form; every segment drags the folder it shows, and right-clicking one opens that folder's menu (open, new tab, copy path, Terminal, add to sidebar; New Folder and Paste on the folder shown). A breadcrumb or an always-visible field.
+- A toolbar folder-menu button (⌃⌘M) opens the shown folder's whole menu; its Pin to Toolbar submenu puts any of New Folder, New File, Paste, Copy Path, Show in Finder and Open Terminal on the toolbar as a button (right-click one to unpin). Narrow windows fold the pins back into the menu.
 - Same-named folders show their parent; symlinks are marked.
 
 ## Moving around
@@ -29,7 +30,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Results show line numbers for content hits, preview at the hit line, and take the usual file keys; drag the header dividers to resize Name, Folder and Modified.
 
 ## File operations
-- Copy, move, duplicate, trash, delete permanently, empty Trash (home and every volume), new folder and file, rename, batch rename (find/replace, prefix/suffix, numbering, live preview, one undo).
+- Copy, move, duplicate, trash, delete permanently, empty Trash (home and every volume), new folder and file, rename, batch rename (find/replace, prefix/suffix, numbering, live preview, one undo). A setting (`folder_target`) chooses whether New Folder, New File and Paste work in the folder shown, as in Finder, or in the one folder selected.
 - Undo and redo for every operation, including trash and batch rename; older steps from the Activity tab (running jobs, queued conflicts and history; it stays open while you work).
 - Nothing is overwritten: name clashes ask first, Replace sends the old item to the Trash.
 - A copy queue with pause, conflicts shown up front and "Decide later"; Esc cancels cleanly, finished items stay undoable.

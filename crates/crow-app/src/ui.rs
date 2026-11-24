@@ -967,6 +967,8 @@ pub enum SettingChange {
     Theme(String),
     Keymap(KeymapLayer),
     Enter(EnterAction),
+    FolderTarget(crow_core::FolderTarget),
+    ToolbarPins(Vec<String>),
     Hints(HintsMode),
     Tips(TipsMode),
     FolderSizes(FolderSizesMode),
@@ -1000,6 +1002,8 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Theme(value) => replace(&mut settings.theme, value.clone()),
             SettingChange::Keymap(value) => replace(&mut settings.keymap, *value),
             SettingChange::Enter(value) => replace(&mut settings.enter, *value),
+            SettingChange::FolderTarget(value) => replace(&mut settings.folder_target, *value),
+            SettingChange::ToolbarPins(value) => replace(&mut settings.toolbar_pins, value.clone()),
             SettingChange::Hints(value) => replace(&mut settings.hints, *value),
             SettingChange::Tips(value) => replace(&mut settings.tips, *value),
             SettingChange::FolderSizes(value) => replace(&mut settings.folder_sizes, *value),
@@ -1062,6 +1066,16 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::Enter(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "enter", value.key()), cx);
+        }
+        SettingChange::FolderTarget(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "folder_target", value.key()), cx);
+        }
+        SettingChange::ToolbarPins(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_string_list_setting(config, "toolbar_pins", &value),
+                cx,
+            );
         }
         SettingChange::Hints(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "hints", value.key()), cx);

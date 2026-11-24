@@ -23,8 +23,9 @@ use crate::actions::{
     IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, KeyboardShortcuts, Minimize, MoveDown,
     MoveShelfHere, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
     PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch, SearchEverything,
-    SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
-    TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, Zoom,
+    SearchHome, ShowCommandPalette, ShowFolderMenu, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons,
+    ViewAsList, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -1381,6 +1382,63 @@ impl CrowWindow {
                 })),
             );
 
+        // The folder menu's button, then what is pinned from it. A narrow window keeps the
+        // button alone: its menu still reaches every pin.
+        let folder_group = {
+            let (has_folder, state) = {
+                let pane = self.pane().read(cx);
+                (pane.folder().is_some(), pane.menu_state(cx))
+            };
+            let items = crow_core::toolbar::folder_group(&cx.global::<Ui>().settings.toolbar_pins);
+            let items = if narrow { crow_core::toolbar::collapsed(&items) } else { items };
+            let pins = crate::context_menu::pinnable();
+            let mut group = div().id("toolbar-folder-group").flex().flex_none().gap(px(2.));
+            for item in items {
+                group = match item {
+                    crow_core::toolbar::ToolbarItem::FolderMenu => group.child(
+                        nav_button(
+                            "toolbar-folder-menu",
+                            "Folder menu".to_owned(),
+                            "Folder menu".to_owned(),
+                            Glyph::More,
+                            has_folder,
+                            &ShowFolderMenu,
+                            cx,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.show_folder_menu(&ShowFolderMenu, window, cx)),
+                        ),
+                    ),
+                    crow_core::toolbar::ToolbarItem::Pinned(id) => {
+                        let Some(pin) = pins.iter().find(|pin| pin.id == id).copied() else { continue };
+                        let label = crate::context_menu::title(crate::context_menu::command(pin.command));
+                        let enabled = has_folder && crate::context_menu::enabled(pin.command, state);
+                        group.child(
+                            nav_button(
+                                pin.selector,
+                                label.to_owned(),
+                                label.to_owned(),
+                                pin.glyph,
+                                enabled,
+                                crate::context_menu::command(pin.command).action,
+                                cx,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if enabled {
+                                    this.run_pinned(pin.command, window, cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(move |this, _, window, cx| this.open_pin_menu(pin.id, window, cx)),
+                            ),
+                        )
+                    }
+                };
+            }
+            group
+        };
+
         let go_to = div()
             .id("toolbar-go-to")
             .debug_selector(|| "toolbar-go-to".into())
@@ -1529,6 +1587,7 @@ impl CrowWindow {
                 };
                 bar.child(title_label.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(views.when(fade < 1.0, |el| el.opacity(fade)))
+                    .child(folder_group.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(search_field)
             })
@@ -2055,6 +2114,91 @@ impl CrowWindow {
             }
             _ => {}
         }
+    }
+
+    /// ⌃⌘M or the toolbar's menu button: the shown folder's whole menu, with its pins.
+    fn show_folder_menu(&mut self, _: &ShowFolderMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_open() || self.path_edit.is_some() || self.pane().read(cx).folder().is_none() {
+            return;
+        }
+        let state = self.pane().read(cx).menu_state(cx);
+        let pins = cx.global::<Ui>().settings.toolbar_pins.clone();
+        let entries = crate::context_menu::toolbar_entries(state, &pins, cx);
+        self.open_native_menu(entries, window, cx, |this, chosen, window, cx| {
+            this.folder_menu_closed(chosen, window, cx)
+        });
+    }
+
+    /// Show `entries` and call `closed` with the choice, or none when it was dismissed.
+    fn open_native_menu(
+        &mut self,
+        entries: Vec<crow_macos::ContextMenuEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        closed: impl FnOnce(&mut Self, Option<usize>, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = receiver.await.ok().flatten();
+            this.update_in(cx, |this, window, cx| closed(this, chosen, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn folder_menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chosen) = chosen else { return };
+        let slots = crate::context_menu::slots(crate::context_menu::MenuKind::Folder);
+        if let Some((entry, line)) = crow_macos::submenu_choice(chosen) {
+            // The submenu follows the slots and one separator.
+            if entry == slots.len() + 1
+                && let Some(pin) = crate::context_menu::pinnable().get(line)
+            {
+                self.toggle_toolbar_pin(pin.id, cx);
+            }
+            return;
+        }
+        if let Some(id) = slots.get(chosen).copied().flatten() {
+            self.focus_center(window, cx);
+            window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+        }
+    }
+
+    /// Pin the folder-menu command `id` to the toolbar, or unpin it.
+    fn toggle_toolbar_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        let pins = crow_core::toolbar::toggled(&cx.global::<Ui>().settings.toolbar_pins, id);
+        crate::ui::set_setting(crate::ui::SettingChange::ToolbarPins(pins), cx);
+        cx.notify();
+    }
+
+    /// A pinned button: run its command on the folder shown, as the menu line does.
+    fn run_pinned(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_center(window, cx);
+        window.dispatch_action(crate::context_menu::command(command).action.boxed_clone(), cx);
+    }
+
+    /// Right-click on a pinned toolbar button: the one line, Unpin.
+    fn open_pin_menu(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = vec![crow_macos::ContextMenuEntry::Item {
+            title: "Unpin from Toolbar".to_owned(),
+            shortcut: None,
+            enabled: true,
+        }];
+        self.open_native_menu(entries, window, cx, move |this, chosen, _, cx| {
+            if chosen == Some(0) {
+                this.toggle_toolbar_pin(id, cx);
+            }
+        });
     }
 
     // ----- external drag routing and spring-loaded folders -----
@@ -3446,6 +3590,7 @@ impl CrowWindow {
                     search.update(cx, |search, cx| search.run_command(command, window, cx));
                 }
             }
+            CommandId::ShowFolderMenu => self.show_folder_menu(&ShowFolderMenu, window, cx),
             CommandId::ToggleActivity => {
                 self.toggle_activity(window, cx);
             }
@@ -4100,6 +4245,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::save_search))
             .on_action(cx.listener(Self::edit_saved_search))
             .on_action(cx.listener(Self::remove_saved_search))
+            .on_action(cx.listener(Self::show_folder_menu))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, window, cx| {
                 this.toggle_activity(window, cx);
             }))
@@ -4152,8 +4298,13 @@ impl CrowWindow {
     /// The selectors a fuzzer can click in this window, in render order. Views
     /// cap their row lists; the runner drops selectors that are not laid out.
     pub fn debug_selectors(&self, cx: &App) -> Vec<String> {
-        let mut out =
-            vec!["toolbar".to_owned(), "toolbar-go-to".to_owned(), "toolbar-search".to_owned(), "path-bar".to_owned()];
+        let mut out = vec![
+            "toolbar".to_owned(),
+            "toolbar-folder-menu".to_owned(),
+            "toolbar-go-to".to_owned(),
+            "toolbar-search".to_owned(),
+            "path-bar".to_owned(),
+        ];
         out.extend(self.pane().read(cx).debug_selectors(cx));
         out.extend(self.sidebar.read(cx).debug_selectors(cx));
         if cx.global::<Ui>().settings.show_preview {

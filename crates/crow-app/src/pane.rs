@@ -3000,12 +3000,25 @@ impl Pane {
         cx.notify();
     }
 
+    /// The folder New Folder, New File and Paste work in: the one shown, or with
+    /// `folder_target = "selected"` the one folder selected in it (never a package).
+    pub fn target_folder(&self, cx: &gpui::App) -> PathBuf {
+        let shown = self.current_dir(cx);
+        if cx.global::<Ui>().settings.folder_target != crow_core::FolderTarget::Selected {
+            return shown;
+        }
+        match self.focused_folder().read(cx).selected_entries().as_slice() {
+            [(path, true)] if !crow_fs::is_package_path(path) => path.clone(),
+            _ => shown,
+        }
+    }
+
     fn new_folder(&mut self, _: &NewFolder, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.current_dir(cx) }));
+        cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.target_folder(cx) }));
     }
 
     fn new_file(&mut self, _: &NewFile, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.current_dir(cx) }));
+        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.target_folder(cx) }));
     }
 
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
@@ -3044,11 +3057,11 @@ impl Pane {
     }
 
     fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: false });
+        cx.emit(PaneEvent::Paste { into: self.target_folder(cx), move_items: false });
     }
 
     fn paste_move_files(&mut self, _: &PasteMoveFiles, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: true });
+        cx.emit(PaneEvent::Paste { into: self.target_folder(cx), move_items: true });
     }
 
     fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
@@ -3251,16 +3264,19 @@ impl Pane {
         self.open_context_menu(kind, window, cx);
     }
 
+    /// What decides which context-menu lines can act on the focused folder.
+    pub fn menu_state(&self, cx: &gpui::App) -> MenuState {
+        let folder = self.focused_folder().read(cx);
+        let (_, selected_folders) = folder.selected_bytes();
+        MenuState {
+            selected: folder.selected_count(),
+            selected_folders,
+            can_paste: !crate::operations::pasteboard_paths(cx).0.is_empty(),
+        }
+    }
+
     fn open_context_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let state = {
-            let folder = self.focused_folder().read(cx);
-            let (_, selected_folders) = folder.selected_bytes();
-            MenuState {
-                selected: folder.selected_count(),
-                selected_folders,
-                can_paste: !crate::operations::pasteboard_paths(cx).0.is_empty(),
-            }
-        };
+        let state = self.menu_state(cx);
         let scope = match (self.mode, self.filtering.is_some()) {
             (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, false) => KeyScope::List,
             (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, true) => KeyScope::ListFiltered,

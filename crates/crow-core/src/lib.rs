@@ -25,6 +25,7 @@ mod table;
 mod tabs;
 mod tags;
 mod tips;
+pub mod toolbar;
 mod usage;
 mod views;
 
@@ -57,9 +58,9 @@ pub use saved_queries::{
 };
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, IconStyle, KeymapLayer, PathBarMode, SearchMatch,
-    Settings, SettingsError, SidebarStyle, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings,
-    save_bool_setting, save_number_setting, save_setting, save_table_number,
+    DEFAULT_SETTINGS, EnterAction, FolderSizesMode, FolderTarget, HintsMode, IconStyle, KeymapLayer, PathBarMode,
+    SearchMatch, Settings, SettingsError, SidebarStyle, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings,
+    save_bool_setting, save_number_setting, save_setting, save_string_list_setting, save_table_number,
 };
 pub use shelf::{Shelf, ShelfItem};
 pub use sidebar::{

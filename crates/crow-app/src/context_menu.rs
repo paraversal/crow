@@ -232,6 +232,55 @@ pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App)
         .collect()
 }
 
+/// A folder-menu command the toolbar can pin.
+#[derive(Clone, Copy, Debug)]
+pub struct Pin {
+    /// The id in `settings.toml`'s `toolbar_pins` (one of `crow_core::toolbar::PINNABLE`).
+    pub id: &'static str,
+    pub command: CommandId,
+    /// The button's selector, for tests and the fuzzer.
+    pub selector: &'static str,
+    pub glyph: crate::icons::Glyph,
+}
+
+/// The pinnable commands in menu order.
+pub fn pinnable() -> Vec<Pin> {
+    use crate::icons::Glyph;
+    let glyph = |id: &str| match id {
+        "new-folder" => (Glyph::NewFolder, "toolbar-pin-new-folder"),
+        "new-file" => (Glyph::NewFile, "toolbar-pin-new-file"),
+        "paste" => (Glyph::Paste, "toolbar-pin-paste"),
+        "copy-path" => (Glyph::CopyPath, "toolbar-pin-copy-path"),
+        "show-in-finder" => (Glyph::Reveal, "toolbar-pin-show-in-finder"),
+        "open-terminal" => (Glyph::Terminal, "toolbar-pin-open-terminal"),
+        other => unreachable!("{other} is not a pinnable id"),
+    };
+    crow_core::toolbar::PINNABLE
+        .iter()
+        .map(|id| {
+            let command =
+                COMMANDS.iter().find(|command| command.id.key() == *id).expect("every pinnable id is a command");
+            let (glyph, selector) = glyph(id);
+            Pin { id, command: command.id, selector, glyph }
+        })
+        .collect()
+}
+
+/// The toolbar folder menu: the folder's menu (`Folder`) and a Pin to Toolbar submenu with a
+/// check beside what is pinned. Submenu line `n` is `pinnable()[n]`.
+pub fn toolbar_entries(state: MenuState, pins: &[String], cx: &App) -> Vec<ContextMenuEntry> {
+    let mut entries = entries(MenuKind::Folder, state, KeyScope::List, cx);
+    entries.push(ContextMenuEntry::Separator);
+    entries.push(ContextMenuEntry::Submenu {
+        title: "Pin to Toolbar".to_owned(),
+        lines: pinnable()
+            .into_iter()
+            .map(|pin| (title(command(pin.command)).to_owned(), crow_core::toolbar::is_pinned(pins, pin.id)))
+            .collect(),
+    });
+    entries
+}
+
 /// A path-bar segment's menu: the folder it names, which is the shown one for
 /// the last segment, so only that one offers New Folder, New File and Paste.
 const PATH_FOLDER: &[TitledSlot] = &[

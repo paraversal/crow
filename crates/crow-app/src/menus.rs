@@ -385,6 +385,7 @@ mod tests {
                 "Show Git Diff",
                 "Calculate Folder Sizes",
                 "Show Activity",
+                "Show Folder Menu",
                 "Theme…",
             ]
         );

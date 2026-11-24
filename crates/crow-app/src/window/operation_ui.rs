@@ -242,6 +242,22 @@ impl CrowWindow {
             // Whatever is still there refuses.
             pane.update(cx, |pane, cx| pane.start_effect(&paths, Fx::Refuse, cx)).ok();
         }
+        // With `folder_target = "selected"` a new item can land in a folder that is not
+        // listed: nothing to select or rename there, so say where it went.
+        let (results, rename) = match request {
+            Request::NewFolder { parent } | Request::NewFile { parent }
+                if !failed && *parent != self.pane().read(cx).current_dir(cx) =>
+            {
+                if let Some(created) = results.first() {
+                    let name = created.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    let folder = parent.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    operations::message(format!("Created “{name}” in {folder}"), false, cx);
+                    cx.notify();
+                }
+                (Vec::new(), false)
+            }
+            _ => (results, rename),
+        };
         pane.update(cx, |pane, cx| {
             pane.show_results(results, rename, cx);
             pane.refresh_saved(cx);

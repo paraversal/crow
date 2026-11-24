@@ -169,6 +169,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::Enter],
     ),
     unit(
+        ControlId::FolderTarget,
+        Category::Behaviour,
+        "New items go in",
+        &["new folder", "new file", "paste", "selected folder", "shown folder", "finder"],
+        &["folder_target"],
+        &[ControlId::FolderTarget],
+    ),
+    unit(
         ControlId::Hints,
         Category::Behaviour,
         "Key hints",

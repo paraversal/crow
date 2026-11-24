@@ -450,6 +450,7 @@ mod tests {
                 (CommandId::ShowThemePicker, "⌥⌘T"),
                 (CommandId::OpenSettings, "⌘,"),
                 (CommandId::ToggleActivity, "⌥⌘L"),
+                (CommandId::ShowFolderMenu, "⌃⌘M"),
                 (CommandId::RemoveFromSidebar, "⌘⌫"),
                 (CommandId::MoveFavoriteUp, "⌥⌘↑"),
                 (CommandId::MoveFavoriteDown, "⌥⌘↓"),

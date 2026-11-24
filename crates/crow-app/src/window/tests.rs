@@ -4454,6 +4454,13 @@ fn last_menu_titles(cx: &mut VisualTestContext) -> Vec<String> {
             ContextMenuEntry::Separator => "—".to_owned(),
             ContextMenuEntry::Item { title, enabled: true, .. } => title,
             ContextMenuEntry::Item { title, .. } => format!("{title} (off)"),
+            ContextMenuEntry::Submenu { title, lines } => {
+                let lines: Vec<_> = lines
+                    .into_iter()
+                    .map(|(line, checked)| format!("{}{line}", if checked { "✓ " } else { "" }))
+                    .collect();
+                format!("{title} ▸ {}", lines.join(" | "))
+            }
         })
         .collect()
 }
@@ -10785,6 +10792,127 @@ fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
     assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
     assert!(!root.join("untitled folder").exists());
     assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+}
+
+/// `folder_target = "selected"`: New Folder, New File and Paste work in the one folder selected.
+/// The toolbar's folder menu, its pins, and the 640 px fold.
+#[gpui::test]
+fn the_toolbar_folder_menu_pins_commands_as_buttons(cx: &mut TestAppContext) {
+    let root = fixture("toolbar-pins");
+    let (view, mut cx) = open(cx, &root);
+    let script = |cx: &mut VisualTestContext, choice: Option<usize>| {
+        cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(choice));
+    };
+    let pins = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().settings.toolbar_pins.clone());
+    let submenu_line = |line: usize| {
+        let slots = crate::context_menu::slots(crate::context_menu::MenuKind::Folder).len();
+        crow_macos::SUBMENU_BASE + (slots + 1) * crow_macos::SUBMENU_STRIDE + line
+    };
+    assert!(cx.debug_bounds("toolbar-folder-menu").is_some(), "the menu button is on the toolbar");
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none(), "nothing is pinned by default");
+
+    // The menu: the folder's lines, then Pin to Toolbar with a check beside what is pinned.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("ctrl-cmd-m");
+    let titles = last_menu_titles(&mut cx);
+    assert_eq!(titles[0], "New Folder", "{titles:?}");
+    assert_eq!(
+        titles.last().map(String::as_str),
+        Some("Pin to Toolbar ▸ New Folder | New File | Paste | Copy Path | Show in Finder | Open Terminal Here"),
+        "{titles:?}"
+    );
+
+    // Pin New Folder from the submenu: the button appears and the file keeps the choice.
+    script(&mut cx, Some(submenu_line(0)));
+    let button = cx.debug_bounds("toolbar-folder-menu").expect("menu button").center();
+    cx.simulate_click(button, gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert_eq!(pins(&cx), ["new-folder"]);
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_some(), "the pinned button is drawn");
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "every pinned button has a role and a label: {found:?}");
+    for _ in 0..40 {
+        cx.run_until_parked();
+        if std::fs::read_to_string(config_dir(&cx).join("settings.toml"))
+            .is_ok_and(|text| text.contains("toolbar_pins = [\"new-folder\"]"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let saved = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).unwrap();
+    assert!(saved.contains("toolbar_pins = [\"new-folder\"]"), "{saved}");
+    assert!(saved.contains("# Buttons pinned to the toolbar"), "the comments survive the edit");
+
+    // The pinned submenu line is checked, and the button runs the command on the folder shown.
+    script(&mut cx, None);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("ctrl-cmd-m");
+    assert!(last_menu_titles(&mut cx).last().is_some_and(|line| line.contains("✓ New Folder")));
+    let button = cx.debug_bounds("toolbar-pin-new-folder").expect("pinned button").center();
+    cx.simulate_click(button, gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled folder").is_dir(), "the pinned button made a folder");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+
+    // A narrow window folds the pins into the menu button.
+    cx.simulate_resize(size(px(640.), px(640.)));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none(), "640 px keeps only the menu button");
+    assert!(cx.debug_bounds("toolbar-folder-menu").is_some());
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+    cx.simulate_resize(size(px(1200.), px(760.)));
+    settle(&view, &mut cx);
+
+    // Right-click a pinned button to unpin it.
+    script(&mut cx, Some(0));
+    let button = cx.debug_bounds("toolbar-pin-new-folder").expect("pinned button").center();
+    right_click(&mut cx, button);
+    settle(&view, &mut cx);
+    assert_eq!(pins(&cx), Vec::<String>::new());
+    assert!(cx.debug_bounds("toolbar-pin-new-folder").is_none());
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+}
+
+#[gpui::test]
+fn new_items_follow_the_folder_target_setting(cx: &mut TestAppContext) {
+    let root = fixture("folder-target");
+    std::fs::write(root.join("alpha/inner/x.txt"), "x").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the first row is selected");
+
+    // The default is Finder's: the folder shown, whatever is selected.
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("untitled folder").is_dir(), "shown by default");
+
+    write_config(&view, &mut cx, "settings.toml", "folder_target = \"selected\"\n");
+    cx.simulate_keystrokes("home");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("cmd-alt-n");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/untitled").is_file(), "New File lands in the selected folder");
+    assert!(
+        cx.read(|cx| cx.global::<Operations>().message.as_ref().is_some_and(|(text, _)| text.contains("in alpha"))),
+        "the status says where it went"
+    );
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)), None, "no rename waits for a row not shown");
+
+    // A file, or two rows, selects no single folder: back to the folder shown.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx).len(), 2);
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("untitled folder 2").is_dir(), "a multi-selection uses the shown folder");
 }
 
 #[gpui::test]
