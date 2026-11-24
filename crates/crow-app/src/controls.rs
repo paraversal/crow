@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use crow_core::motion::Effective;
 use crow_theme::Theme;
 use gpui::{
-    AnimationExt as _, App, Bounds, Div, Entity, FocusHandle, FontWeight, IntoElement, Role, ScrollHandle,
-    SharedString, Toggled, Window, anchored, deferred, div, prelude::*, px,
+    AnimationExt as _, App, Bounds, Div, Entity, FocusHandle, IntoElement, Role, ScrollHandle, SharedString, Toggled,
+    Window, anchored, deferred, div, prelude::*, px,
 };
 
 use crate::icons::{Glyph, glyph};
@@ -40,31 +40,46 @@ pub type Activate = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type Select = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// A labelled row around a caller-built control, for composite settings such
-/// as the config-file buttons and the sort key with its direction.
+/// as the sort key with its direction or the new window's width and height.
 pub fn labeled(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Stateful<Div> {
     row(meta, theme, control)
 }
 
+/// The label and its caption, if the row has one.
+fn label_column(meta: &ControlMeta, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(color(if meta.enabled { theme.role("fg") } else { theme.role("fg-muted") }))
+                .child(meta.label),
+        )
+        .children(
+            meta.description
+                .clone()
+                .map(|text| div().text_size(px(11.)).text_color(color(theme.role("fg-muted"))).child(text)),
+        )
+}
+
+/// Label and caption on the left, the control on the right. A control too wide
+/// for the window wraps under the label instead of squeezing it.
 fn row(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Stateful<Div> {
     let id = meta.id;
     div()
         .id((id, 0u64))
         .debug_selector(move || format!("{id}-row"))
         .flex()
-        .flex_col()
-        .gap(px(5.))
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_x(px(16.))
+        .gap_y(px(6.))
         .w_full()
-        .child(
-            div()
-                .text_size(px(14.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color(if meta.enabled { theme.role("fg") } else { theme.role("fg-muted") }))
-                .child(meta.label),
-        )
-        .children(
-            meta.description.map(|text| div().text_size(px(11.)).text_color(color(theme.role("fg-muted"))).child(text)),
-        )
-        .child(control)
+        .child(label_column(&meta, theme).flex_1().min_w(px(150.)))
+        .child(div().flex_none().max_w_full().child(control))
 }
 
 /// A pill switch. Space toggles it; the caller binds the key.
@@ -155,6 +170,9 @@ pub fn segmented(
         .gap(px(2.))
         .rounded(px(7.))
         .bg(color(theme.role("surface")))
+        // An edge in every state, so the track reads on a card and focus moves nothing.
+        .border_1()
+        .border_color(color(theme.role("border")))
         .when(focused, |group| group.shadow(cursor_ring(theme)))
         .when(!meta.enabled, |group| group.opacity(0.45))
         .relative()
@@ -231,18 +249,23 @@ pub fn segmented(
 /// A numeric field with a spin-button role. The caller owns the `TextInput` and
 /// binds ↑ ↓ (and ⇧ for ±10); the field itself takes typed digits.
 pub fn stepper(meta: ControlMeta, input: &Entity<TextInput>, style: ControlStyle) -> gpui::Stateful<Div> {
+    let field = stepper_field(&meta, input, style);
+    row(meta, style.theme, field)
+}
+
+/// A [`stepper`]'s field alone, for a row that holds two (width × height).
+pub fn stepper_field(meta: &ControlMeta, input: &Entity<TextInput>, style: ControlStyle) -> gpui::Stateful<Div> {
     let ControlStyle { focused, theme, .. } = style;
     let control_id = meta.id;
-    let field = div()
+    div()
         .id(control_id)
         .debug_selector(move || format!("{control_id}-control"))
-        .w(px(104.))
+        .w(px(84.))
         .p(px(2.))
         .rounded_md()
         .when(focused, |field| field.shadow(cursor_ring(theme)))
         .when(!meta.enabled, |field| field.opacity(0.45))
-        .child(input.clone());
-    row(meta, theme, field)
+        .child(input.clone())
 }
 
 /// A single-line text field. The caller owns the `TextInput` and commits on
@@ -302,6 +325,22 @@ pub fn dropdown_valued(
     toggle: Activate,
     select: Select,
 ) -> gpui::Stateful<Div> {
+    let control = dropdown_control(&meta, options, value, DROPDOWN_WIDTH, menu, style, toggle, select);
+    row(meta, style.theme, control)
+}
+
+/// A [`dropdown_valued`]'s button and menu alone, `width` wide, for a row that holds two.
+#[allow(clippy::too_many_arguments)]
+pub fn dropdown_control(
+    meta: &ControlMeta,
+    options: &[String],
+    value: String,
+    width: f32,
+    menu: Option<Menu>,
+    style: ControlStyle,
+    toggle: Activate,
+    select: Select,
+) -> Div {
     let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
     let mut button = div()
@@ -313,7 +352,7 @@ pub fn dropdown_valued(
         .aria_expanded(menu.is_some())
         .aria_disabled(!meta.enabled)
         .track_focus(focus)
-        .w(px(DROPDOWN_WIDTH))
+        .w(px(width))
         .h(px(26.))
         .px(px(10.))
         .flex()
@@ -338,7 +377,7 @@ pub fn dropdown_valued(
     }
     let popup =
         menu.filter(|_| meta.enabled).map(|menu| options_popup(control_id, meta.label, options, menu, theme, select));
-    row(meta, theme, div().flex().flex_col().child(button).children(popup))
+    div().flex().flex_col().child(button).children(popup)
 }
 
 /// The anchored list of choices under a drop-down or menu button.
@@ -403,7 +442,7 @@ const DROPDOWN_WIDTH: f32 = 260.;
 
 /// A button that opens a list of choices, such as "Add Provider". The list uses
 /// the same anchored popup as a drop-down but the closed button keeps its own
-/// label instead of a selected value.
+/// label instead of a selected value. It has no label row: it sits among buttons.
 #[allow(clippy::too_many_arguments)]
 pub fn menu_button(
     meta: ControlMeta,
@@ -413,7 +452,7 @@ pub fn menu_button(
     style: ControlStyle,
     toggle: Activate,
     select: Select,
-) -> gpui::Stateful<Div> {
+) -> Div {
     let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
     let open = menu.is_some();
@@ -450,7 +489,7 @@ pub fn menu_button(
     }
     let popup =
         menu.filter(|_| meta.enabled).map(|menu| options_popup(control_id, meta.label, options, menu, theme, select));
-    row(meta, theme, div().flex().flex_col().child(button).children(popup))
+    div().flex().flex_col().child(button).children(popup)
 }
 
 /// A standard button with a focus ring. Space/Return activate it through the

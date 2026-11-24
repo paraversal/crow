@@ -1,6 +1,6 @@
 # Configuration
 
-Crow keeps its settings in plain TOML files in `~/.config/crow/` (override the folder with `CROW_CONFIG_DIR`). Each file is created on first launch with every option documented in comments; changes apply immediately, a mistake shows in the status line with the file and line, and when Crow writes to a file it keeps your comments. The Settings window (⌘,) edits the same files, so you can use either; its Config Files page opens each one.
+Crow keeps its settings in plain TOML files in `~/.config/crow/` (override the folder with `CROW_CONFIG_DIR`). Each file is created on first launch with every option documented in comments; changes apply immediately, a mistake shows in the status line with the file and line, and when Crow writes to a file it keeps your comments. The Settings window (⌘,) edits the same files, so you can use either; its Advanced page opens each one.
 
 The blocks below are the files exactly as Crow writes them on first launch. They are generated from the app and checked by a test (`CROW_UPDATE_DOCS=1 cargo test -p crow-core --test docs` rewrites them), so they cannot drift.
 
@@ -394,4 +394,4 @@ One approval record per plugin, including the bundled Git package: `enabled`, th
 
 ## Icon packs
 
-Data-only: `icon-packs/<id>/pack.toml` with its icons beside it (SVG, tinted with a theme role or palette hue, or PNG up to 1024 px, drawn as is). A pack maps item paths, file names, folder names, extensions, UTType identifiers and generic files and folders to icons. [docs/examples/icon-pack](examples/icon-pack) is a complete pack. Pick the base in Settings ▸ Appearance ▸ Default icons and packs in Icon packs, and tick several to layer them (the menu stays open while you tick packs). An `[item]` path matches the folder whether you wrote it through a symlink or as its real path. See [themes.md](themes.md).
+Data-only: `icon-packs/<id>/pack.toml` with its icons beside it (SVG, tinted with a theme role or palette hue, or PNG up to 1024 px, drawn as is). A pack maps item paths, file names, folder names, extensions, UTType identifiers and generic files and folders to icons. [docs/examples/icon-pack](examples/icon-pack) is a complete pack. Pick the base in Settings ▸ Appearance ▸ Icon style and packs in Icon packs, and tick several to layer them (the menu stays open while you tick packs). An `[item]` path matches the folder whether you wrote it through a symlink or as its real path. See [themes.md](themes.md).

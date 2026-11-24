@@ -86,7 +86,7 @@ mod tests {
     fn label_prefixes_beat_fuzzy_matches() {
         let hits = matches("sho");
         assert_eq!(hits.first().map(|hit| hit.unit), Some(ControlId::ShowHidden), "{hits:?}");
-        assert_eq!(hits.first().map(|hit| hit.category), Some(Category::ViewsPreview));
+        assert_eq!(hits.first().map(|hit| hit.category), Some(Category::Browsing));
     }
 
     #[test]

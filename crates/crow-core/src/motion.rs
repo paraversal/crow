@@ -152,6 +152,15 @@ pub fn sounds(set: SoundSet) -> Vec<SoundId> {
     out
 }
 
+/// The events the Play button in Settings plays in turn for `set`: one per
+/// distinct sound, the trash last so its fade is not cut by a later sound.
+pub fn sample(set: SoundSet) -> Vec<Event> {
+    [Event::NewFolder, Event::Move, Event::CopyDone, Event::Undo, Event::EmptyTrash, Event::Trash]
+        .into_iter()
+        .filter(|&event| matches!(cue(set, event), Some(Cue::Play { .. })))
+        .collect()
+}
+
 /// Every sound any set can play, for the lab's set switch.
 pub fn all_sounds() -> Vec<SoundId> {
     let mut out = Vec::new();
@@ -546,6 +555,15 @@ pub fn disclose_opacity(mode: Effective, k: usize, rows: usize, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sample_plays_each_sound_of_the_set_with_the_trash_last() {
+        assert!(sample(SoundSet::Off).is_empty());
+        assert_eq!(sample(SoundSet::Finder), [Event::EmptyTrash, Event::Trash]);
+        let crow = sample(SoundSet::Crow);
+        assert_eq!(crow.len(), 6);
+        assert_eq!(crow.last(), Some(&Event::Trash));
+    }
 
     #[test]
     fn copy_flash_fades_and_off_has_none() {

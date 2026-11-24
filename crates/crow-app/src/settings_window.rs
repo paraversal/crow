@@ -414,45 +414,45 @@ impl ControlId {
     fn label(self) -> &'static str {
         match self {
             ControlId::Theme => "Theme",
-            ControlId::IconStyle => "Default icons",
+            ControlId::IconStyle => "Icon style",
             ControlId::IconPack => "Icon packs",
             ControlId::PathBar => "Path bar",
             ControlId::SidebarStyle => "Sidebar style",
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
-            ControlId::Terminal => "Terminal app",
-            ControlId::Keymap => "Keymap",
-            ControlId::Enter => "What Return does",
+            ControlId::Terminal => "Terminal",
+            ControlId::Keymap => "Vim motions",
+            ControlId::Enter => "Return key",
             ControlId::FolderTarget => "New items go in",
             ControlId::Hints => "Key hints",
             ControlId::Tips => "Tips",
-            ControlId::FolderSizes => "Folder sizes",
+            ControlId::FolderSizes => "Calculate folder sizes",
             ControlId::ShowHidden => "Show hidden files",
-            ControlId::SearchHidden => "Search always includes hidden files",
-            ControlId::ExcludeDev => "Skip developer folders",
-            ControlId::ExcludeDependencies => "Skip dependency folders",
-            ControlId::ExcludeMedia => "Skip media libraries",
-            ControlId::ExcludeHidden => "Skip hidden folders",
-            ControlId::ExcludeSystem => "Skip system folders",
-            ControlId::ExcludeBackup => "Skip folders excluded from Time Machine",
-            ControlId::ExcludeNames => "Developer folder names",
-            ControlId::SearchMatch => "Search matches",
-            ControlId::SavedQueryList => "Saved Queries",
+            ControlId::SearchHidden => "Include hidden items",
+            ControlId::ExcludeDev => "Developer folders",
+            ControlId::ExcludeDependencies => "Dependency folders",
+            ControlId::ExcludeMedia => "Media libraries",
+            ControlId::ExcludeHidden => "Hidden folders",
+            ControlId::ExcludeSystem => "System folders",
+            ControlId::ExcludeBackup => "Folders Time Machine skips",
+            ControlId::ExcludeNames => "Names",
+            ControlId::SearchMatch => "Find looks in",
+            ControlId::SavedQueryList => "Saved queries",
             ControlId::NewSavedQuery => "New Saved Query…",
-            ControlId::ShowPreview => "Show preview",
-            ControlId::ViewPerFolder => "Folders keep their own view",
-            ControlId::PaletteRecent => "Remember recent commands in ⌘K",
+            ControlId::ShowPreview => "Open the right sidebar in list and column view",
+            ControlId::ViewPerFolder => "Remember each folder's view",
+            ControlId::PaletteRecent => "Recent commands in ⌘K",
             ControlId::TranslucentSidebar => "Translucent sidebar",
             ControlId::Motion => "Motion",
             ControlId::Sound => "Sounds",
             ControlId::PlaySound => "Play",
-            ControlId::WindowWidth => "Width",
-            ControlId::WindowHeight => "Height",
-            ControlId::DefaultView => "Default view",
+            ControlId::WindowWidth => "New window width",
+            ControlId::WindowHeight => "New window height",
+            ControlId::DefaultView => "View",
             ControlId::DefaultSort => "Sort by",
             ControlId::DefaultDirection => "Sort direction",
-            ControlId::DefaultFoldersFirst => "Folders first",
-            ControlId::PreviewScope => "Scope",
+            ControlId::DefaultFoldersFirst => "Keep folders on top",
+            ControlId::PreviewScope => "Folders",
             ControlId::PreviewCurrentFolder => "Use Current Folder",
             ControlId::PreviewChooseFolder => "Choose Folder…",
             ControlId::PreviewRuleSelect => "Path rule",
@@ -486,14 +486,12 @@ impl ControlId {
             | ControlId::FontFamily
             | ControlId::IconPack
             | ControlId::DefaultSort
+            | ControlId::DefaultDirection
             | ControlId::PreviewRuleSelect
             | ControlId::PreviewAdd => Role::ComboBox,
-            ControlId::Keymap
-            | ControlId::Enter
+            ControlId::Enter
             | ControlId::FolderTarget
             | ControlId::Hints
-            | ControlId::Tips
-            | ControlId::FolderSizes
             | ControlId::PathBar
             | ControlId::IconStyle
             | ControlId::SidebarStyle
@@ -501,9 +499,11 @@ impl ControlId {
             | ControlId::Sound
             | ControlId::SearchMatch
             | ControlId::DefaultView
-            | ControlId::DefaultDirection
             | ControlId::PreviewScope => Role::RadioGroup,
-            ControlId::ShowHidden
+            ControlId::Keymap
+            | ControlId::Tips
+            | ControlId::FolderSizes
+            | ControlId::ShowHidden
             | ControlId::SearchHidden
             | ControlId::ExcludeDev
             | ControlId::ExcludeDependencies
@@ -543,125 +543,24 @@ impl ControlId {
         }
     }
 
-    fn description(self, cx: &App) -> Option<SharedString> {
+    /// The caption under a row. Only rows whose label and options can't say it
+    /// carry one (see the caption rules in the Settings plan); keep them short.
+    fn description(self, _cx: &App) -> Option<SharedString> {
         let text = match self {
-            ControlId::Theme => "Themes from ~/.config/themes.",
-            ControlId::IconStyle => {
-                "Outline draws the sidebar's folders as line glyphs, like Finder; Finder uses its colored icons."
-            }
-            ControlId::IconPack => {
-                "Tick packs to override the default icons; the first pack with an icon wins. A folder's views.toml source wins."
-            }
-            ControlId::PathBar => "Crow fades in an editor over the breadcrumb; Explorer keeps a visible path field.",
-            ControlId::SidebarStyle => "How the sidebar draws its groups. Any group can carry an icon in sidebar.toml.",
-            ControlId::FontFamily => "Installed families; System follows macOS.",
-            ControlId::FontSize => "10 to 24 points.",
-            ControlId::Terminal => {
-                "The app Open Terminal Here opens: a name like Terminal or iTerm, or a path to an app."
-            }
-            ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
-            ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
-            ControlId::FolderTarget => {
-                "Shown is the folder you are looking at, like Finder. Selected is the selected folder, for New Folder, New File and Paste."
-            }
-            ControlId::Hints => "Auto retires idle hints after you use their key three times.",
-            ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
-            ControlId::FolderSizes => "Measure the folders on screen in the background; off leaves them as --.",
-            ControlId::ShowHidden => "List dotfiles and other hidden items.",
-            ControlId::SearchHidden => {
-                "Find dot items while Show hidden files is off; Go to ranks them after visible matches."
-            }
-            ControlId::SearchMatch => "What each new Find looks for; the panel's control changes the open search.",
-            ControlId::ExcludeDev => "node_modules, .git, target, build and the like. On by default.",
-            ControlId::ExcludeDependencies => "vendor, .bundle and bower_components.",
-            ControlId::ExcludeMedia => "Photos, Photo Booth, iMovie and Final Cut libraries.",
-            ControlId::ExcludeHidden => "Every folder whose name starts with a dot.",
-            ControlId::ExcludeSystem => "/System, /Library/Caches and Trash folders.",
-            ControlId::ExcludeBackup => {
-                "Folders with the Time Machine exclusion mark, such as the dev folders asimeow marks (github.com/paraversal/asimeow). One attribute read per folder."
-            }
-            ControlId::ExcludeNames => {
-                "Comma-separated folder names or globs; search skips them while Skip developer folders is on."
-            }
-            ControlId::SavedQueryList | ControlId::NewSavedQuery => return None,
-            ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
-            ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
-            ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
-            ControlId::TranslucentSidebar => {
-                "The sidebar shows the blurred desktop behind it. Stays solid while macOS Reduce Transparency is on."
-            }
-            ControlId::DefaultView => "The view for folders without their own: Icons, List, Columns or Gallery.",
-            ControlId::DefaultSort => "The [defaults] order; a rule or folder override still wins.",
-            ControlId::DefaultDirection => {
-                let ui = cx.global::<Ui>();
-                let layer = ui.views.defaults_layer();
-                let key = layer.sort.unwrap_or_default();
-                let natural = if crow_core::natural_ascending(key) {
-                    "A to Z / smallest first"
-                } else {
-                    "largest or newest first"
-                };
-                return Some(
-                    match layer.ascending {
-                        Some(true) => {
-                            format!("Saved ascending. Natural for {} is {natural}.", crow_core::sort_key_name(key))
-                        }
-                        Some(false) => {
-                            format!("Saved descending. Natural for {} is {natural}.", crow_core::sort_key_name(key))
-                        }
-                        None => format!("Natural for {}: {natural}.", crow_core::sort_key_name(key)),
-                    }
-                    .into(),
-                );
-            }
-            ControlId::DefaultFoldersFirst => "Group folders above files before sorting.",
-            ControlId::PreviewScope => "Edit the list for every folder, one folder, or a path rule.",
-            ControlId::PreviewCurrentFolder => "Use the folder the browser showed when Settings opened.",
-            ControlId::PreviewChooseFolder => "Pick any folder. Cancelling leaves the target and views.toml alone.",
-            ControlId::PreviewRuleSelect => "Rules in views.toml order; later rules win for a folder.",
-            ControlId::PreviewRulePattern => {
-                "A path or glob such as ~/Pictures/**; the new rule goes after the existing ones."
-            }
-            ControlId::PreviewAddRule => "Append a preview-only rule and keep every other field of the file.",
-            ControlId::PreviewList => "Configured providers in execution order; first match wins.",
-            ControlId::PreviewMoveUp => "Move the selected provider earlier.",
-            ControlId::PreviewMoveDown => "Move the selected provider later.",
-            ControlId::PreviewRemove => "Remove the selected provider from this layer.",
-            ControlId::PreviewAdd => "Add a registered preview provider that is not in the list yet.",
-            ControlId::PreviewClear => "Remove this layer's preview list so it inherits again.",
-            ControlId::Motion => {
-                let settings = &cx.global::<Ui>().settings;
-                return Some(match settings.motion {
-                    MotionMode::Auto => {
-                        let reduce = crow_macos::reduce_motion();
-                        let effective = settings.motion.resolve(reduce);
-                        format!(
-                            "Auto now: {}; Reduce Motion is {}.",
-                            match effective {
-                                crow_core::motion::Effective::Off => "Off",
-                                crow_core::motion::Effective::Low => "Low",
-                                crow_core::motion::Effective::Full => "Full",
-                            },
-                            if reduce { "on" } else { "off" }
-                        )
-                        .into()
-                    }
-                    _ => "Off changes in one frame; Low fades; Full also moves.".into(),
-                });
-            }
-            ControlId::Sound => "Crow adds soft ticks to Finder's sounds; Off is silent.",
-            ControlId::PlaySound => "Play the trash sound in the chosen set.",
-            ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points.",
-            ControlId::Plugins | ControlId::KeyboardSearch | ControlId::KeyboardList => return None,
-            ControlId::KeyboardResetAll => "Remove every shortcut change in the chosen layer.",
-            ControlId::EditSettings => "Open settings.toml in its default app.",
-            ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
-            ControlId::OpenSidebarToml
-            | ControlId::OpenViewsToml
-            | ControlId::OpenExcludeToml
-            | ControlId::OpenPluginsToml
-            | ControlId::OpenSavedQueriesToml
-            | ControlId::OpenKeysToml => return None,
+            ControlId::FolderTarget => "For New Folder, New File, Paste and the folder menu.",
+            ControlId::Terminal => "The app Open Terminal Here opens.",
+            ControlId::Motion => "Auto follows Reduce Motion in macOS.",
+            ControlId::Theme => "Add more in ~/.config/themes.",
+            ControlId::IconPack => "The first ticked pack with an icon wins.",
+            ControlId::Keymap => "hjkl, gg/G, yy/p and marks, on top of the Finder keys.",
+            ControlId::Hints => "A hint goes once you've used its key three times.",
+            ControlId::SearchHidden => "Even when hidden files aren't shown.",
+            ControlId::ExcludeDependencies => "vendor, .bundle, bower_components",
+            ControlId::ExcludeMedia => "Photos, Photo Booth, iMovie, Final Cut",
+            ControlId::ExcludeSystem => "/System, /Library/Caches, the Trash",
+            ControlId::ExcludeBackup => "Folders left out of Time Machine backups.",
+            ControlId::PreviewList => "The first provider that can show a file is used.",
+            _ => return None,
         };
         Some(text.into())
     }
@@ -671,10 +570,10 @@ impl ControlId {
     fn enabled(self, cx: &App) -> bool {
         let ui = cx.global::<Ui>();
         match self {
+            ControlId::PlaySound => ui.feedback.sound != crow_core::motion::SoundSet::Off,
             ControlId::EditSettings
             | ControlId::ShowConfig
             | ControlId::Plugins
-            | ControlId::PlaySound
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
@@ -909,6 +808,8 @@ pub struct SettingsWindow {
     /// Default-sort menu cursor (index into the fixed sort-key list).
     sort_cursor: usize,
     sort_scroll: ScrollHandle,
+    direction_cursor: usize,
+    direction_scroll: ScrollHandle,
     preview_scope: PreviewScope,
     preview_folder: Option<PathBuf>,
     preview_rule: Option<crow_core::RuleLocator>,
@@ -968,9 +869,7 @@ impl SettingsWindow {
                 .with_numeric_range(f64::from(settings.font_size), 10.0, 24.0, 1.0)
         });
         let terminal = cx.new(|cx| {
-            TextInput::new(settings.terminal.clone(), "", cx)
-                .with_id("settings-terminal")
-                .with_aria_label("Terminal app")
+            TextInput::new(settings.terminal.clone(), "", cx).with_id("settings-terminal").with_aria_label("Terminal")
         });
         let exclude_names = cx.new(|cx| {
             TextInput::new(names_text(&cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names), "", cx)
@@ -981,14 +880,14 @@ impl SettingsWindow {
             TextInput::new(settings.window.width.to_string(), "", cx)
                 .with_id("settings-window-width")
                 .with_role(Role::SpinButton)
-                .with_aria_label("Width")
+                .with_aria_label("New window width")
                 .with_numeric_range(f64::from(settings.window.width), 600.0, 4000.0, 1.0)
         });
         let window_height = cx.new(|cx| {
             TextInput::new(settings.window.height.to_string(), "", cx)
                 .with_id("settings-window-height")
                 .with_role(Role::SpinButton)
-                .with_aria_label("Height")
+                .with_aria_label("New window height")
                 .with_numeric_range(f64::from(settings.window.height), 600.0, 4000.0, 1.0)
         });
         let search = cx.new(|cx| {
@@ -1063,6 +962,7 @@ impl SettingsWindow {
             ControlId::FontFamily,
             ControlId::IconPack,
             ControlId::DefaultSort,
+            ControlId::DefaultDirection,
             ControlId::FontSize,
             ControlId::Terminal,
             ControlId::ExcludeNames,
@@ -1158,6 +1058,8 @@ impl SettingsWindow {
             icon_pack_scroll: ScrollHandle::new(),
             sort_cursor: 0,
             sort_scroll: ScrollHandle::new(),
+            direction_cursor: 0,
+            direction_scroll: ScrollHandle::new(),
             preview_scope: PreviewScope::Defaults,
             preview_folder: None,
             preview_rule: None,
@@ -1228,15 +1130,36 @@ impl SettingsWindow {
 
     /// The enabled controls of the page that is on screen, in reading order:
     /// the category's units, or the units matching the active query.
+    /// Whether control `id` is on the page now. The names field shows only while
+    /// its set is on.
+    fn control_shown(&self, id: ControlId, cx: &App) -> bool {
+        self.preview_control_enabled(id, cx)
+            && (id != ControlId::ExcludeNames || cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled)
+    }
+
     fn visible_controls(&self, cx: &App) -> Vec<ControlId> {
-        let visible = |id: &ControlId| self.preview_control_enabled(*id, cx);
         if self.query.is_empty() {
-            return catalog::controls_in(self.category).into_iter().filter(|id| visible(id)).collect();
+            return catalog::controls_in(self.category).into_iter().filter(|id| self.control_shown(*id, cx)).collect();
+        }
+        self.search_hits(cx)
+            .into_iter()
+            .flat_map(|hit| catalog::unit_for(hit.unit).into_iter().flat_map(|unit| unit.controls.iter().copied()))
+            .filter(|id| self.control_shown(*id, cx))
+            .collect()
+    }
+
+    /// The search's matches that have a row on the page: a hit on a hidden row
+    /// alone (the names field while its set is off) must not leave a blank page.
+    fn search_hits(&self, cx: &App) -> Vec<search::Hit> {
+        if self.query.is_empty() {
+            return Vec::new();
         }
         search::matches(&self.query)
             .into_iter()
-            .flat_map(|hit| catalog::unit_for(hit.unit).into_iter().flat_map(|unit| unit.controls.iter().copied()))
-            .filter(|id| visible(id))
+            .filter(|hit| {
+                catalog::unit_for(hit.unit)
+                    .is_some_and(|unit| unit.controls.iter().any(|id| self.control_shown(*id, cx)))
+            })
             .collect()
     }
 
@@ -1538,7 +1461,11 @@ impl SettingsWindow {
 
     fn on_focus_lost(&mut self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
         match id {
-            ControlId::Theme | ControlId::FontFamily | ControlId::IconPack | ControlId::DefaultSort => {
+            ControlId::Theme
+            | ControlId::FontFamily
+            | ControlId::IconPack
+            | ControlId::DefaultSort
+            | ControlId::DefaultDirection => {
                 if self.menu == Some(id) {
                     self.close_menu(window, cx);
                 }
@@ -1730,6 +1657,7 @@ impl SettingsWindow {
             | ControlId::FontFamily
             | ControlId::IconPack
             | ControlId::DefaultSort
+            | ControlId::DefaultDirection
             | ControlId::PreviewRuleSelect
             | ControlId::PreviewAdd => {
                 if self.menu == Some(id) {
@@ -1756,10 +1684,6 @@ impl SettingsWindow {
                 let index = view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default());
                 self.select_default_view(index, cx);
             }
-            ControlId::DefaultDirection => {
-                let index = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
-                self.select_direction(index, cx);
-            }
             ControlId::DefaultFoldersFirst => self.toggle_default_folders_first(cx),
             ControlId::ExcludeDev
             | ControlId::ExcludeDependencies
@@ -1772,8 +1696,11 @@ impl SettingsWindow {
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
             | ControlId::PaletteRecent
-            | ControlId::TranslucentSidebar => self.toggle_bool(id, cx),
-            ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
+            | ControlId::TranslucentSidebar
+            | ControlId::Keymap
+            | ControlId::Tips
+            | ControlId::FolderSizes => self.toggle_bool(id, cx),
+            ControlId::PlaySound => crate::feedback::play_set(cx),
             ControlId::EditSettings => ui::edit_settings_file(cx),
             ControlId::Plugins => self.activate_plugin(cx),
             ControlId::NewSavedQuery => self.open_saved_query_editor(None, window, cx),
@@ -1792,12 +1719,9 @@ impl SettingsWindow {
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
-            ControlId::Keymap
-            | ControlId::Enter
+            ControlId::Enter
             | ControlId::FolderTarget
             | ControlId::Hints
-            | ControlId::Tips
-            | ControlId::FolderSizes
             | ControlId::PathBar
             | ControlId::IconStyle
             | ControlId::SidebarStyle
@@ -1813,12 +1737,9 @@ impl SettingsWindow {
         let Some(id) = self.focused_control(window) else { return };
         match id {
             ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
-            ControlId::Keymap
-            | ControlId::Enter
+            ControlId::Enter
             | ControlId::FolderTarget
             | ControlId::Hints
-            | ControlId::Tips
-            | ControlId::FolderSizes
             | ControlId::PathBar
             | ControlId::IconStyle
             | ControlId::SidebarStyle
@@ -1832,13 +1753,6 @@ impl SettingsWindow {
                 let next = (current as isize + delta).clamp(0, 3) as usize;
                 if next != current {
                     self.select_default_view(next, cx);
-                }
-            }
-            ControlId::DefaultDirection => {
-                let current = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
-                let next = (current as isize + delta).clamp(0, 2) as usize;
-                if next != current {
-                    self.select_direction(next, cx);
                 }
             }
             ControlId::PreviewScope => {
@@ -1860,6 +1774,7 @@ impl SettingsWindow {
             | ControlId::FontFamily
             | ControlId::IconPack
             | ControlId::DefaultSort
+            | ControlId::DefaultDirection
             | ControlId::PreviewRuleSelect
             | ControlId::PreviewAdd
                 if id.enabled(cx) =>
@@ -2094,9 +2009,9 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .p(px(8.))
+            .p(px(4.))
             .rounded(px(7.))
-            .bg(color(theme.role("surface")))
+            // The card is the surface now; this keeps only the list's focus ring.
             .when(focused, |surface| surface.shadow(cursor_ring(theme)))
             .children(headers)
             .child(list)
@@ -2113,12 +2028,9 @@ impl SettingsWindow {
 
     fn move_segment(&mut self, id: ControlId, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let (current, count) = match id {
-            ControlId::Keymap => (keymap_index(cx.global::<Ui>().settings.keymap), 2),
             ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
             ControlId::FolderTarget => (folder_target_index(cx.global::<Ui>().settings.folder_target), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
-            ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
-            ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
             ControlId::PathBar => (path_bar_index(cx.global::<Ui>().settings.path_bar), 2),
             ControlId::IconStyle => (icon_style_index(cx.global::<Ui>().settings.icon_style), 2),
             ControlId::SidebarStyle => (sidebar_style_index(cx.global::<Ui>().settings.sidebar_style), 5),
@@ -2135,7 +2047,6 @@ impl SettingsWindow {
 
     fn select_segment(&mut self, id: ControlId, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         let change = match id {
-            ControlId::Keymap => SettingChange::Keymap(if index == 0 { KeymapLayer::Finder } else { KeymapLayer::Vim }),
             ControlId::Enter => SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open }),
             ControlId::FolderTarget => SettingChange::FolderTarget(if index == 0 {
                 crow_core::FolderTarget::Shown
@@ -2147,10 +2058,6 @@ impl SettingsWindow {
                 1 => HintsMode::Always,
                 _ => HintsMode::Off,
             }),
-            ControlId::Tips => SettingChange::Tips(if index == 0 { TipsMode::Auto } else { TipsMode::Off }),
-            ControlId::FolderSizes => {
-                SettingChange::FolderSizes(if index == 0 { FolderSizesMode::Off } else { FolderSizesMode::Visible })
-            }
             ControlId::IconStyle => SettingChange::IconStyle(if index == 0 {
                 crow_core::IconStyle::Outline
             } else {
@@ -2167,9 +2074,9 @@ impl SettingsWindow {
             }),
             ControlId::Motion => SettingChange::Motion(match index {
                 0 => MotionMode::Auto,
-                1 => MotionMode::Off,
+                1 => MotionMode::Full,
                 2 => MotionMode::Low,
-                _ => MotionMode::Full,
+                _ => MotionMode::Off,
             }),
             ControlId::Sound => SettingChange::Sound(match index {
                 0 => SoundSet::Crow,
@@ -2191,6 +2098,18 @@ impl SettingsWindow {
             ControlId::ViewPerFolder => SettingChange::ViewPerFolder(!settings.view_per_folder),
             ControlId::PaletteRecent => SettingChange::PaletteRecentCommands(!settings.palette_recent_commands),
             ControlId::TranslucentSidebar => SettingChange::TranslucentSidebar(!settings.translucent_sidebar),
+            ControlId::Keymap => SettingChange::Keymap(match settings.keymap {
+                KeymapLayer::Finder => KeymapLayer::Vim,
+                KeymapLayer::Vim => KeymapLayer::Finder,
+            }),
+            ControlId::Tips => SettingChange::Tips(match settings.tips {
+                TipsMode::Auto => TipsMode::Off,
+                TipsMode::Off => TipsMode::Auto,
+            }),
+            ControlId::FolderSizes => SettingChange::FolderSizes(match settings.folder_sizes {
+                FolderSizesMode::Off => FolderSizesMode::Visible,
+                FolderSizesMode::Visible => FolderSizesMode::Off,
+            }),
             _ => return,
         };
         ui::set_setting(change, cx);
@@ -2278,6 +2197,10 @@ impl SettingsWindow {
                 self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
                 self.sort_scroll.scroll_to_item(self.sort_cursor);
             }
+            ControlId::DefaultDirection => {
+                self.direction_cursor = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
+                self.direction_scroll.scroll_to_item(self.direction_cursor);
+            }
             ControlId::PreviewRuleSelect => self.open_preview_rule_menu(cx),
             ControlId::PreviewAdd => self.open_preview_add_menu(cx),
             _ => return,
@@ -2305,6 +2228,9 @@ impl SettingsWindow {
             ControlId::DefaultSort => {
                 self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
             }
+            ControlId::DefaultDirection => {
+                self.direction_cursor = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
+            }
             ControlId::PreviewRuleSelect | ControlId::PreviewAdd => {}
             _ => {}
         }
@@ -2324,6 +2250,7 @@ impl SettingsWindow {
                 return;
             }
             Some(ControlId::DefaultSort) => self.commit_sort(cx),
+            Some(ControlId::DefaultDirection) => self.select_direction(self.direction_cursor, cx),
             Some(ControlId::PreviewRuleSelect) | Some(ControlId::PreviewAdd) => self.keep_preview_menu(window, cx),
             _ => {}
         }
@@ -2371,6 +2298,11 @@ impl SettingsWindow {
                 self.sort_cursor = self.sort_cursor.saturating_add_signed(delta).min(SORT_LABELS.len() - 1);
                 self.sort_scroll.scroll_to_item(self.sort_cursor);
             }
+            Some(ControlId::DefaultDirection) => {
+                self.direction_cursor =
+                    self.direction_cursor.saturating_add_signed(delta).min(DIRECTION_LABELS.len() - 1);
+                self.direction_scroll.scroll_to_item(self.direction_cursor);
+            }
             Some(ControlId::PreviewRuleSelect) | Some(ControlId::PreviewAdd) => {
                 self.move_preview_menu(delta, cx);
                 return;
@@ -2391,6 +2323,7 @@ impl SettingsWindow {
             }
             ControlId::FontFamily if index < self.fonts.len() => self.font_cursor = index,
             ControlId::DefaultSort if index < SORT_LABELS.len() => self.sort_cursor = index,
+            ControlId::DefaultDirection if index < DIRECTION_LABELS.len() => self.direction_cursor = index,
             _ => return,
         }
         self.keep_menu(window, cx);
@@ -2581,10 +2514,54 @@ impl SettingsWindow {
             ControlId::FontFamily => font_index(&self.fonts, &settings.font_family),
             ControlId::IconPack => self.icon_pack_ids.iter().position(|id| id == &settings.icon_pack).unwrap_or(0),
             ControlId::DefaultSort => sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default()),
+            ControlId::DefaultDirection => direction_index(cx.global::<Ui>().views.defaults_layer().ascending),
             _ => 0,
         };
         let pick = select_callback(cx, move |this, index, window, cx| this.pick(id, index, window, cx));
         self.dropdown_with(id, options, saved, cursor, scroll, window, theme, cx, pick)
+    }
+
+    /// A drop-down's button and menu without a label row, `width` wide, for a
+    /// row that holds two (Sort by and its order).
+    #[allow(clippy::too_many_arguments)]
+    fn inline_dropdown(
+        &self,
+        id: ControlId,
+        options: &[String],
+        saved: usize,
+        cursor: usize,
+        scroll: &ScrollHandle,
+        width: f32,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        if self.menu == Some(id) && self.menu_settle.get() > 0 {
+            self.menu_settle.set(self.menu_settle.get() - 1);
+            scroll.scroll_to_item(cursor);
+            cx.notify();
+        }
+        let menu = (self.menu == Some(id)).then(|| controls::Menu {
+            cursor,
+            scroll,
+            dismiss: callback(cx, move |this, window, cx| {
+                this.close_menu(window, cx);
+                this.dismissed_by_mouse = Some(id);
+            }),
+        });
+        let toggle = callback(cx, move |this, window, cx| this.toggle_menu(id, window, cx));
+        let pick = select_callback(cx, move |this, index, window, cx| this.pick(id, index, window, cx));
+        let value = options.get(saved).cloned().unwrap_or_default();
+        controls::dropdown_control(
+            &self.meta(id, cx),
+            options,
+            value,
+            width,
+            menu,
+            self.style(id, window, theme),
+            toggle,
+            pick,
+        )
     }
 
     /// The shared pop-up button with a caller-supplied click mapper, so an
@@ -2649,12 +2626,9 @@ impl SettingsWindow {
             selected: match id {
                 ControlId::Theme => Some(self.theme.cursor),
                 ControlId::FontFamily => Some(self.font_cursor),
-                ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
                 ControlId::FolderTarget => Some(folder_target_index(settings.folder_target)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
-                ControlId::Tips => Some(tips_index(settings.tips)),
-                ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
                 ControlId::PathBar => Some(path_bar_index(settings.path_bar)),
                 ControlId::IconStyle => Some(icon_style_index(settings.icon_style)),
                 ControlId::SidebarStyle => Some(sidebar_style_index(settings.sidebar_style)),
@@ -2694,6 +2668,9 @@ impl SettingsWindow {
                 ControlId::ViewPerFolder => Some(settings.view_per_folder),
                 ControlId::PaletteRecent => Some(settings.palette_recent_commands),
                 ControlId::TranslucentSidebar => Some(settings.translucent_sidebar),
+                ControlId::Keymap => Some(settings.keymap == KeymapLayer::Vim),
+                ControlId::Tips => Some(settings.tips == TipsMode::Auto),
+                ControlId::FolderSizes => Some(settings.folder_sizes == FolderSizesMode::Visible),
                 ControlId::DefaultFoldersFirst => {
                     Some(cx.global::<Ui>().views.defaults_layer().folders_first.unwrap_or(true))
                 }
@@ -2745,6 +2722,9 @@ impl Render for SettingsWindow {
         if self.menu != Some(ControlId::DefaultSort) {
             self.sort_cursor = sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default());
         }
+        if self.menu != Some(ControlId::DefaultDirection) {
+            self.direction_cursor = direction_index(cx.global::<Ui>().views.defaults_layer().ascending);
+        }
         for id in [ControlId::FontSize, ControlId::WindowWidth, ControlId::WindowHeight] {
             self.sync_stepper(id, window, cx);
         }
@@ -2759,7 +2739,7 @@ impl Render for SettingsWindow {
         for file in ERROR_FILES {
             self.error_handles[file].clone().tab_stop(issues.iter().any(|issue| issue.file == file));
         }
-        let search_hits = if self.query.is_empty() { Vec::new() } else { search::matches(&self.query) };
+        let search_hits = self.search_hits(cx);
         self.clear_search.clone().tab_stop(!self.query.is_empty() && search_hits.is_empty());
         if let Some(id) = self.focused_control(window)
             && !visible.contains(&id)
@@ -2817,7 +2797,7 @@ impl Render for SettingsWindow {
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::IconStyle, index, window, cx));
         let icon_style_row = controls::segmented(
             self.meta(ControlId::IconStyle, cx),
-            &["Outline", "Finder"],
+            &["Outline", "Colored"],
             icon_style_index(settings.icon_style),
             self.style(ControlId::IconStyle, window, &theme),
             icon_style_select,
@@ -2828,7 +2808,7 @@ impl Render for SettingsWindow {
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::PathBar, index, window, cx));
         let path_bar_row = controls::segmented(
             self.meta(ControlId::PathBar, cx),
-            &["Crow", "Explorer"],
+            &["Breadcrumb", "Text field"],
             path_bar_index(settings.path_bar),
             self.style(ControlId::PathBar, window, &theme),
             path_bar_select,
@@ -2855,22 +2835,13 @@ impl Render for SettingsWindow {
             220.0,
         );
 
-        let keymap_select =
-            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Keymap, index, window, cx));
-        let keymap_row = controls::segmented(
-            self.meta(ControlId::Keymap, cx),
-            &["Finder", "Vim"],
-            keymap_index(settings.keymap),
-            self.style(ControlId::Keymap, window, &theme),
-            keymap_select,
-            None,
-        );
+        let keymap_row = switch_row(self, ControlId::Keymap, settings.keymap == KeymapLayer::Vim, window, &theme, cx);
 
         let enter_select =
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Enter, index, window, cx));
         let enter_row = controls::segmented(
             self.meta(ControlId::Enter, cx),
-            &["Rename", "Open"],
+            &["Renames", "Opens"],
             enter_index(settings.enter),
             self.style(ControlId::Enter, window, &theme),
             enter_select,
@@ -2882,7 +2853,7 @@ impl Render for SettingsWindow {
         });
         let folder_target_row = controls::segmented(
             self.meta(ControlId::FolderTarget, cx),
-            &["Shown folder", "Selected folder"],
+            &["Current folder", "Selected folder"],
             folder_target_index(settings.folder_target),
             self.style(ControlId::FolderTarget, window, &theme),
             folder_target_select,
@@ -2893,34 +2864,21 @@ impl Render for SettingsWindow {
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Hints, index, window, cx));
         let hints_row = controls::segmented(
             self.meta(ControlId::Hints, cx),
-            &["Auto", "Always", "Off"],
+            &["Until learned", "Always", "Off"],
             hints_index(settings.hints),
             self.style(ControlId::Hints, window, &theme),
             hints_select,
             None,
         );
 
-        let tips_select =
-            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Tips, index, window, cx));
-        let tips_row = controls::segmented(
-            self.meta(ControlId::Tips, cx),
-            &["Auto", "Off"],
-            tips_index(settings.tips),
-            self.style(ControlId::Tips, window, &theme),
-            tips_select,
-            None,
-        );
-
-        let folder_sizes_select = select_callback(cx, |this, index, window, cx| {
-            this.select_segment(ControlId::FolderSizes, index, window, cx)
-        });
-        let folder_sizes_row = controls::segmented(
-            self.meta(ControlId::FolderSizes, cx),
-            &["Off", "Visible"],
-            folder_sizes_index(settings.folder_sizes),
-            self.style(ControlId::FolderSizes, window, &theme),
-            folder_sizes_select,
-            None,
+        let tips_row = switch_row(self, ControlId::Tips, settings.tips == TipsMode::Auto, window, &theme, cx);
+        let folder_sizes_row = switch_row(
+            self,
+            ControlId::FolderSizes,
+            settings.folder_sizes == FolderSizesMode::Visible,
+            window,
+            &theme,
+            cx,
         );
 
         let show_hidden = switch_row(self, ControlId::ShowHidden, settings.show_hidden_files, window, &theme, cx);
@@ -2985,7 +2943,7 @@ impl Render for SettingsWindow {
         });
         let search_match_row = controls::segmented(
             self.meta(ControlId::SearchMatch, cx),
-            &["All", "Names", "Contents"],
+            &["Names and contents", "Names", "Contents"],
             search_match_index(settings.search_match),
             self.style(ControlId::SearchMatch, window, &theme),
             search_match_select,
@@ -3002,7 +2960,7 @@ impl Render for SettingsWindow {
             select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Motion, index, window, cx));
         let motion_row = controls::segmented(
             self.meta(ControlId::Motion, cx),
-            &["Auto", "Off", "Low", "Full"],
+            &["Auto", "Full", "Reduced", "Off"],
             motion_index(settings.motion),
             self.style(ControlId::Motion, window, &theme),
             motion_select,
@@ -3021,22 +2979,31 @@ impl Render for SettingsWindow {
         );
         let sound_row = controls::segmented(
             self.meta(ControlId::Sound, cx),
-            &["Crow", "Finder", "Off"],
+            &["Crow", "Finder only", "Off"],
             sound_index(settings.sound),
             self.style(ControlId::Sound, window, &theme),
             sound_select,
             Some(play.into_any_element()),
         );
 
-        let width_row = controls::stepper(
-            self.meta(ControlId::WindowWidth, cx),
-            &self.window_width,
-            self.style(ControlId::WindowWidth, window, &theme),
-        );
-        let height_row = controls::stepper(
-            self.meta(ControlId::WindowHeight, cx),
-            &self.window_height,
-            self.style(ControlId::WindowHeight, window, &theme),
+        let window_size_row = controls::labeled(
+            ControlMeta { id: "settings-window-size", label: "New window size", description: None, enabled: true },
+            &theme,
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(controls::stepper_field(
+                    &self.meta(ControlId::WindowWidth, cx),
+                    &self.window_width,
+                    self.style(ControlId::WindowWidth, window, &theme),
+                ))
+                .child(div().text_color(color(theme.role("fg-muted"))).child("×"))
+                .child(controls::stepper_field(
+                    &self.meta(ControlId::WindowHeight, cx),
+                    &self.window_height,
+                    self.style(ControlId::WindowHeight, window, &theme),
+                )),
         );
 
         let view_select = select_callback(cx, |this, index, _window, cx| this.select_default_view(index, cx));
@@ -3050,18 +3017,37 @@ impl Render for SettingsWindow {
         );
 
         let sort_labels = sort_labels();
-        let sort_row = self
-            .dropdown(ControlId::DefaultSort, &sort_labels, self.sort_cursor, &self.sort_scroll, window, &theme, cx)
+        let defaults = cx.global::<Ui>().views.defaults_layer().clone();
+        let sort_key = self
+            .inline_dropdown(
+                ControlId::DefaultSort,
+                &sort_labels,
+                sort_key_index(defaults.sort.unwrap_or_default()),
+                self.sort_cursor,
+                &self.sort_scroll,
+                88.,
+                window,
+                &theme,
+                cx,
+            )
             .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::DefaultSort, event, cx)));
 
-        let direction_select = select_callback(cx, |this, index, _window, cx| this.select_direction(index, cx));
-        let direction_row = controls::segmented(
-            self.meta(ControlId::DefaultDirection, cx),
-            &["Natural", "Ascending", "Descending"],
-            direction_index(cx.global::<Ui>().views.defaults_layer().ascending),
-            self.style(ControlId::DefaultDirection, window, &theme),
-            direction_select,
-            None,
+        let direction_labels: Vec<String> = DIRECTION_LABELS.iter().map(|label| (*label).to_owned()).collect();
+        let direction = self.inline_dropdown(
+            ControlId::DefaultDirection,
+            &direction_labels,
+            direction_index(defaults.ascending),
+            self.direction_cursor,
+            &self.direction_scroll,
+            236.,
+            window,
+            &theme,
+            cx,
+        );
+        let sort_row = controls::labeled(
+            self.meta(ControlId::DefaultSort, cx),
+            &theme,
+            div().flex().flex_wrap().items_start().gap(px(6.)).child(sort_key).child(direction),
         );
 
         let folders_first_toggle = callback(cx, |this, _, cx| this.toggle_default_folders_first(cx));
@@ -3101,19 +3087,9 @@ impl Render for SettingsWindow {
             .child(link(self, ControlId::OpenSavedQueriesToml, "saved-queries.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenKeysToml, "keys.toml", window, &theme, cx))
             .child(show_config);
-        let config_row = controls::labeled(
-            ControlMeta {
-                id: "settings-config-files",
-                label: "Config files",
-                description: Some(
-                    "The seven TOML files stay authoritative and editable; Crow writes back only the key you change."
-                        .into(),
-                ),
-                enabled: true,
-            },
-            &theme,
-            config_files,
-        );
+        // The card's group heading names the row; each button names its file.
+        let config_row =
+            config_files.id("settings-config-files").debug_selector(|| "settings-config-files-row".to_owned());
 
         self.error_items.clear();
         let error_region = (!issues.is_empty()).then(|| {
@@ -3199,15 +3175,11 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::TranslucentSidebar, translucent.into_any_element());
         rows.insert(ControlId::Motion, motion_row.into_any_element());
         rows.insert(ControlId::Sound, sound_row.into_any_element());
-        rows.insert(ControlId::WindowWidth, width_row.into_any_element());
-        rows.insert(ControlId::WindowHeight, height_row.into_any_element());
+        rows.insert(ControlId::WindowWidth, window_size_row.into_any_element());
         rows.insert(ControlId::ShowHidden, show_hidden.into_any_element());
         rows.insert(ControlId::FolderSizes, folder_sizes_row.into_any_element());
         rows.insert(ControlId::DefaultView, default_view_row.into_any_element());
-        rows.insert(
-            ControlId::DefaultSort,
-            div().flex().flex_col().gap(px(12.)).child(sort_row).child(direction_row).into_any_element(),
-        );
+        rows.insert(ControlId::DefaultSort, sort_row.into_any_element());
         rows.insert(ControlId::DefaultFoldersFirst, folders_first_row.into_any_element());
         rows.insert(ControlId::ShowPreview, show_preview.into_any_element());
         rows.insert(ControlId::ViewPerFolder, view_per_folder.into_any_element());
@@ -3218,10 +3190,14 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::ExcludeHidden, exclude_hidden.into_any_element());
         rows.insert(ControlId::ExcludeSystem, exclude_system.into_any_element());
         rows.insert(ControlId::ExcludeBackup, exclude_backup.into_any_element());
-        rows.insert(ControlId::ExcludeNames, exclude_names_row.into_any_element());
+        if cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).enabled {
+            rows.insert(ControlId::ExcludeNames, div().pl(px(20.)).child(exclude_names_row).into_any_element());
+        }
         rows.insert(ControlId::SearchMatch, search_match_row.into_any_element());
         rows.insert(ControlId::SavedQueryList, self.render_saved_queries(window, &theme, cx));
-        rows.insert(ControlId::PreviewScope, self.render_preview_unit(window, &theme, cx));
+        let (preview_scope, preview_providers) = self.render_preview_unit(window, &theme, cx);
+        rows.insert(ControlId::PreviewScope, preview_scope);
+        rows.insert(ControlId::PreviewList, preview_providers);
         rows.insert(ControlId::Plugins, plugin_row);
         rows.insert(
             ControlId::KeyboardList,
@@ -3427,6 +3403,10 @@ impl SettingsWindow {
                     window.focus(&this.sidebar, cx);
                     this.select_category(category, window, cx);
                 }))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(glyph(category.glyph(), 15., if selected { "fg" } else { "fg-muted" }, theme))
                 .child(category.label());
             rows.push(row.into_any_element());
         }
@@ -3444,6 +3424,7 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .gap(px(2.))
+            .bg(color(theme.role("bg-inset")))
             .border_r_1()
             .border_color(color(theme.role("border")))
             .children(rows)
@@ -3461,16 +3442,14 @@ fn section_heading(title: &'static str, theme: &Theme, top: f32) -> gpui::Statef
         .aria_label(title)
         .aria_level(2)
         .w_full()
-        .max_w(px(720.))
+        .max_w(px(CARD_WIDTH))
         .text_size(px(17.))
         .font_weight(FontWeight::BOLD)
         .text_color(color(theme.role("fg")))
         .child(title)
 }
 
-/// Add one category's heading and its units to the page's flat child list. The
-/// index recorded for each control is what `ScrollHandle::scroll_to_item` takes;
-/// a composite unit's controls share its first row.
+/// Add one category's heading and its cards to the page's flat child list.
 fn add_category(
     page: &mut Vec<gpui::AnyElement>,
     indices: &mut HashMap<ControlId, usize>,
@@ -3479,13 +3458,13 @@ fn add_category(
     rows: &mut HashMap<ControlId, gpui::AnyElement>,
 ) {
     page.push(section_heading(category.label(), theme, 0.0).into_any_element());
-    for unit in catalog::units_in(category) {
-        push_unit(page, indices, unit, theme, rows, true);
-    }
+    let units: Vec<&'static catalog::Unit> = catalog::units_in(category).collect();
+    add_cards(page, indices, &units, theme, rows, true);
 }
 
-/// Search results: category headings in sidebar order, the same unit renderers
-/// as the category pages, and no category heading when it has no match.
+/// Search results: category headings in sidebar order, then the same cards as
+/// the category pages, holding only the matching rows. No heading for a
+/// category without a match.
 fn add_search_results(
     page: &mut Vec<gpui::AnyElement>,
     indices: &mut HashMap<ControlId, usize>,
@@ -3494,43 +3473,93 @@ fn add_search_results(
     rows: &mut HashMap<ControlId, gpui::AnyElement>,
 ) {
     for category in Category::ALL {
-        let units: Vec<&'static catalog::Unit> =
-            hits.iter().filter(|hit| hit.category == category).filter_map(|hit| catalog::unit_for(hit.unit)).collect();
+        // Catalog order inside a category, so the cards read like the page.
+        let units: Vec<&'static catalog::Unit> = catalog::units_in(category)
+            .filter(|unit| hits.iter().any(|hit| hit.unit == unit.id))
+            .filter(|unit| rows.contains_key(&unit.id))
+            .collect();
         if units.is_empty() {
             continue;
         }
         page.push(section_heading(category.label(), theme, 0.0).into_any_element());
-        for unit in units {
-            push_unit(page, indices, unit, theme, rows, false);
-        }
+        add_cards(page, indices, &units, theme, rows, false);
     }
 }
 
-fn push_unit(
+/// One card per run of units sharing a group, under the group's heading. Each
+/// row is its own page child so `ScrollHandle::scroll_to_item` can bring any
+/// focused row into view; the rows draw the card's edges between them. A
+/// composite unit's controls share its row.
+fn add_cards(
     page: &mut Vec<gpui::AnyElement>,
     indices: &mut HashMap<ControlId, usize>,
-    unit: &catalog::Unit,
+    units: &[&'static catalog::Unit],
     theme: &Theme,
     rows: &mut HashMap<ControlId, gpui::AnyElement>,
     category_page: bool,
 ) {
-    let Some(row) = rows.remove(&unit.id) else { return };
-    // The Keyboard list takes the page's remaining height instead of a fixed one.
-    let fill = category_page && unit.id == ControlId::KeyboardList;
-    let index = page.len();
-    for id in unit.controls {
-        indices.insert(*id, index);
+    let present: Vec<(&'static catalog::Unit, gpui::AnyElement)> =
+        units.iter().filter_map(|unit| rows.remove(&unit.id).map(|row| (*unit, row))).collect();
+    let groups: Vec<&'static str> = present.iter().map(|(unit, _)| unit.group).collect();
+    for (index, (unit, row)) in present.into_iter().enumerate() {
+        let first = index == 0 || groups[index - 1] != unit.group;
+        let last = groups.get(index + 1).is_none_or(|next| *next != unit.group);
+        if first {
+            page.push(group_heading(unit.group, theme).into_any_element());
+        }
+        // The Keyboard list takes the page's remaining height instead of a fixed one.
+        let fill = category_page && unit.id == ControlId::KeyboardList;
+        let at = page.len();
+        for id in unit.controls {
+            indices.insert(*id, at);
+        }
+        page.push(card_row(row, first, last, fill, theme).into_any_element());
     }
-    page.push(
-        div()
-            .w_full()
-            .max_w(px(720.))
-            .when(fill, |d| d.flex_1().min_h_0())
-            // The page's only unit, so no divider under it.
-            .when(!fill, |d| d.pb(px(10.)).mb(px(10.)).border_b_1().border_color(color(theme.role("border"))))
-            .child(row)
-            .into_any_element(),
-    );
+}
+
+/// The small heading above a card.
+fn group_heading(title: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("settings-group", title.as_ptr() as usize))
+        .role(Role::Heading)
+        .aria_label(title)
+        .aria_level(3)
+        .w_full()
+        .max_w(px(CARD_WIDTH))
+        .pt(px(14.))
+        .pb(px(5.))
+        .px(px(4.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color(theme.role("fg-muted")))
+        .child(title)
+}
+
+/// The least height of a card that fills the page (the shortcuts list).
+const FILL_MIN_HEIGHT: f32 = 240.;
+const CARD_WIDTH: f32 = 680.;
+const CARD_RADIUS: f32 = 9.;
+
+/// One row of a card: the card's sides on every row, its top edge and corners
+/// on the first, its bottom edge and corners on the last, and a hairline above
+/// every other row.
+fn card_row(row: gpui::AnyElement, first: bool, last: bool, fill: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .max_w(px(CARD_WIDTH))
+        .px(px(14.))
+        .py(px(9.))
+        .bg(color(theme.role("bg-inset")))
+        .border_color(color(theme.role("border")))
+        .border_l_1()
+        .border_r_1()
+        .border_t_1()
+        .when(first, |card| card.rounded_t(px(CARD_RADIUS)))
+        .when(last, |card| card.border_b_1().rounded_b(px(CARD_RADIUS)))
+        // The shortcuts list takes the rest of the page but never less than about
+        // eight rows: a short window scrolls the page instead of squashing it.
+        .when(fill, |card| card.flex_1().min_h(px(FILL_MIN_HEIGHT)))
+        .child(row)
 }
 
 fn switch_row(
@@ -3626,6 +3655,9 @@ fn font_index(fonts: &[String], family: &str) -> usize {
 
 const SORT_LABELS: [&str; 5] = ["Name", "Size", "Kind", "Modified", "Added"];
 
+/// In `direction_index` order: no `ascending` key, then ascending, then descending.
+const DIRECTION_LABELS: [&str; 3] = ["Usual order (A to Z, newest first)", "Ascending", "Descending"];
+
 fn sort_labels() -> Vec<String> {
     SORT_LABELS.iter().map(|label| (*label).to_owned()).collect()
 }
@@ -3668,13 +3700,6 @@ fn direction_index(ascending: Option<bool>) -> usize {
     }
 }
 
-fn keymap_index(value: KeymapLayer) -> usize {
-    match value {
-        KeymapLayer::Finder => 0,
-        KeymapLayer::Vim => 1,
-    }
-}
-
 /// The names as the field shows them: comma-separated.
 fn names_text(names: &[String]) -> String {
     names.join(", ")
@@ -3713,20 +3738,6 @@ fn hints_index(value: HintsMode) -> usize {
     }
 }
 
-fn tips_index(value: TipsMode) -> usize {
-    match value {
-        TipsMode::Auto => 0,
-        TipsMode::Off => 1,
-    }
-}
-
-fn folder_sizes_index(value: FolderSizesMode) -> usize {
-    match value {
-        FolderSizesMode::Off => 0,
-        FolderSizesMode::Visible => 1,
-    }
-}
-
 fn icon_style_index(value: crow_core::IconStyle) -> usize {
     match value {
         crow_core::IconStyle::Outline => 0,
@@ -3756,9 +3767,9 @@ fn search_match_index(value: SearchMatch) -> usize {
 fn motion_index(value: MotionMode) -> usize {
     match value {
         MotionMode::Auto => 0,
-        MotionMode::Off => 1,
+        MotionMode::Full => 1,
         MotionMode::Low => 2,
-        MotionMode::Full => 3,
+        MotionMode::Off => 3,
     }
 }
 
@@ -4277,7 +4288,7 @@ mod tests {
     #[gpui::test]
     fn config_files_reach_saved_queries_by_tab_and_by_search(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
-        show_category(&view, &mut vcx, Category::ConfigFiles);
+        show_category(&view, &mut vcx, Category::Advanced);
         let visible = view.read_with(&vcx, |view, cx| view.visible_controls(cx));
         assert!(visible.contains(&ControlId::OpenSavedQueriesToml), "saved-queries.toml is in the tab walk");
         focus_control(&view, &mut vcx, ControlId::OpenSavedQueriesToml);
@@ -4322,28 +4333,28 @@ mod tests {
         vcx.simulate_keystrokes("tab");
         assert!(vcx.update(|window, cx| view.read(cx).sidebar.is_focused(window)));
         vcx.simulate_keystrokes("down");
-        assert_eq!(view.read_with(&vcx, |view, _| view.sidebar_cursor), Category::Behaviour);
+        assert_eq!(view.read_with(&vcx, |view, _| view.sidebar_cursor), Category::Appearance);
         assert_eq!(
             view.read_with(&vcx, |view, _| view.category),
-            Category::Appearance,
+            Category::General,
             "moving the cursor does not open it"
         );
         vcx.simulate_keystrokes("enter");
-        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::Behaviour);
+        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::Appearance);
         assert!(vcx.update(|window, cx| view.read(cx).sidebar.is_focused(window)));
 
         let state = vcx.read_global::<Ui, _>(|ui, _| ui.state_dir.clone());
         for _ in 0..100 {
-            if std::fs::read_to_string(state.join("settings-category")).is_ok_and(|text| text.trim() == "behaviour") {
+            if std::fs::read_to_string(state.join("settings-category")).is_ok_and(|text| text.trim() == "appearance") {
                 break;
             }
             vcx.run_until_parked();
             std::thread::sleep(Duration::from_millis(5));
         }
         let saved = std::fs::read_to_string(state.join("settings-category")).expect("category remembered");
-        assert_eq!(saved.trim(), "behaviour");
+        assert_eq!(saved.trim(), "appearance");
         let remembered = vcx.read_global::<Ui, _>(|ui, _| ui.settings_category.clone());
-        assert_eq!(remembered.as_deref(), Some("behaviour"));
+        assert_eq!(remembered.as_deref(), Some("appearance"));
     }
 
     #[gpui::test]
@@ -4353,7 +4364,11 @@ mod tests {
             std::fs::write(state.join("settings-category"), "views-preview\n").expect("state");
             cx.update(ui::reload_state_for_tests);
         });
-        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::ViewsPreview);
+        assert_eq!(
+            view.read_with(&vcx, |view, _| view.category),
+            Category::Browsing,
+            "a page saved before the revamp opens its new section"
+        );
         vcx.simulate_keystrokes("escape");
         vcx.cx.run_until_parked();
 
@@ -4367,7 +4382,7 @@ mod tests {
             .update(|cx| cx.windows().into_iter().find_map(|handle| handle.downcast::<SettingsWindow>()))
             .expect("reopened");
         let category = window.update(&mut vcx.cx, |view, _, _| view.category).expect("settings");
-        assert_eq!(category, Category::Appearance, "an unknown id falls back to the first category");
+        assert_eq!(category, Category::General, "an unknown id falls back to the first category");
     }
 
     #[gpui::test]
@@ -4379,16 +4394,16 @@ mod tests {
         assert_eq!(view.read_with(&vcx, |view, cx| view.visible_controls(cx)), vec![ControlId::Keymap]);
         assert!(vcx.debug_bounds("settings-keymap-control").is_some(), "the category row is rendered in results");
         assert!(vcx.debug_bounds("settings-theme-control").is_none(), "a nonmatching category control is not mounted");
-        assert!(vcx.debug_bounds("Behavior").is_some(), "its category heading is rendered");
+        assert!(vcx.debug_bounds("Keyboard").is_some(), "its category heading is rendered");
 
         vcx.simulate_keystrokes("tab");
         assert_eq!(vcx.update(|window, cx| view.read(cx).focused_control(window)), Some(ControlId::Keymap));
-        vcx.simulate_keystrokes("right");
+        vcx.simulate_keystrokes("space");
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
         wait_for(&vcx, "keymap = \"vim\"");
 
         // Externally editing a value does not disturb the query or the results.
-        vcx.simulate_keystrokes("left");
+        vcx.simulate_keystrokes("space");
         wait_for(&vcx, "keymap = \"finder\"");
         let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
         std::fs::write(dir.join("settings.toml"), "keymap = \"vim\"\nother_future = 1\n").expect("external edit");
@@ -4396,7 +4411,7 @@ mod tests {
         vcx.run_until_parked();
         draw(&mut vcx);
         assert_eq!(view.read_with(&vcx, |view, _| view.query.clone()), "vim");
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1), "the result follows the file");
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(true), "the result follows the file");
     }
 
     #[gpui::test]
@@ -4497,9 +4512,11 @@ mod tests {
         assert_eq!(state(&view, &vcx, ControlId::DefaultSort).selected, Some(1));
         assert_eq!(state(&view, &vcx, ControlId::DefaultDirection).selected, Some(1));
 
-        // Natural removes the key, so the natural direction applies again.
+        // Usual order removes the key, so the natural direction applies again.
         focus_control(&view, &mut vcx, ControlId::DefaultDirection);
-        vcx.simulate_keystrokes("left");
+        vcx.simulate_keystrokes("space");
+        vcx.simulate_keystrokes("up");
+        vcx.simulate_keystrokes("enter");
         wait_for_views(&vcx, "sort = \"size\"");
         for _ in 0..100 {
             vcx.run_until_parked();
@@ -4683,7 +4700,7 @@ mod tests {
         // Asked at a moment before the change: a slow runner can spend longer than PANEL_TAB inside
         // `show_category`, and the check must not depend on that.
         let before = crate::clock::now();
-        show_category(&view, &mut vcx, Category::Behaviour);
+        show_category(&view, &mut vcx, Category::Keyboard);
         assert!(
             view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, before)).is_some(),
             "a category change starts a content transition"
@@ -5208,13 +5225,26 @@ preview_providers = ["example.one.preview"]
     #[gpui::test]
     fn segmented_moves_with_arrows(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
-        focus_control(&view, &mut vcx, ControlId::Keymap);
+        focus_control(&view, &mut vcx, ControlId::Enter);
         vcx.simulate_keystrokes("right");
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1));
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
-        wait_for(&vcx, "keymap = \"vim\"");
+        assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.enter), EnterAction::Open);
+        wait_for(&vcx, "enter = \"open\"");
         vcx.simulate_keystrokes("left");
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(0));
+        assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(0));
+        wait_for(&vcx, "enter = \"rename\"");
+    }
+
+    #[gpui::test]
+    fn vim_motions_is_a_switch_that_writes_the_keymap(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::Keymap);
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).role, Role::Switch);
+        vcx.simulate_keystrokes("space");
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(true));
+        wait_for(&vcx, "keymap = \"vim\"");
+        vcx.simulate_keystrokes("space");
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(false));
         wait_for(&vcx, "keymap = \"finder\"");
     }
 
@@ -5325,6 +5355,54 @@ preview_providers = ["example.one.preview"]
         vcx.simulate_keystrokes("space");
         wait_for_preview(&vcx, |ui| !ui.exclude.set(crow_core::SetName::Dev).enabled);
         assert_eq!(state(&view, &vcx, ControlId::ExcludeDev).toggled, Some(false));
+
+        // With the set off its names field is gone: not in the walk, and a search that
+        // only it would match shows the no-match state instead of a blank page.
+        draw(&mut vcx);
+        let targets = view.read_with(&vcx, |view, cx| view.focus_targets(cx));
+        assert!(!targets.contains(&FocusTarget::Control(ControlId::ExcludeNames)), "{targets:?}");
+        assert!(targets.contains(&FocusTarget::Control(ControlId::ExcludeDependencies)));
+        focus_control(&view, &mut vcx, ControlId::ExcludeDev);
+        vcx.simulate_keystrokes("cmd-f");
+        vcx.simulate_input("glob");
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("settings-no-match").is_some(), "a hit on a hidden row alone is no match");
+    }
+
+    #[gpui::test]
+    fn an_untouched_names_field_keeps_names_with_commas(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::write(dir.join("exclude.toml"), "[dev]\nenabled = true\nnames = [\"*.{a,b}\", \"out\"]\n")
+            .expect("external edit");
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        focus_control(&view, &mut vcx, ControlId::ExcludeNames);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        let names = vcx.read_global::<Ui, _>(|ui, _| ui.exclude.set(crow_core::SetName::Dev).names);
+        assert_eq!(names, ["*.{a,b}", "out"], "nothing was rewritten");
+        let text = std::fs::read_to_string(dir.join("exclude.toml")).unwrap();
+        assert!(text.contains("\"*.{a,b}\""), "{text}");
+    }
+
+    #[gpui::test]
+    fn search_finds_rows_by_their_old_labels(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        for (query, id) in [
+            ("folders first", ControlId::DefaultFoldersFirst),
+            ("what return does", ControlId::Enter),
+            ("default icons", ControlId::IconStyle),
+            ("skip folders excluded from time machine", ControlId::ExcludeBackup),
+        ] {
+            vcx.simulate_keystrokes("cmd-a");
+            vcx.simulate_input(query);
+            draw(&mut vcx);
+            let shown = view.read_with(&vcx, |view, cx| view.visible_controls(cx));
+            assert!(shown.contains(&id), "{query:?} finds {id:?}: {shown:?}");
+        }
     }
 
     #[gpui::test]
@@ -5542,6 +5620,7 @@ preview_providers = ["example.one.preview"]
     #[gpui::test]
     fn theme_dropdown_by_mouse(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Appearance);
         set_two_themes(&view, &mut vcx);
         let button = vcx.debug_bounds("settings-theme-control").expect("theme button").center();
         let click = |vcx: &mut VisualTestContext, at| {
@@ -5687,6 +5766,7 @@ preview_providers = ["example.one.preview"]
     #[gpui::test]
     fn an_open_menu_floats_over_the_page(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Appearance);
         set_two_themes(&view, &mut vcx);
         draw(&mut vcx);
         let below = vcx.debug_bounds("settings-icon-pack-row").expect("icon pack row");
@@ -5702,6 +5782,7 @@ preview_providers = ["example.one.preview"]
     #[gpui::test]
     fn focus_ring_does_not_resize_a_control(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Appearance);
         draw(&mut vcx);
         let before = vcx.debug_bounds("settings-theme-control").expect("theme control bounds");
         focus_control(&view, &mut vcx, ControlId::IconPack);
@@ -5715,7 +5796,7 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings(cx);
         draw(&mut vcx);
         let before = view.read_with(&vcx, |view, _| view.page_scroll.offset().y);
-        focus_control(&view, &mut vcx, ControlId::WindowHeight);
+        focus_control(&view, &mut vcx, ControlId::NewSavedQuery);
         draw(&mut vcx);
         let after = view.read_with(&vcx, |view, _| view.page_scroll.offset().y);
         assert!(after < before, "the page scrolls to the focused control: {before:?} -> {after:?}");
@@ -5774,6 +5855,8 @@ preview_providers = ["example.one.preview"]
     #[gpui::test]
     fn broken_file_disables_controls_and_fixing_clears_it(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
+        // A page where every control writes settings.toml (General keeps Play usable).
+        show_category(&view, &mut vcx, Category::Appearance);
         let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
         std::fs::write(dir.join("settings.toml"), "motion = \"slow\"\n").expect("break file");
         vcx.update(|_, cx| ui::reload_config(cx));
@@ -5812,22 +5895,22 @@ preview_providers = ["example.one.preview"]
         std::fs::write(dir.join("settings.toml"), "keymap = \"vim\"\n").expect("edit file");
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1), "Vim shows");
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(true), "Vim shows");
         std::fs::write(dir.join("settings.toml"), "\n").expect("delete line");
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(0), "Finder shows again");
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(false), "Finder shows again");
     }
 
     #[gpui::test]
     fn reload_after_a_write_does_not_flip_the_control(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         focus_control(&view, &mut vcx, ControlId::Keymap);
-        vcx.simulate_keystrokes("right");
+        vcx.simulate_keystrokes("space");
         wait_for(&vcx, "keymap = \"vim\"");
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
-        assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1));
+        assert_eq!(state(&view, &vcx, ControlId::Keymap).toggled, Some(true));
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
     }
 
@@ -6225,17 +6308,17 @@ permissions = { fs = "none" }
     fn tips_control_writes_off_and_follows_reloads(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         focus_control(&view, &mut vcx, ControlId::Tips);
-        vcx.simulate_keystrokes("right");
+        vcx.simulate_keystrokes("space");
         wait_for(&vcx, "tips = \"off\"");
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
-        assert_eq!(state(&view, &vcx, ControlId::Tips).selected, Some(1), "Off shows");
+        assert_eq!(state(&view, &vcx, ControlId::Tips).toggled, Some(false), "Off shows");
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
         assert!(settings_text(&vcx).contains("hints = \"auto\""), "hints stay independent");
 
-        vcx.simulate_keystrokes("left");
+        vcx.simulate_keystrokes("space");
         wait_for(&vcx, "tips = \"auto\"");
-        assert_eq!(state(&view, &vcx, ControlId::Tips).selected, Some(0), "Auto shows again");
+        assert_eq!(state(&view, &vcx, ControlId::Tips).toggled, Some(true), "Auto shows again");
     }
 
     fn keyboard_rows_text(view: &Entity<SettingsWindow>, vcx: &VisualTestContext) -> Vec<String> {
@@ -6278,7 +6361,8 @@ permissions = { fs = "none" }
         draw(&mut vcx);
         let list = vcx.debug_bounds("settings-keyboard-list").expect("list rendered");
         let scroll = vcx.debug_bounds("settings-scroll").expect("page rendered");
-        assert!(list.size.height > px(440.), "not capped at a fixed height: {:?}", list.size.height);
+        // The Keys card sits above it on the same page; the list takes the rest.
+        assert!(list.size.height > px(150.), "not capped at a fixed height: {:?}", list.size.height);
         let gap = scroll.bottom() - list.bottom();
         assert!(gap < px(60.), "list reaches the page bottom, gap {gap:?}");
     }
@@ -6462,10 +6546,10 @@ permissions = { fs = "none" }
         focus_control(&view, &mut vcx, ControlId::KeyboardList);
         vcx.simulate_keystrokes("enter");
         assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_some()));
-        let previews = vcx.debug_bounds("settings-category-views-preview").unwrap().center();
+        let previews = vcx.debug_bounds("settings-category-browsing").unwrap().center();
         vcx.simulate_click(previews, gpui::Modifiers::default());
         draw(&mut vcx);
-        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::ViewsPreview);
+        assert_eq!(view.read_with(&vcx, |view, _| view.category), Category::Browsing);
         assert!(view.read_with(&vcx, |view, _| view.keyboard.capture.is_none()));
 
         focus_control(&view, &mut vcx, ControlId::KeyboardList);
@@ -6540,5 +6624,32 @@ permissions = { fs = "none" }
         vcx.simulate_keystrokes("enter");
         assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()), "a broken keys.toml blocks capture");
         assert!(view.read_with(&vcx, |v, _| v.keyboard.notice.is_some()));
+    }
+    #[gpui::test]
+    fn play_sounds_the_set_in_turn_and_is_off_with_sounds_off(cx: &mut TestAppContext) {
+        let (_view, mut vcx) = open_settings(cx);
+        let plays = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                crate::effects::recording(cx)
+                    .expect("recording effects")
+                    .take_calls()
+                    .iter()
+                    .filter(|call| matches!(call, crate::effects::Call::PlaySound(..)))
+                    .count()
+            })
+        };
+        vcx.update(|_, cx| {
+            cx.global_mut::<Ui>().feedback.sound = SoundSet::Crow;
+            assert!(ControlId::PlaySound.enabled(cx));
+            crate::feedback::play_set(cx);
+        });
+        assert_eq!(plays(&mut vcx), 1, "the first sound is immediate");
+        vcx.executor().advance_clock(std::time::Duration::from_secs(5));
+        vcx.run_until_parked();
+        assert_eq!(plays(&mut vcx), 5, "the rest follow, six in all");
+        vcx.update(|_, cx| {
+            cx.global_mut::<Ui>().feedback.sound = SoundSet::Off;
+            assert!(!ControlId::PlaySound.enabled(cx), "nothing to play with Sounds off");
+        });
     }
 }

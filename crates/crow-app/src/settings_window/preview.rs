@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crow_core::ExtensionKind;
 use crow_theme::Theme;
-use gpui::{App, Context, FontWeight, IntoElement, PathPromptOptions, Role, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Context, IntoElement, PathPromptOptions, Role, SharedString, Window, div, prelude::*, px};
 
 use super::{ControlId, PreviewScope, SettingsWindow, callback, select_callback};
 use crate::controls::{self, ControlMeta};
@@ -706,12 +706,14 @@ impl SettingsWindow {
         text.into()
     }
 
+    /// The Previews page: the "Applies to" card (which layer is edited) and the
+    /// "Providers" card (that layer's ordered list).
     pub(super) fn render_preview_unit(
         &mut self,
         window: &Window,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> (gpui::AnyElement, gpui::AnyElement) {
         self.repair_preview_target(cx);
         let list = self.preview_list_state(cx);
         let available = visible_preview_providers(cx);
@@ -721,7 +723,7 @@ impl SettingsWindow {
         rows.push(
             controls::segmented(
                 self.meta(ControlId::PreviewScope, cx),
-                &["Defaults", "Folder", "Path Rule"],
+                &["All folders", "One folder", "Path rule"],
                 self.preview_scope_index(),
                 self.style(ControlId::PreviewScope, window, theme),
                 scope_select,
@@ -731,9 +733,7 @@ impl SettingsWindow {
         );
 
         match self.preview_scope {
-            PreviewScope::Defaults => {
-                rows.push(muted_line("Every folder without a folder or rule override.", theme));
-            }
+            PreviewScope::Defaults => {}
             PreviewScope::Folder => {
                 let folder_text = self.preview_folder.as_ref().map_or_else(
                     || "No folder selected.".to_owned(),
@@ -863,6 +863,11 @@ impl SettingsWindow {
             }
         }
 
+        let scope_card = div().w_full().flex().flex_col().gap(px(10.)).children(rows).into_any_element();
+        let mut rows: Vec<gpui::AnyElement> = vec![muted_line(
+            &ControlId::PreviewList.description(cx).map(|text| text.to_string()).unwrap_or_default(),
+            theme,
+        )];
         if self.target_ready(cx) {
             let mut list_rows: Vec<gpui::AnyElement> = Vec::new();
             for (index, id) in list.ids.iter().enumerate() {
@@ -931,21 +936,7 @@ impl SettingsWindow {
                 } else {
                     list_rows
                 });
-            rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(color(theme.role("fg-muted")))
-                            .child("Providers"),
-                    )
-                    .child(list_container)
-                    .into_any_element(),
-            );
+            rows.push(list_container.into_any_element());
             let up = controls::button(
                 ControlId::PreviewMoveUp.key(),
                 "Move Up",
@@ -1043,25 +1034,8 @@ impl SettingsWindow {
                 .into_any_element(),
         );
 
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(color(theme.role("fg")))
-                    .child("Preview providers"),
-            )
-            .child(
-                div().text_size(px(11.)).text_color(color(theme.role("fg-muted"))).child(
-                    "Ordered lists at the Defaults, Folder and Path Rule layers; the first matching provider runs.",
-                ),
-            )
-            .children(rows)
-            .into_any_element()
+        let providers_card = div().w_full().flex().flex_col().gap(px(8.)).children(rows).into_any_element();
+        (scope_card, providers_card)
     }
 }
 
