@@ -462,6 +462,8 @@ pub struct Pane {
     size_enabled: bool,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
+    /// Bumped whenever `status` is set, so an old expiry timer cannot clear a newer one.
+    status_generation: u64,
     renaming: Option<Renaming>,
     /// Start renaming this item once it appears (a new folder).
     rename_when_present: Option<PathBuf>,
@@ -634,6 +636,7 @@ impl Pane {
             size_enabled: cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible,
             strip_scroll: ScrollHandle::new(),
             status: None,
+            status_generation: 0,
             renaming: None,
             rename_when_present: None,
             bench: bench.then(|| Bench {
@@ -2521,6 +2524,18 @@ impl Pane {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         if let Err(e) = crate::effects::effects(cx).open_path(&path) {
             self.status = Some(format!("Can't open “{name}”: {e}").into());
+            self.status_generation += 1;
+            let generation = self.status_generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::operations::ERROR_LIFETIME).await;
+                this.update(cx, |this, cx| {
+                    if this.status_generation == generation && this.status.take().is_some() {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
             cx.notify();
         }
     }

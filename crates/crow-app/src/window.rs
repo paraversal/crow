@@ -1904,6 +1904,8 @@ impl CrowWindow {
                 .filter(|(_, is_error)| *is_error)
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
+        // A click on the pill hides that error until a different one shows.
+        let error = error.filter(|error| ops.dismissed_error.as_ref() != Some(&error.text));
         // A pane's load error names its folder; a newline there reaches GPUI's shaping.
         let error = error.map(|error| BarError {
             text: crate::style::display_text(&error.text).into_owned().into(),

@@ -4035,6 +4035,47 @@ fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn bar_error_expires_and_a_click_dismisses_it(cx: &mut TestAppContext) {
+    let root = fixture("bar-error-dismiss");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::operations::message("Couldn't copy “a”: disk full", true, cx));
+    assert!(bar_state(&view, &mut cx).error.is_some(), "an error shows at once");
+
+    // Left alone, it goes after ERROR_LIFETIME; the bar gets its hints back.
+    cx.executor().advance_clock(crate::operations::ERROR_LIFETIME - std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_some(), "still readable before the lifetime is up");
+    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_none(), "the error expired");
+
+    // A click dismisses sooner, and a newer error shows again.
+    cx.update(|window, cx| {
+        crate::operations::message("Couldn't move “b”: read-only", true, cx);
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let pill = cx.debug_bounds("bar-error").expect("the pill is laid out");
+    cx.simulate_click(pill.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_none(), "a click dismissed it");
+    assert!(cx.debug_bounds("bar-error").is_none());
+    cx.update(|_, cx| crate::operations::message("Couldn't move “c”: read-only", true, cx));
+    assert!(bar_state(&view, &mut cx).error.is_some(), "the next error is not swallowed");
+}
+
+#[gpui::test]
+fn open_button_does_not_dismiss_the_config_error(cx: &mut TestAppContext) {
+    let root = fixture("bar-error-open-keeps");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+    let bounds = cx.debug_bounds("bar-error-open").expect("Open");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(bar_state(&view, &mut cx).error.is_some(), "Open leaves the error in place");
+}
+
+#[gpui::test]
 fn file_effects_are_recorded_not_run(cx: &mut TestAppContext) {
     use crate::effects::Call;
     let root = fixture("effects-file");
@@ -20686,4 +20727,20 @@ fn vim_yy_dd_p_u_and_ctrl_r_copy_cut_paste_undo_and_redo(cx: &mut TestAppContext
     assert!(cut, "dd cuts");
     assert_eq!(&*paths, [root.join("alpha")]);
     assert!(root.join("alpha").exists(), "dd deletes nothing");
+}
+
+#[gpui::test]
+fn switching_views_with_nothing_selected_selects_nothing(cx: &mut TestAppContext) {
+    let root = fixture("view-switch-empty");
+    let (view, mut cx) = open_sized(cx, &root, 1100., 700.);
+    pane(&view, &cx).update(&mut cx, |p, cx| {
+        p.clear_selection(cx);
+    });
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx), None, "cleared");
+    for keys in ["cmd-1", "cmd-3", "cmd-4", "cmd-2", "cmd-4", "cmd-1", "cmd-3", "cmd-2"] {
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx), None, "after {keys}");
+    }
 }
