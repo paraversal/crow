@@ -28,6 +28,10 @@ impl Trash for FolderTrash {
     }
 }
 
+/// `FORCE_CROSS_DEVICE` is one process-wide flag; the tests that raise it take this
+/// lock so one test's reset cannot land in the middle of another's run.
+static CROSS_DEVICE: Mutex<()> = Mutex::new(());
+
 struct Fixture {
     root: PathBuf,
     trash: FolderTrash,
@@ -141,6 +145,115 @@ fn copy_keeps_contents_and_undo_trashes_the_copies() {
     assert_eq!(f.snapshot(), before);
     undo(&redo, &f.trash).expect("redo");
     assert_eq!(f.snapshot(), after);
+}
+
+/// Counts how many times the Trash interface is used.
+struct CountingTrash {
+    inner: FolderTrash,
+    calls: AtomicU64,
+}
+
+impl Trash for CountingTrash {
+    fn trash(&self, path: &Path) -> io::Result<PathBuf> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.trash(path)
+    }
+}
+
+#[test]
+fn redoing_an_undone_trash_goes_through_the_trash_again() {
+    let f = Fixture::new("redo-trash");
+    f.file("t.txt", "keep");
+    let before = f.snapshot();
+    let trash = CountingTrash { inner: FolderTrash(f.root.join(".trash")), calls: AtomicU64::new(0) };
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
+    ok(&out);
+    let restored = undo(&out.record, &trash).expect("undo");
+    assert_eq!(f.snapshot(), before);
+    assert_eq!(trash.calls.load(Ordering::Relaxed), 0, "putting back is not a trash call");
+    let redone = undo(&restored, &trash).expect("redo");
+    assert_eq!(trash.calls.load(Ordering::Relaxed), 1, "redo trashes through the Trash, not a raw rename");
+    assert!(!f.path("t.txt").exists());
+    assert!(matches!(redone.steps.as_slice(), [Step::Trashed { original, .. }] if *original == f.path("t.txt")));
+    // And the redo is undoable again.
+    undo(&redone, &trash).expect("undo the redo");
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn redoing_a_trash_works_when_its_old_trash_name_was_reused() {
+    let f = Fixture::new("redo-trash-reused");
+    f.file("t.txt", "mine");
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
+    ok(&out);
+    let old_name = match out.record.steps.as_slice() {
+        [Step::Trashed { trashed, .. }] => trashed.clone(),
+        other => panic!("{other:?}"),
+    };
+    let restored = undo(&out.record, &f.trash).expect("undo");
+    // A different item takes the vacated name inside the Trash.
+    std::fs::write(&old_name, "someone else").unwrap();
+    let redone = undo(&restored, &f.trash).expect("redo");
+    assert!(!f.path("t.txt").exists());
+    assert_eq!(std::fs::read_to_string(&old_name).unwrap(), "someone else", "the other item is untouched");
+    match redone.steps.as_slice() {
+        [Step::Trashed { trashed, .. }] => {
+            assert_ne!(*trashed, old_name);
+            assert_eq!(std::fs::read_to_string(trashed).unwrap(), "mine");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn redoing_a_trash_of_files_and_folders_round_trips_every_time() {
+    let f = Fixture::new("redo-trash-many");
+    f.file("a.txt", "a");
+    f.file("tree/deep/b.txt", "b");
+    f.file("c.txt", "c");
+    let before = f.snapshot();
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("a.txt"), f.path("tree"), f.path("c.txt")]) });
+    ok(&out);
+    let mut record = out.record;
+    for round in 0..3 {
+        let restored = undo(&record, &f.trash).unwrap_or_else(|e| panic!("round {round}: undo: {e}"));
+        assert_eq!(f.snapshot(), before, "round {round}: everything is back");
+        assert_eq!(restored.results().len(), 3, "round {round}: the restored items are selected");
+        record = undo(&restored, &f.trash).unwrap_or_else(|e| panic!("round {round}: redo: {e}"));
+        assert!(f.snapshot().is_empty(), "round {round}: all three are trashed again: {:?}", f.snapshot());
+    }
+}
+
+#[test]
+fn redoing_an_undone_replace_trashes_the_old_item_again_and_undoes() {
+    let f = Fixture::new("redo-replace");
+    f.file("new/a.txt", "new");
+    f.file("dest/a.txt", "old");
+    let target = f.path("dest/a.txt");
+    let request = Request::Copy { paths: paths(vec![f.path("new/a.txt")]), into: f.path("dest") };
+    let before = f.snapshot();
+    let replace = f.run_with(request, &HashMap::from([(target.clone(), Resolution::Replace)]));
+    ok(&replace);
+    let after = f.snapshot();
+    let restored = undo(&replace.record, &f.trash).expect("undo");
+    assert_eq!(f.snapshot(), before);
+    let redone = undo(&restored, &f.trash).expect("redo");
+    assert_eq!(f.snapshot(), after, "the replacement is back and the old file is trashed");
+    undo(&redone, &f.trash).expect("undo the redo");
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn redoing_a_trash_whose_item_is_gone_fails_and_changes_nothing() {
+    let f = Fixture::new("redo-trash-gone");
+    f.file("t.txt", "x");
+    let out = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
+    ok(&out);
+    let restored = undo(&out.record, &f.trash).expect("undo");
+    std::fs::remove_file(f.path("t.txt")).unwrap();
+    let result = undo(&restored, &f.trash);
+    assert!(matches!(&result, Err(OpError::NotFound(path)) if *path == f.path("t.txt")), "{result:?}");
+    assert_eq!(std::fs::read_dir(f.path(".trash")).unwrap().count(), 0, "nothing was trashed");
 }
 
 #[test]
@@ -450,6 +563,7 @@ fn moving_across_volumes_copies_then_removes_the_source() {
     f.file("src/tree/a.txt", "a");
     f.file("src/tree/sub/b.txt", "b");
     let before = f.snapshot();
+    let _serial = CROSS_DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     FORCE_CROSS_DEVICE.store(true, Ordering::Relaxed);
     let out = f.run(Request::Move { paths: paths(vec![f.path("src/tree")]), into: f.dir("dest") });
     let undone = undo(&out.record, &f.trash);
@@ -1854,6 +1968,7 @@ fn undoing_a_move_across_volumes_reports_a_source_that_cannot_be_removed() {
         steps: vec![Step::Moved { from: f.path("src/x.txt"), to: f.path("dest/x.txt") }],
     };
     std::fs::set_permissions(f.path("dest"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let _serial = CROSS_DEVICE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     FORCE_CROSS_DEVICE.store(true, Ordering::Relaxed);
     let result = undo(&record, &f.trash);
     FORCE_CROSS_DEVICE.store(false, Ordering::Relaxed);
