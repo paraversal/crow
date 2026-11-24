@@ -610,7 +610,7 @@ impl CrowWindow {
     pub(super) fn toggle_state(&self, id: palette::CommandId, cx: &App) -> Option<bool> {
         match id {
             palette::CommandId::ToggleHiddenFiles => Some(self.show_hidden),
-            palette::CommandId::ToggleActivity => Some(self.show_activity),
+            palette::CommandId::ToggleActivity => Some(self.activity_open(cx)),
             palette::CommandId::TogglePreview => Some(cx.global::<Ui>().settings.show_preview),
             palette::CommandId::ToggleSidebar => Some(!cx.global::<Ui>().sidebar_hidden),
             _ => None,

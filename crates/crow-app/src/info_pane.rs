@@ -35,6 +35,7 @@ pub const TAG_SCAN_CAP: usize = 500;
 pub enum InfoTab {
     Preview,
     Info,
+    Activity,
     GitDiff,
 }
 
@@ -678,7 +679,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
     };
     let git = crate::git::provider_enabled(cx);
-    let count = if git { 3 } else { 2 };
+    let count = if git { 4 } else { 3 };
     let tab_bounds = underline.map(|_| Rc::new(RefCell::new(Vec::<Bounds<gpui::Pixels>>::new())));
     let strip = div()
         .when_some(tab_bounds.clone(), |strip, recorded| {
@@ -690,7 +691,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .id("info-tabs")
         .debug_selector(|| "info-tabs".into())
         .role(Role::TabList)
-        .aria_label("Preview and Info")
+        .aria_label("Preview, Info and Activity")
         .h(px(TAB_STRIP_HEIGHT))
         .relative()
         .flex_none()
@@ -704,6 +705,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .border_color(crate::style::hairline(theme))
         .child(tab("info-tab-preview", "Preview", InfoTab::Preview))
         .child(tab("info-tab-info", "Info", InfoTab::Info))
+        .child(tab("info-tab-activity", "Activity", InfoTab::Activity))
         .when(git, |tabs| tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff)))
         .child(div().flex_1().min_w_0().flex().items_center().justify_end().child(crate::chrome::collapse_chevron(
             "hide-right-sidebar",

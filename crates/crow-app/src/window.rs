@@ -255,7 +255,6 @@ pub struct CrowWindow {
     left_slide: Option<PaneSlide>,
     /// Set while a leaving overlay renders: its opacity (1 → 0).
     exit_fade: std::cell::Cell<Option<f32>>,
-    show_activity: bool,
     /// The Activity panel's running row from the last draw, and a finished one fading away.
     activity_last: Option<String>,
     activity_ghost: Option<(String, std::time::Instant)>,
@@ -447,7 +446,6 @@ impl CrowWindow {
             pane_slide: None,
             left_slide: None,
             exit_fade: std::cell::Cell::new(None),
-            show_activity: false,
             activity_last: None,
             activity_ghost: None,
             activity_focus: cx.focus_handle(),
@@ -848,7 +846,7 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// ⌥⌘P: open the right sidebar, or step to its next tab (Preview, Info, then Git Diff when the
+    /// ⌥⌘P: open the right sidebar, or step to its next tab (Preview, Info, Activity, then Git Diff when the
     /// Git package is on) and around again.
     fn cycle_right_sidebar(&mut self, _: &CycleRightSidebar, _: &mut Window, cx: &mut Context<Self>) {
         let info = self.info.clone();
@@ -863,8 +861,9 @@ impl CrowWindow {
                 info.set_tab(
                     match tab {
                         InfoTab::Preview => InfoTab::Info,
-                        InfoTab::Info if git => InfoTab::GitDiff,
-                        InfoTab::Info | InfoTab::GitDiff => InfoTab::Preview,
+                        InfoTab::Info => InfoTab::Activity,
+                        InfoTab::Activity if git => InfoTab::GitDiff,
+                        InfoTab::Activity | InfoTab::GitDiff => InfoTab::Preview,
                     },
                     cx,
                 );
@@ -1710,13 +1709,13 @@ impl CrowWindow {
     }
 
     /// List view's right-hand column (column view shows it as its last column).
-    fn render_preview(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_preview(&self, activity: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let (entry, preview) = {
             let pane = self.pane().read(cx);
             (pane.cursor_entry(cx), pane.preview(cx).cloned())
         };
-        self.render_preview_pane(entry.as_ref(), preview.as_ref(), &theme, cx)
+        self.render_preview_pane(entry.as_ref(), preview.as_ref(), activity, &theme, cx)
     }
 
     /// The 300 px column chrome, shared by the pane and search: a tab strip and
@@ -1725,6 +1724,7 @@ impl CrowWindow {
         &self,
         entry: Option<&Entry>,
         preview: Option<&crate::preview::Preview>,
+        activity: Option<gpui::AnyElement>,
         theme: &crow_theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -1749,6 +1749,7 @@ impl CrowWindow {
                 entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size, cloud))
             }
             InfoTab::Info => self.info.read(cx).label(cx),
+            InfoTab::Activity => "Activity".into(),
             InfoTab::GitDiff => "Git Diff".into(),
         };
         let body = match tab {
@@ -1762,6 +1763,7 @@ impl CrowWindow {
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
+            InfoTab::Activity => activity.unwrap_or_else(|| div().into_any_element()),
             InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, theme, cx),
         };
         div()
@@ -1991,7 +1993,6 @@ impl CrowWindow {
             || self.git_review.is_some()
             || self.column_picker.is_some()
             || self.tag_picker.is_some()
-            || self.show_activity
         {
             return None;
         }
@@ -2465,7 +2466,6 @@ impl CrowWindow {
             || self.picker.is_some()
             || self.palette.is_some()
             || self.search.is_some()
-            || self.show_activity
             || cx.has_active_drag()
             || self.pane().read(cx).is_renaming()
     }
@@ -3741,11 +3741,21 @@ impl Render for CrowWindow {
         }
         // While a hide is still moving, the column is drawn though the setting is off.
         let sliding_out = slide.is_some() && !show_preview;
+        // Activity needs no item, so it shows in every view, with or without a search.
+        let activity_tab = (show_preview || sliding_out) && self.info.read(cx).tab() == InfoTab::Activity;
+        let activity_body = activity_tab.then(|| self.render_activity(window, cx).into_any_element());
         let preview: Option<gpui::AnyElement> = if !show_preview && !sliding_out {
             None
         } else if active_search.is_some() {
-            if narrow && !explicit { None } else { search_preview }.map(|(entry, preview)| {
-                let column = self.render_preview_pane(Some(&entry), preview.as_ref(), &theme, cx);
+            let target = if narrow && !explicit {
+                None
+            } else if activity_tab {
+                Some((None, None))
+            } else {
+                search_preview.map(|(entry, preview)| (Some(entry), preview))
+            };
+            target.map(|(entry, preview)| {
+                let column = self.render_preview_pane(entry.as_ref(), preview.as_ref(), activity_body, &theme, cx);
                 if narrow {
                     // Search has no narrow mode: float the column over the results
                     // instead of squeezing their scope row and header into a sliver.
@@ -3754,8 +3764,8 @@ impl Render for CrowWindow {
                     column.into_any_element()
                 }
             })
-        } else if list_view {
-            Some(self.render_preview(cx).into_any_element())
+        } else if list_view || activity_tab {
+            Some(self.render_preview(activity_body, cx).into_any_element())
         } else {
             None
         };
@@ -3827,7 +3837,6 @@ impl Render for CrowWindow {
             }};
         }
         let sheet = lend!(sheet, self.render_sheet(window, cx));
-        let activity = self.show_activity.then(|| self.render_activity(window, cx));
         let picker = lend!(picker, self.render_picker(cx));
         let git_review = lend!(git_review, self.render_git_review(window, cx));
         let column_picker = lend!(column_picker, self.render_column_picker(window, cx));
@@ -4031,7 +4040,6 @@ impl Render for CrowWindow {
             .children(tip)
             .children(behind)
             .children(sheet)
-            .children(activity)
             .children(picker)
             .children(git_review)
             .children(column_picker)
@@ -4122,7 +4130,7 @@ impl CrowWindow {
             out.extend((0..2).map(|index| format!("git-review-scope-{index}")));
             out.extend((0..6).map(|index| format!("git-review-row-{index}")));
         }
-        if self.show_activity {
+        if self.activity_open(cx) {
             out.extend(["activity", "activity-empty-trash"].map(str::to_owned));
             let mut controls: Vec<_> = self.activity_controls.keys().map(|(name, id)| format!("{name}-{id}")).collect();
             controls.sort();

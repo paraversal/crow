@@ -3902,8 +3902,59 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
     assert!(cancel.right() <= transient.right(), "the cancel button fits at the 760 point minimum width");
     let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
+    assert!(view.read_with(&cx, |this, cx| this.activity_open(cx)), "the affordance opens Activity");
     clear_running(&mut cx);
+}
+
+/// Activity is a tab of the right sidebar, so it shows in every view and ⌥⌘L toggles it.
+#[gpui::test]
+fn activity_is_a_right_sidebar_tab_in_every_view(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("activity-tab");
+    let (view, mut cx) = open(cx, &root);
+    let tab = |view: &Entity<CrowWindow>, cx: &VisualTestContext| view.read_with(cx, |w, cx| w.info.read(cx).tab());
+    for (keys, name) in [("cmd-1", "Icons"), ("cmd-2", "List"), ("cmd-3", "Columns"), ("cmd-4", "Gallery")] {
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L opens Activity");
+        assert_eq!(tab(&view, &cx), InfoTab::Activity, "{name}");
+        assert!(cx.debug_bounds("activity").is_some(), "{name}: the list is drawn in the sidebar");
+        assert!(cx.debug_bounds("info-tab-activity").is_some(), "{name}: the tab is in the strip");
+        let found = violations(&view, &mut cx);
+        assert!(found.is_empty(), "{name}: {found:?}");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: Esc leaves it open and returns to the list");
+        cx.simulate_keystrokes("alt-cmd-l");
+        settle(&view, &mut cx);
+        assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "{name}: ⌥⌘L again closes it");
+    }
+}
+
+#[gpui::test]
+fn activity_tab_joins_the_cycle_and_the_palette(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("activity-cycle");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-2");
+    // The first press opens a hidden column; each later one steps to the next tab.
+    let presses = if view.read_with(&cx, |w, cx| w.info.read(cx).visible()) { 2 } else { 3 };
+    for _ in 0..presses {
+        cx.simulate_keystrokes("alt-cmd-p");
+    }
+    settle(&view, &mut cx);
+    let tab = view.read_with(&cx, |w, cx| w.info.read(cx).tab());
+    assert_eq!(tab, InfoTab::Activity, "Preview, Info, then Activity");
+    let tab_button = cx.debug_bounds("info-tab-preview").expect("the strip is drawn");
+    cx.simulate_click(tab_button.center(), gpui::Modifiers::default());
+    assert!(!view.read_with(&cx, |w, cx| w.activity_open(cx)), "clicking Preview leaves Activity");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">activity");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "the palette opens it");
 }
 
 #[gpui::test]
@@ -7031,9 +7082,9 @@ fn menu_items_dispatch(cx: &mut TestAppContext) {
     assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "Go to opens the palette");
     cx.simulate_keystrokes("escape");
 
-    let activity = view.read_with(&cx, |w, _| w.show_activity);
+    let activity = view.read_with(&cx, |w, cx| w.activity_open(cx));
     dispatch_menu("View", "Show Activity", &mut cx);
-    assert_ne!(view.read_with(&cx, |w, _| w.show_activity), activity, "Show Activity flips");
+    assert_ne!(view.read_with(&cx, |w, cx| w.activity_open(cx)), activity, "Show Activity flips");
 
     dispatch_menu("File", "New Tab", &mut cx);
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "New Tab opens a tab");
@@ -11920,7 +11971,10 @@ fn transfers_queue_in_submission_order_and_activity_is_app_wide(cx: &mut TestApp
     let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
     assert_eq!(cx_b.read(|cx| cx.global::<Operations>().queue.len()), 1, "the queue is app-wide");
     view_b.update(&mut cx_b, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx_b.update(|window, cx| {
@@ -11983,7 +12037,10 @@ fn closing_the_origin_window_rehosts_a_conflict(cx: &mut TestAppContext) {
     assert!(!view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))));
     assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_some()), "the job is still waiting");
     view_b.update(&mut cx_b, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx_b.update(|window, cx| {
@@ -12141,7 +12198,10 @@ fn a_paused_head_keeps_the_queue_and_activity_actions_follow_it(cx: &mut TestApp
     );
 
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -12472,7 +12532,10 @@ fn a_cancelled_terminal_keeps_its_committed_prefix_undoable(cx: &mut TestAppCont
     assert!(cx.read(|cx| cx.global::<Operations>().log[0].cancelled));
 
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -15754,7 +15817,7 @@ fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext
     assert!(!root.join("line\nbreak.txt").exists(), "the rename applied");
     cx.simulate_keystrokes("alt-cmd-l");
     settle(&view, &mut cx);
-    assert!(view.read_with(&cx, |w, _| w.show_activity), "the activity sheet is open");
+    assert!(view.read_with(&cx, |w, cx| w.activity_open(cx)), "the activity sheet is open");
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
@@ -18733,7 +18796,10 @@ fn empty_trash_shows_in_activity_while_running_and_after(cx: &mut TestAppContext
     // The engine slot is claimed while Empty Trash runs; hold it to look.
     cx.update(|_, cx| cx.global_mut::<Operations>().maintenance = Some(crate::operations::Maintenance::EmptyTrash));
     view.update(&mut cx, |this, cx| {
-        this.show_activity = true;
+        this.info.update(cx, |info, cx| {
+            info.set_visible(true, cx);
+            info.set_tab(crate::info_pane::InfoTab::Activity, cx);
+        });
         cx.notify();
     });
     cx.run_until_parked();

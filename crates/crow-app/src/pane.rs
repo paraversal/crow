@@ -5773,12 +5773,16 @@ impl Pane {
         // the rest of the strip when the columns leave room, and keeps
         // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
         let visible = self.info.read(cx).visible();
-        if visible && let Some((entry, items)) = self.preview_parts(cx) {
+        if visible
+            && self.info.read(cx).tab() != InfoTab::Activity
+            && let Some((entry, items)) = self.preview_parts(cx)
+        {
             let icons = self.icon_resolver(self.focused, cx);
             let tab = self.info.read(cx).tab();
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
                 InfoTab::Info => self.info.read(cx).label(cx),
+                InfoTab::Activity => "Activity".into(),
                 InfoTab::GitDiff => "Git Diff".into(),
             };
             let body = match tab {
@@ -5812,6 +5816,8 @@ impl Pane {
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
+                // The window draws Activity as the right column, whatever the view.
+                InfoTab::Activity => div().into_any_element(),
                 InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, &theme, cx),
             };
             let (preferred_width, splitter_focus) = {
